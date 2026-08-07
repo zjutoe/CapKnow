@@ -31,7 +31,12 @@ def _answer_bit(
         raise ValueError(
             "Response signature length must be one for adaptive policy evaluation."
         )
-    return int(signature[0])
+    value = signature[0]
+    if value not in (0, 1):
+        raise ValueError(
+            "Adaptive policies require binary response signatures: each response must be 0 or 1."
+        )
+    return int(value)
 
 
 def _available_questions(task_ids: Sequence[str], asked: set[str]) -> list[str]:

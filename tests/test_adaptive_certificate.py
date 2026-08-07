@@ -8,12 +8,16 @@ from capability_certificate_lab.certificate import (
     tree_signature,
     validate_adaptive_certificate,
 )
+from capability_certificate_lab.knowledge_space.state import KnowledgeState
 from capability_certificate_lab.certificate.policies import select_entropy_reduction_question
 from capability_certificate_lab.generators import (
     generate_chain_world,
     generate_tree_world,
     generate_unstructured_world,
 )
+from capability_certificate_lab.validation.identifiability.core import Signature
+from collections.abc import Sequence
+import pytest
 
 
 def _is_internal(node: DecisionNode) -> bool:
@@ -61,3 +65,32 @@ def test_random_policy_is_reproducible_with_seed():
     run_b = solve_adaptive_certificate(space, policy="random", seed=42)
 
     assert tree_signature(run_a.root) == tree_signature(run_b.root)
+
+
+def _collapsed_signature(_: KnowledgeState, task_ids: Sequence[str]) -> Signature:
+    return (1,) if task_ids else ()
+
+
+def _non_binary_signature(_: KnowledgeState, task_ids: Sequence[str]) -> Signature:
+    return (2,) if task_ids else ()
+
+
+def test_non_identifiable_signature_results_in_invalid_adaptive_certificate():
+    space = generate_unstructured_world(["Q0", "Q1"])
+    result = solve_adaptive_certificate(space, policy="entropy", response_signature_fn=_collapsed_signature)
+
+    assert not result.valid
+    assert result.worst_case_depth == 0
+    assert result.average_depth == 0.0
+    assert not validate_adaptive_certificate(
+        result.root,
+        space,
+        response_signature_fn=_collapsed_signature,
+    )
+
+
+def test_non_binary_signature_is_rejected():
+    space = generate_chain_world(["A", "B", "C"])
+
+    with pytest.raises(ValueError, match="binary response signatures"):
+        solve_adaptive_certificate(space, response_signature_fn=_non_binary_signature)

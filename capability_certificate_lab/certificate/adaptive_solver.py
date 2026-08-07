@@ -23,7 +23,12 @@ def _answer_bit(
         raise ValueError(
             "Response signature length must be one for adaptive certificate evaluation."
         )
-    return int(signature[0])
+    value = signature[0]
+    if value not in (0, 1):
+        raise ValueError(
+            "Adaptive policies require binary response signatures: each response must be 0 or 1."
+        )
+    return int(value)
 
 
 def _split_states(
@@ -180,17 +185,22 @@ def solve_adaptive_certificate(
 
     node_count, state_cover_count, depth_sum, worst_case_depth = _tree_metrics(root, depth=0)
     average_depth = depth_sum / state_cover_count if state_cover_count else 0.0
+    valid = validate_adaptive_certificate(
+        root,
+        knowledge_space,
+        response_signature_fn=response_signature_fn,
+    )
+
+    if not valid:
+        worst_case_depth = 0
+        average_depth = 0.0
 
     return AdaptiveCertificate(
         root=root,
         worst_case_depth=worst_case_depth,
         average_depth=average_depth,
         node_count=node_count,
-        valid=validate_adaptive_certificate(
-            root,
-            knowledge_space,
-            response_signature_fn=response_signature_fn,
-        ),
+        valid=valid,
         method="adaptive",
         policy=policy_name,
         seed=seed,
@@ -226,7 +236,11 @@ def validate_adaptive_certificate(
             if node is None:
                 return False
 
-        if target_id not in (node.candidate_state_ids or ()):
+        candidate_state_ids = set(node.candidate_state_ids or ())
+        if len(candidate_state_ids) != 1:
+            return False
+
+        if target_id not in candidate_state_ids:
             return False
 
     return True
