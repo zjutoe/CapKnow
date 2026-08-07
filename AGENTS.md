@@ -16,6 +16,8 @@
 
 - High-risk changes include simulators, observation semantics, task distributions, train/calibration/evaluation splits, metrics, statistical aggregation, acceptance logic, and result interpretation.
 - Any high-risk change must trigger an independent review agent using the same model family as the main thread, with no shared context between the review agent and main thread.
+- Before committing non-trivial changes, spawn an independent strict read-only review agent by default with `fork_context=false`.
+- The review handoff should include only: intended diff, relevant artifacts, acceptance criteria, protocol constraints, and verification already run.
 - For each high-risk change handoff, include: concise change summary, reproducible command(s), key touched files, verification outputs, and bound hashes/artifact IDs.
 - Review protocol/implementation consistency, leakage, objective/inference consistency, statistical independence, clustered aggregation, metric semantics, acceptance logic, artifact provenance, and theoretical overclaiming.
 - Bind exact artifact hashes before reviewing or accepting experiment outputs that may later support a scientific claim.
