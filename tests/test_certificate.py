@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from capability_certificate_lab.certificate import (
     solve_exact_certificate,
     solve_greedy_certificate,
@@ -14,7 +15,11 @@ from collections.abc import Sequence
 
 
 def _collapsed_signature(state: KnowledgeState, task_ids: Sequence[str]) -> tuple[int, ...]:
-    return (0,) if len(task_ids) >= 2 else ()
+    return (0,) * len(task_ids)
+
+
+def _too_short_signature(state: KnowledgeState, task_ids: Sequence[str]) -> tuple[int, ...]:
+    return (0,)
 
 
 def test_chain_exact_certificate_is_minimal():
@@ -67,6 +72,13 @@ def test_non_identifiable_input_is_rejected():
 
     assert not result.valid
     assert result.certificate_size == 0
+
+
+def test_mismatched_signature_length_is_rejected():
+    space = generate_chain_world(["A", "B", "C"])
+
+    with pytest.raises(ValueError, match="Response signature length"):
+        solve_exact_certificate(space, response_signature_fn=_too_short_signature)
 
 
 def test_greedy_and_random_are_valid_but_not_better_than_exact():

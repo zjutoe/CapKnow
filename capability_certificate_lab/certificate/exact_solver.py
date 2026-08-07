@@ -19,7 +19,15 @@ def _pair_difference_task_sets(
     response_signature_fn: Callable[[KnowledgeState, Sequence[str]], Signature],
 ) -> tuple[list[FrozenSet[str]], bool]:
     num_states = len(states)
-    signatures = [response_signature_fn(state, task_ids) for state in states]
+    signatures: list[Signature] = []
+    for state in states:
+        signature = response_signature_fn(state, task_ids)
+        if len(signature) != len(task_ids):
+            raise ValueError(
+                "Response signature length must match task count for exact certificate solver."
+            )
+        signatures.append(signature)
+
     pair_differences: list[FrozenSet[str]] = []
     for i in range(num_states):
         for j in range(i + 1, num_states):

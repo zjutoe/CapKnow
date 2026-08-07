@@ -30,5 +30,12 @@ def validate_certificate(
             raise ValueError(f"Task '{task_id}' not in knowledge space")
 
     selected_tasks = list(certificate)
-    signatures = [response_signature_fn(state, selected_tasks) for state in states]
+    signatures: list[Signature] = []
+    for state in states:
+        signature = response_signature_fn(state, selected_tasks)
+        if len(signature) != len(selected_tasks):
+            raise ValueError(
+                "Response signature length must match selected task count for certificate validation."
+            )
+        signatures.append(signature)
     return len(set(signatures)) == len(states)
