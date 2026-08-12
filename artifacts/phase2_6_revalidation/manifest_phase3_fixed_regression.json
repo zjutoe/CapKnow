@@ -1,0 +1,29 @@
+{
+  "command": "PYTHONPATH=. python scripts/revalidation_phase3_fixed.py",
+  "config": {
+    "random_seed": 123,
+    "worlds": [
+      "chain",
+      "tree",
+      "unstructured"
+    ]
+  },
+  "outputs": {
+    "artifacts/phase2_6_revalidation/phase3_fixed_regression.json": "c4a097fa4bf886cfcb3d7f13263844823583d2bfdd8081f16ea2ef3c483b7b72"
+  },
+  "phase": "phase3_fixed_regression",
+  "python_version": "3.13.9",
+  "script": "scripts/revalidation_phase3_fixed.py",
+  "source": {
+    "baseline_commit": "1648c8f201936e56f7eb0544b39c45cf0f431c9b",
+    "clean_worktree_before_run": true,
+    "git_head": "dc6a837ac20aad967da76a69d50c0b5b2bfe7379",
+    "git_status_porcelain_before_run": "",
+    "handoff_paths": [
+      "Capability_Certificate_Task_Handoff_007_Correctness_Repair_and_Revalidation.md",
+      "Capability_Certificate_Task_Handoff_008_Second_Review_Repair.md"
+    ],
+    "source_binding": "git_commit",
+    "tracked_source_note": "Git commit is the source identity; checksums bind outputs only."
+  }
+}

@@ -1,0 +1,217 @@
+{
+  "command": "PYTHONPATH=. python scripts/revalidation_phase6_dsl.py",
+  "config": {
+    "acceptance_oracles": {
+      "certificate_transfer_invariants": {
+        "direct_certificate_size": 7,
+        "direct_selected_tasks": [
+          "ADD",
+          "COMPARE",
+          "MEMORY",
+          "SEARCH",
+          "FILTER",
+          "LOOP",
+          "CONDITION"
+        ],
+        "direct_state_count": 128,
+        "direct_valid": true,
+        "dsl_certificate_size": 7,
+        "dsl_selected_tasks": [
+          "ADD",
+          "COMPARE",
+          "MEMORY",
+          "SEARCH",
+          "FILTER",
+          "LOOP",
+          "CONDITION"
+        ],
+        "dsl_state_count": 128,
+        "dsl_valid": true,
+        "same_certificate_cost": true,
+        "same_state_count": true
+      },
+      "composite_execution": {
+        "program": "SEQ[MEMORY,SEARCH]",
+        "required_primitives": [
+          "MEMORY",
+          "SEARCH"
+        ],
+        "result_without_composite_label": {
+          "output_type": "bool",
+          "value": true
+        },
+        "step_results_without_composite_label": [
+          {
+            "output_type": "memory_context",
+            "program": "MEMORY",
+            "value": {
+              "items": [
+                "A",
+                "B"
+              ],
+              "key": "needle",
+              "memory": {
+                "needle": "A"
+              },
+              "target": "A",
+              "value": "A"
+            }
+          },
+          {
+            "output_type": "bool",
+            "program": "SEARCH",
+            "value": true
+          }
+        ]
+      },
+      "held_out_composition": {
+        "input_context": {
+          "items": [
+            "keep",
+            "drop",
+            "keep"
+          ],
+          "target": "keep"
+        },
+        "present_in_default_rules": false,
+        "program": "SEQ[FILTER,CONDITION]",
+        "required_primitives": [
+          "CONDITION",
+          "FILTER"
+        ],
+        "result_without_composite_label": {
+          "output_type": "bool",
+          "value": true
+        },
+        "rule": {
+          "left": "FILTER",
+          "result": "FILTER_CHECK",
+          "right": "CONDITION"
+        },
+        "step_results_without_composite_label": [
+          {
+            "output_type": "list",
+            "program": "FILTER",
+            "value": [
+              "keep",
+              "keep"
+            ]
+          },
+          {
+            "output_type": "bool",
+            "program": "CONDITION",
+            "value": true
+          }
+        ]
+      },
+      "primitive_execution": {
+        "ADD": {
+          "output_type": "number",
+          "value": 5
+        },
+        "COMPARE": {
+          "output_type": "bool",
+          "value": true
+        },
+        "CONDITION": {
+          "output_type": "bool",
+          "value": false
+        },
+        "FILTER": {
+          "output_type": "list",
+          "value": [
+            "keep",
+            "keep"
+          ]
+        },
+        "LOOP": {
+          "output_type": "loop_value",
+          "value": "unchanged"
+        },
+        "MEMORY": {
+          "output_type": "memory_context",
+          "value": {
+            "items": [
+              42
+            ],
+            "key": "answer",
+            "memory": {
+              "answer": 42
+            },
+            "target": 42,
+            "value": 42
+          }
+        },
+        "SEARCH": {
+          "output_type": "bool",
+          "value": true
+        }
+      },
+      "reproducibility": {
+        "canonical_sha256": "6ad9598c205cc3fe9a3b7e864a2c998e9f402c8da0c67a7eff0c9b67504e11d0",
+        "equal": true,
+        "first": [
+          0,
+          0,
+          1,
+          1,
+          0,
+          0,
+          0,
+          1,
+          0
+        ],
+        "second": [
+          0,
+          0,
+          1,
+          1,
+          0,
+          0,
+          0,
+          1,
+          0
+        ]
+      }
+    },
+    "default_composition_rules": [
+      {
+        "left": "MEMORY",
+        "result": "RETRIEVAL",
+        "right": "SEARCH"
+      },
+      {
+        "left": "RETRIEVAL",
+        "result": "PLANNING",
+        "right": "CONDITION"
+      }
+    ],
+    "held_out_input_context": {
+      "items": [
+        "keep",
+        "drop",
+        "keep"
+      ],
+      "target": "keep"
+    },
+    "held_out_rule": "FILTER+CONDITION->FILTER_CHECK"
+  },
+  "outputs": {
+    "artifacts/phase2_6_revalidation/phase6_dsl.json": "aa6a5fea5024a3486e7f432a9d2a29a090f76734ecb9d5acea922232e14f94d2"
+  },
+  "phase": "phase6_dsl",
+  "python_version": "3.13.9",
+  "script": "scripts/revalidation_phase6_dsl.py",
+  "source": {
+    "baseline_commit": "1648c8f201936e56f7eb0544b39c45cf0f431c9b",
+    "clean_worktree_before_run": true,
+    "git_head": "dc6a837ac20aad967da76a69d50c0b5b2bfe7379",
+    "git_status_porcelain_before_run": "",
+    "handoff_paths": [
+      "Capability_Certificate_Task_Handoff_007_Correctness_Repair_and_Revalidation.md",
+      "Capability_Certificate_Task_Handoff_008_Second_Review_Repair.md"
+    ],
+    "source_binding": "git_commit",
+    "tracked_source_note": "Git commit is the source identity; checksums bind outputs only."
+  }
+}
