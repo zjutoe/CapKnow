@@ -2,9 +2,9 @@
 
 ## Current Gate Status
 
-Current gate: `PENDING INDEPENDENT REVIEW`.
+Reviewed package gate: `REJECT`.
 
-Phase 2-6 were rerun from clean committed source revision `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`. The artifacts and hashes below are the current evidence package pending independent strict read-only review.
+Phase 2-6 were rerun from clean committed source revision `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`. The artifacts and hashes below remain the evidence for that frozen source, but a later independent strict read-only review rejected the combined package. Post-review repairs require their own verification, frozen source identity, and independent review.
 
 ## Source Binding
 
@@ -108,4 +108,9 @@ Follow-up strict read-only independent review verdict for the superseded repaire
 - Reviewer specifically checked report provenance, artifact hash consistency, fixed-solver posterior exposure, Phase 5 fixed consistency, Phase 5 zero-noise adaptive stopping/depth/response-count gates, and Phase 6 full `ExecutionResult` and composite intermediate oracles.
 - Reviewer did not rerun tests or experiments; acceptance relies on the recorded verification plus read-only inspection.
 
-Current gate: `PENDING INDEPENDENT REVIEW`.
+Latest strict read-only independent review verdict for source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379` plus evidence commit `4e235ab5baff6c9882100b390f39eeb4bf0ac22f`: `REJECT`.
+
+- Reviewer started with `fork_context=false` and did not rerun tests or experiments.
+- Confirmed findings: reports exposed conflicting current evidence states; conditional execution did not require capabilities from inactive branches; `ADD` and `CONDITION` relied on Python coercion outside the declared DSL contract; exported probabilistic policies accepted boolean attempt counts.
+- Artifact hashes and manifest source bindings were confirmed sound. Phase 2 response-matrix semantics, Phase 3 exhaustive minimal search, Phase 4 adaptive behavior, and Phase 5 posterior and aggregate calculations were also confirmed sound.
+- Current gate remains `REJECT` until the post-review repair is verified, frozen, and independently accepted.

@@ -41,6 +41,9 @@ def test_dsl_primitive_execution_matches_membership():
 
     add = PrimitiveNode(op=get_primitive("ADD"))
     assert execute(add, {"ADD": True}, (2, 3)).value == 5
+    for invalid_pair in ((True, 3), (2, False)):
+        with pytest.raises(InvalidProgramError, match="ADD requires numeric inputs"):
+            execute(add, {"ADD": True}, invalid_pair)
     compare = PrimitiveNode(op=get_primitive("COMPARE"))
     assert execute(compare, {"COMPARE": True}, (5, 5)).value is True
     with pytest.raises(InvalidProgramError, match="requires a two-value input"):
@@ -94,6 +97,22 @@ def test_dsl_composition_execution_uses_semantics():
         {"CONDITION": True, "COMPARE": True, "SEARCH": True},
         condition_input,
     ).value is True
+    inactive_search_input = {**condition_input, "right": 2}
+    with pytest.raises(MissingCapabilityError, match="SEARCH"):
+        execute(
+            cond,
+            {"CONDITION": True, "COMPARE": True},
+            inactive_search_input,
+        )
+
+    condition = PrimitiveNode(op=get_primitive("CONDITION"))
+    assert execute(condition, {"CONDITION": True}, True).value is True
+    assert execute(condition, {"CONDITION": True}, {"condition": False}).value is False
+    assert execute(condition, {"CONDITION": True}, ["match"]).value is True
+    assert execute(condition, {"CONDITION": True}, []).value is False
+    for invalid_input in ("false", {"condition": "false"}, {"other": True}, 1):
+        with pytest.raises(InvalidProgramError, match="CONDITION"):
+            execute(condition, {"CONDITION": True}, invalid_input)
 
 
 def test_dsl_invalid_program_rejected():

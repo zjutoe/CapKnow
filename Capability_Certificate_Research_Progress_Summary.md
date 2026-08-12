@@ -153,16 +153,17 @@ Phase 6 将抽象 capability label 落到确定性的可执行程序。当前 pr
 
 Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非法状态被静默过滤、adaptive tree validator 不完整、平均和最坏成本混淆、Bayesian history 重复计数、DSL 只返回 membership 而不执行具体语义，以及实验脚本缺少可失败的 expected-output oracle。
 
-当前接受的证据包具有以下状态：
+最近一次 clean committed 证据包具有以下状态：
 
-- source snapshot：`fa374cc1bf3e7b31ae442cf91e35467d9cab41f6fdedbca84488cae341bf361a`；
+- source commit：`dc6a837ac20aad967da76a69d50c0b5b2bfe7379`；
+- evidence commit：`4e235ab5baff6c9882100b390f39eeb4bf0ac22f`；
 - Phase 2-6 五组重验证 artifact 均有 result hash 和 manifest hash；
 - targeted tests 全部通过；
-- repository-wide tests：`68 passed in 0.11s`；
-- 最终 fresh-context strict read-only review：`ACCEPT`；
-- 当前 gate：`ACCEPT`。
+- repository-wide tests：`74 passed in 0.14s`；
+- 后续 fresh-context strict read-only review：`REJECT`；
+- 当前 gate：`REJECT`，等待审查问题修复后的验证、冻结和独立复审。
 
-独立 reviewer 没有自行重跑测试或实验，其结论基于冻结源码、diff、manifest、artifact 和已记录验证的只读检查。当前 evidence package 绑定的是 source snapshot，而不是 clean commit；hash 证明字节身份和来源绑定，不代替数学、实现和实验协议审查。
+独立 reviewer 没有自行重跑测试或实验，其结论基于冻结源码、diff、manifest、artifact 和已记录验证的只读检查。该 clean evidence package 的 artifact hash 全部匹配，manifest 均绑定上述 source commit；拒绝原因是报告证据状态不一致、DSL 条件任务声明与执行不一致、DSL 输入依赖 Python 隐式转换，以及公开概率策略接受 boolean attempts。更早的 source-snapshot 证据包仅保留为历史记录。hash 证明字节身份和来源绑定，不代替数学、实现和实验协议审查。
 
 ## 11. 迄今为止的综合研究结论
 

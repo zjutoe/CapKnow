@@ -1,6 +1,6 @@
 # Phase 2 Report: Identifiability Audit
 
-Status: pending clean committed revalidation. The artifact summary below is historical dirty-run context until regenerated from a clean source commit.
+Status: the clean revalidation below is bound to source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`. A later strict review rejected the combined package; this artifact does not bind the post-review repair.
 
 ## Corrected Contract
 
@@ -19,7 +19,7 @@ Phase 2 now treats `KnowledgeSpace.valid_states` as the declared scientific popu
 
 ## Revalidation Summary
 
-Superseded dirty-run artifact: `artifacts/phase2_6_revalidation/phase2_identifiability.json`
+Prior clean committed artifact: `artifacts/phase2_6_revalidation/phase2_identifiability.json` (source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`; historical for the post-review repair).
 
 | case | tasks | states | unique signatures | identifiable | collisions |
 | --- | ---: | ---: | ---: | --- | ---: |

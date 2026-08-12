@@ -14,6 +14,9 @@ from capability_certificate_lab.validation.identifiability.core import stable_st
 from capability_certificate_lab.probabilistic import (
     ResponseNoiseModel,
     infer_state_posterior,
+    select_entropy_reduction_question,
+    select_expected_error_reduction_question,
+    select_random_question,
     simulate_probabilistic_response,
     solve_noisy_adaptive_certificate,
     solve_noisy_fixed_certificate,
@@ -265,6 +268,23 @@ def test_attempts_rejected_if_not_positive_integer():
             )
 
     space = generate_chain_world(["A", "B"])
+    states = list(space.valid_states)
+    posterior = infer_state_posterior(space, observations=[]).state_posteriors
+    for policy in (
+        select_random_question,
+        select_entropy_reduction_question,
+        select_expected_error_reduction_question,
+    ):
+        with pytest.raises(ValueError, match="attempts must be a positive integer"):
+            policy(
+                states,
+                space.tasks.task_ids,
+                posterior,
+                set(),
+                ResponseNoiseModel(),
+                attempts=True,
+            )
+
     for attempts_per_query in (0, True):
         with pytest.raises(ValueError, match="attempts_per_query must be a positive integer"):
             solve_noisy_adaptive_certificate(

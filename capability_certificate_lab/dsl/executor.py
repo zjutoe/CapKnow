@@ -29,6 +29,8 @@ def execute(
     if not isinstance(state_has, Mapping):
         raise ValueError("state_has must be a mapping from task name to boolean.")
     _validate_program(program)
+    for op_id in sorted(program.required_primitive_ids()):
+        _require_capability(op_id, state_has)
     return _execute_validated(program, state_has, input_context)
 
 
@@ -169,7 +171,12 @@ def _target_from_context(input_context: Mapping[str, object], op_id: str) -> obj
 def _execute_primitive(op_id: str, input_context: object) -> object:
     if op_id == "ADD":
         left, right = _read_pair(input_context, op_id)
-        if not isinstance(left, (int, float)) or not isinstance(right, (int, float)):
+        if (
+            isinstance(left, bool)
+            or isinstance(right, bool)
+            or not isinstance(left, (int, float))
+            or not isinstance(right, (int, float))
+        ):
             raise InvalidProgramError("ADD requires numeric inputs.")
         return left + right
 
@@ -206,8 +213,19 @@ def _execute_primitive(op_id: str, input_context: object) -> object:
         return input_context
 
     if op_id == "CONDITION":
-        if isinstance(input_context, Mapping) and "condition" in input_context:
-            return bool(input_context["condition"])
-        return bool(input_context)
+        if type(input_context) is bool:
+            return input_context
+        if isinstance(input_context, Mapping):
+            if "condition" not in input_context or type(input_context["condition"]) is not bool:
+                raise InvalidProgramError(
+                    "CONDITION mapping input requires a boolean 'condition'."
+                )
+            return input_context["condition"]
+        if isinstance(input_context, Sequence) and not isinstance(input_context, (str, bytes)):
+            return len(input_context) > 0
+        raise InvalidProgramError(
+            "CONDITION requires a boolean, a mapping with a boolean 'condition', "
+            "or a non-string sequence."
+        )
 
     raise InvalidProgramError(f"Unsupported primitive operation '{op_id}'.")

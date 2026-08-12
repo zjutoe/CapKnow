@@ -24,7 +24,7 @@ AdaptiveQuestionPolicy = Callable[
 
 
 def _require_positive_int(value: object, name: str) -> int:
-    if not isinstance(value, int) or value <= 0:
+    if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer.")
     return value
 
@@ -43,7 +43,7 @@ def _entropy_from_distribution(values: Sequence[float]) -> float:
 
 
 def _binomial_pmf(success_prob: float, trials: int) -> list[float]:
-    if not isinstance(trials, int) or trials < 0:
+    if type(trials) is not int or trials < 0:
         raise ValueError("trials must be a non-negative integer.")
     if trials == 0:
         return [1.0]

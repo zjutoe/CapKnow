@@ -1,6 +1,6 @@
 # Phase 6 Report: DSL Bridge and Executable Capability World
 
-Status: pending clean committed revalidation. The artifact summary below is historical dirty-run context until regenerated from a clean source commit.
+Status: the clean revalidation below is bound to source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`. A later strict review rejected the combined package; this artifact does not bind the post-review repair.
 
 ## Corrected Contract
 
@@ -13,6 +13,8 @@ Status: pending clean committed revalidation. The artifact summary below is hist
 - Capability values must be actual booleans; truthy malformed values are contract errors.
 - `LoopNode.max_iterations` must be a non-boolean positive integer.
 - `COMPARE` requires a comparison pair and rejects bare boolean input.
+- Conditional programs require every primitive declared by the complete program, including inactive branches.
+- `ADD` rejects booleans as numeric inputs. `CONDITION` accepts only booleans, mappings with a boolean `condition`, or non-string sequences with explicit non-empty semantics.
 
 ## Minimal Primitive Semantics
 
@@ -35,7 +37,7 @@ Status: pending clean committed revalidation. The artifact summary below is hist
 
 ## Revalidation Summary
 
-Superseded dirty-run artifact: `artifacts/phase2_6_revalidation/phase6_dsl.json`
+Prior clean committed artifact: `artifacts/phase2_6_revalidation/phase6_dsl.json` (source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`; historical for the post-review repair).
 
 - Observed primitive execution exact outputs: `ADD=5`, `COMPARE=true`, `MEMORY=42`, `SEARCH=true`, `FILTER=["keep","keep"]`, `LOOP="unchanged"`, `CONDITION=false`.
 - Acceptance oracle for primitive execution freezes those seven exact outputs.
