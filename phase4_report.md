@@ -1,79 +1,38 @@
 # Phase 4 Report: Adaptive Certificate Solver
 
-## 实施内容
+Status: pending clean committed revalidation. The artifact summary below is historical dirty-run context until regenerated from a clean source commit.
 
-- 新增 `certificate/decision_tree.py`：
-  - `DecisionNode` 结构与 `to_dict()`
-  - `tree_signature()`，用于决策树等价性校验
-- 新增 `certificate/policies.py`：
-  - `select_random_question`
-  - `select_entropy_reduction_question`
-  - `select_balanced_split_question`
-  - `resolve_policy`
-- 新增 `certificate/adaptive_solver.py`：
-  - `solve_adaptive_certificate(...)`
-  - `validate_adaptive_certificate(...)`
-- 新增 `AdaptiveCertificate` 结果结构（`certificate/result.py`）：
-  - `root`
-  - `worst_case_depth`
-  - `average_depth`
-  - `node_count`
-  - `valid`
-- 导出 API：
-  - `certificate/__init__.py` 增加 `AdaptiveCertificate`、`solve_adaptive_certificate`、`validate_adaptive_certificate`、`DecisionNode`、`tree_signature`
-- 新增 `tests/test_adaptive_certificate.py`
+## Corrected Contract
 
-## 方法
+- Built-in adaptive policies only choose unasked tasks that split the current candidate set into two non-empty branches.
+- Custom policies that return unknown, repeated, or non-splitting tasks fail loudly.
+- Custom policies may return `None` only when no unasked splitting task remains.
+- Empty declared state populations fail loudly instead of producing vacuous adaptive success.
+- `validate_adaptive_certificate` recursively checks both branches, non-empty progress, no repeated questions, and exactly one remaining state per leaf.
+- `AdaptiveCertificate.to_dict()` includes the full root decision tree.
+- `average_depth` is equal-weighted over states within each tree. Cross-seed summaries are equal-weighted over runs. `worst_case_depth` is reported separately.
 
-- 候选状态集合 `V_t` 初始化为知识空间全部合法状态。
-- 每一步通过策略函数在未问集合中选择问题：
-  - `entropy`：优先最大化熵（信息增益）；
-  - `balanced`：优先最小化 `max(|V+|, |V-|)`；
-  - `random`：按 RNG 随机采样。
-- 按返回答案切分候选状态并递归构建 `DecisionNode`。
-- 生成树后计算：
-  - `node_count`
-  - `worst_case_depth`
-  - `average_depth`（按等权状态平均）
-- `validate_adaptive_certificate` 逐状态重放路径，要求：
-  - 每条路径问答一致
-  - 叶节点唯一命中该状态
+## Tests
 
-## 示例树（Chain 世界）
+- `python -m pytest -q tests/test_certificate.py tests/test_adaptive_certificate.py`
+- Result: `19 passed in 0.04s`
 
-`generate_chain_world(["A", "B", "C", "D"])`（balanced/entropy 两种策略一致）：
+## Revalidation Summary
 
-```
-{'question': 'B',
- 'yes_child': {'question': 'C',
-               'yes_child': {'question': 'D',
-                             'yes_child': {'question': None, 'candidate_state_ids': ['{A,B,C,D}']},
-                             'no_child': {'question': None, 'candidate_state_ids': ['{A,B,C}']}},
-               'no_child': {'question': None, 'candidate_state_ids': ['{A,B}']}},
- 'no_child': {'question': 'A',
-              'yes_child': {'question': None, 'candidate_state_ids': ['{A}']},
-              'no_child': {'question': None, 'candidate_state_ids': ['{}']}}}
-```
+Superseded dirty-run artifact: `artifacts/phase2_6_revalidation/phase4_adaptive_regression.json`
 
-## 固定 vs 自适应对比（采样结果）
+| world | fixed exact size | policy | valid run rate | mean average depth | max worst-case depth | mean nodes |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| chain | 4 | balanced | 1.0 | 2.4000 | 3 | 9.0 |
+| chain | 4 | entropy | 1.0 | 2.4000 | 3 | 9.0 |
+| chain | 4 | random seeds 0..99 | 1.0 | 2.5580 | 4 | 9.0 |
+| tree | 4 | balanced | 1.0 | 2.8571 | 3 | 13.0 |
+| tree | 4 | entropy | 1.0 | 2.8571 | 3 | 13.0 |
+| tree | 4 | random seeds 0..99 | 1.0 | 3.0357 | 4 | 13.0 |
+| unstructured | 3 | balanced | 1.0 | 3.0000 | 3 | 15.0 |
+| unstructured | 3 | entropy | 1.0 | 3.0000 | 3 | 15.0 |
+| unstructured | 3 | random seeds 0..99 | 1.0 | 3.0000 | 3 | 15.0 |
 
-- Chain 世界：
-  - `fixed`: 4（exact）
-  - `adaptive`: `worst_case_depth=3`, `average_depth=2.4`（balanced/entropy）
-- 无结构世界（3任务）：
-  - `fixed=3`
-  - `adaptive worst_case_depth=3`（entropy）
-- Tree 世界示例：
-  - 也能成功建树并通过 `validate_adaptive_certificate`
-  - `worst_case_depth=3`, `average_depth≈2.857`, `node_count=13`
+## Historical Correction
 
-## 验证命令与结果
-
-- 命令：`python -m pytest tests/`
-- 结果：`20 passed in 0.03s`
-
-## 局限与下一步
-
-- 当前实现默认状态空间使用等概率状态分布计算平均深度；未考虑状态先验偏置。
-- 未实施 noisy response 或 learned policy（按计划排除）。
-- 未进行规模扩展实验（task 数/状态数扫参），当前为功能实现与可复现性验证。
+Earlier aggregate wording could confuse worst-case `query_count` with average depth. The corrected report separates `average_depth` and `worst_case_depth`.

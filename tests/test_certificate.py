@@ -22,6 +22,10 @@ def _too_short_signature(state: KnowledgeState, task_ids: Sequence[str]) -> tupl
     return (0,)
 
 
+def _too_long_signature(state: KnowledgeState, task_ids: Sequence[str]) -> tuple[int, ...]:
+    return (0,) * (len(task_ids) + 1)
+
+
 def test_chain_exact_certificate_is_minimal():
     space = generate_chain_world(["A", "B", "C", "D"])
     result = solve_exact_certificate(space)
@@ -79,6 +83,13 @@ def test_mismatched_signature_length_is_rejected():
 
     with pytest.raises(ValueError, match="Response signature length"):
         solve_exact_certificate(space, response_signature_fn=_too_short_signature)
+
+
+def test_too_long_signature_length_is_rejected():
+    space = generate_chain_world(["A", "B", "C"])
+
+    with pytest.raises(ValueError, match="Response signature length"):
+        solve_exact_certificate(space, response_signature_fn=_too_long_signature)
 
 
 def test_greedy_and_random_are_valid_but_not_better_than_exact():

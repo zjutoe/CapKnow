@@ -1,61 +1,52 @@
 # Phase 6 Report: DSL Bridge and Executable Capability World
 
-## DSL Design
-- 定义 `Program` AST：
-  - `PrimitiveNode`：封装基础指令。
-  - `SequenceNode`：顺序执行多个子程序。
-  - `ConditionNode`：基于条件分支的程序节点。
-  - `LoopNode`：固定次数循环节点。
-- `Program` 接口统一提供：
-  - `required_primitive_ids()`
-  - `to_task_id()`
-  - `to_dict()`
-- 依赖关系与执行语义集中在单一递归 `execute(program, state_has, input_context=None)` 中实现。
+Status: pending clean committed revalidation. The artifact summary below is historical dirty-run context until regenerated from a clean source commit.
 
-## Primitive Definitions
-- 在 `primitives.py` 中新增基础能力定义：
-  - `ADD`
-  - `COMPARE`
-  - `MEMORY`
-  - `SEARCH`
-  - `FILTER`
-  - `LOOP`
-  - `CONDITION`
-- 每个 primitive 使用 `PrimitiveOperation` 元数据结构表达 `op_id / input_type / output_type / difficulty / requires`。
-- 提供 `PRIMITIVES` 与 `get_primitive`、`list_primitives` 等访问接口。
+## Corrected Contract
 
-## Composition Rules
-- 在 `composition.py` 中定义可组合规则模型：
-  - `CompositionRule(left, right, result)`。
-  - `DEFAULT_COMPOSITION_RULES`：
-    - `MEMORY + SEARCH -> RETRIEVAL`
-    - `RETRIEVAL + CONDITION -> PLANNING`
-- `CapabilityGraph` 记录规则集合；`resolve_composition` 构建查找表。
-- `build_composite_program` 目前返回 `SequenceNode` 组合实现（保持最小语义，便于最小可运行基线）。
+- `execute(program, state_has, input_context)` returns an explicit `ExecutionResult(value, output_type)`.
+- Missing primitive capabilities raise `MissingCapabilityError`.
+- Invalid programs and invalid input types raise `InvalidProgramError`.
+- `make_dsl_response_signature` is deterministic and no longer accepts noisy RNG-backed callbacks.
+- Signature generation maps missing capabilities to response `0` but propagates malformed programs.
+- Composition result IDs must be unique and must not collide with primitive IDs.
+- Capability values must be actual booleans; truthy malformed values are contract errors.
+- `LoopNode.max_iterations` must be a non-boolean positive integer.
+- `COMPARE` requires a comparison pair and rejects bare boolean input.
 
-## Task Generation
-- 新增 `task_generator.py`：
-  - `generate_dsl_primitive_task_map()` 生成 primitive 任务程序映射。
-  - `_build_composite_rules(...)` 由组合规则闭包构造复合程序。
-  - `generate_dsl_world(include_composite=True, composition_rules=...)`：
-    - 生成 `KnowledgeSpace`；
-    - 根据 `prerequisites` 过滤有效状态；
-    - 返回 `(world, task_programs)`。
-- 规则与世界元信息写入 `generator_rules` 与 `metadata`（含 composition 与 prereq 约束）。
+## Minimal Primitive Semantics
 
-## Certificate Migration Results
-- 对接 `solve_exact_certificate` 的签名函数通过 `make_dsl_response_signature(task_programs)` 提供，返回：
-  - 对每个 state 与有序任务集合执行 DSL 程序；
-  - 支持 `noise` 与 `rng` 参数（与现有 response 接口兼容）。
-- `tests/test_dsl.py` 覆盖：
-  - primitive 执行；
-  - composition 执行；
-  - 无效程序拒绝；
-  - 世界可复现性；
-  - 复合任务与 primitive 的响应关系；
-  - 证书求解链路可运行（在组合 world 上验证可执行；在 pure primitive world 上验证 exact certificate 可通过）。
+| primitive | input type | output type | deterministic behavior |
+| --- | --- | --- | --- |
+| ADD | numeric pair | number | returns sum |
+| COMPARE | comparison pair | bool | returns equality |
+| MEMORY | memory lookup | memory context | reads key from memory and writes `value` |
+| SEARCH | search context | bool | checks whether target/value is in items |
+| FILTER | filter context | list | keeps items equal to target/value |
+| LOOP | loop value | loop value | returns input unchanged as a primitive |
+| CONDITION | condition value | bool | returns boolean condition |
 
-## Limitations
-- 当前复合程序采用最小实现（`SequenceNode` 连接），未引入复杂控制语义分支扩展，以遵循最小实现约束。
-- 复合世界不额外声明“可辨识性必须成立”作为约束；是否可辨识由证书求解与报告链路直接验证。
-- 目前仅提交了阶段内最小可运行骨架：未扩展到 LLM/学习型语义，也未引入额外搜索策略。
+`SequenceNode` passes each step's output value to the next step. `ConditionNode` evaluates a boolean condition and executes one branch on the original input. `LoopNode` requires `LOOP` and feeds each iteration's output into the next iteration.
+
+## Tests
+
+- `python -m pytest -q tests/test_dsl.py`
+- Result: `18 passed in 0.06s`
+
+## Revalidation Summary
+
+Superseded dirty-run artifact: `artifacts/phase2_6_revalidation/phase6_dsl.json`
+
+- Observed primitive execution exact outputs: `ADD=5`, `COMPARE=true`, `MEMORY=42`, `SEARCH=true`, `FILTER=["keep","keep"]`, `LOOP="unchanged"`, `CONDITION=false`.
+- Acceptance oracle for primitive execution freezes those seven exact outputs.
+- Observed composite `SEQ[MEMORY,SEARCH]` returns `true` from `MEMORY` and `SEARCH` alone, without a `RETRIEVAL` state label.
+- Acceptance oracle for the default composite freezes the program id, required primitives, and final output.
+- Observed held-out composition uses `FILTER + CONDITION -> FILTER_CHECK`, which is absent from default rules, and executes from primitive capabilities only.
+- Acceptance oracle for the held-out composition freezes the input context and final output.
+- The script computes `present_in_default_rules` from `DEFAULT_COMPOSITION_RULES`; the artifact records the default rules as `MEMORY+SEARCH->RETRIEVAL` and `RETRIEVAL+CONDITION->PLANNING`.
+- Certificate transfer on the pure primitive DSL world matches the direct-task world: both have `state_count=128`, `certificate_size=7`, and `valid=true`; these are gated as explicit invariants.
+- Reproducibility check: repeated DSL signatures are identical and match the frozen signature `[0,0,1,1,0,0,0,1,0]`.
+
+## Historical Correction
+
+The previous Phase 6 scaffold returned only Boolean capability membership from `execute` and ignored concrete inputs. That scaffold is superseded by the explicit deterministic execution contract above.

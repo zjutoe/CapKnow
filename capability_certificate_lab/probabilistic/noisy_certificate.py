@@ -7,6 +7,7 @@ from time import perf_counter
 
 from ..knowledge_space.space import KnowledgeSpace
 from ..knowledge_space.state import KnowledgeState
+from ..certificate.validator import _ordered_valid_states
 from ..validation.identifiability.core import stable_state_id
 from .adaptive_policy import AdaptiveQuestionPolicy, resolve_policy
 from .posterior import _as_binary, infer_state_posterior
@@ -31,6 +32,7 @@ class NoisyFixedCertificate:
     method: str = "noisy_fixed"
     observations: int = 0
     map_probability: float | None = None
+    state_posteriors: dict[str, float] | None = None
     runtime_ms: float = 0.0
 
     def to_dict(self) -> dict[str, object]:
@@ -47,6 +49,7 @@ class NoisyFixedCertificate:
             "delta": self.delta,
             "observations": self.observations,
             "map_probability": self.map_probability,
+            "state_posteriors": self.state_posteriors,
             "runtime_ms": self.runtime_ms,
         }
 
@@ -68,6 +71,7 @@ class NoisyAdaptiveCertificate:
     method: str = "noisy_adaptive"
     asked_tasks: list[str] | None = None
     map_probability: float | None = None
+    state_posteriors: dict[str, float] | None = None
     query_history: list[dict[str, object]] | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -87,6 +91,7 @@ class NoisyAdaptiveCertificate:
             "runtime_ms": self.runtime_ms,
             "asked_tasks": self.asked_tasks,
             "map_probability": self.map_probability,
+            "state_posteriors": self.state_posteriors,
             "query_history": self.query_history,
         }
 
@@ -121,23 +126,19 @@ def _flatten_query_records(records: list[tuple[str, Sequence[int]]]) -> list[tup
     return expanded
 
 
-def _aggregate_observations(records: list[tuple[str, Sequence[int]]]) -> list[tuple[str, int]]:
-    return _flatten_query_records(records)
-
-
 def _validate_delta(delta: float) -> None:
     if not isfinite(delta) or not (0.0 <= delta <= 1.0):
         raise ValueError("delta must be a finite number in [0.0, 1.0].")
 
 
 def _validate_non_negative_int(value: int | None, name: str) -> int | None:
-    if value is not None and (not isinstance(value, int) or value < 0):
+    if value is not None and (type(value) is not int or value < 0):
         raise ValueError(f"{name} must be a non-negative integer.")
     return value
 
 
 def _validate_positive_int(value: int, name: str) -> int:
-    if not isinstance(value, int) or value <= 0:
+    if type(value) is not int or value <= 0:
         raise ValueError(f"{name} must be a positive integer.")
     return value
 
@@ -179,6 +180,7 @@ def solve_noisy_fixed_certificate(
         entropy=posterior.entropy,
         delta=delta,
         observations=len(expanded),
+        state_posteriors=dict(posterior.state_posteriors),
         runtime_ms=(perf_counter() - start) * 1000,
     )
 
@@ -198,33 +200,14 @@ def solve_noisy_adaptive_certificate(
     _validate_positive_int(attempts_per_query, "attempts_per_query")
     _validate_non_negative_int(max_queries, "max_queries")
 
-    task_ids = list(knowledge_space.tasks.task_ids)
-    ordered_states = sorted(
-        [state for state in knowledge_space.valid_states if knowledge_space.is_valid_state(state)],
-        key=lambda state: state.as_tuple(task_ids),
-    )
+    ordered_states, task_ids = _ordered_valid_states(knowledge_space)
     state_count = len(ordered_states)
     state_ids = _state_ids(ordered_states, task_ids)
 
     if state_count == 0:
-        return NoisyAdaptiveCertificate(
-            task_count=len(task_ids),
-            state_count=0,
-            query_count=0,
-            map_state="",
-            confidence=0.0,
-            entropy=0.0,
-            valid=False,
-            policy="custom" if callable(policy) else str(policy),
-            seed=seed,
-            delta=delta,
-            reached_delta=False,
-            runtime_ms=(perf_counter() - start) * 1000,
-            method="noisy_adaptive",
-            asked_tasks=[],
-            map_probability=None,
-            query_history=[],
-        )
+        raise ValueError("Declared valid_states must not be empty for probabilistic inference.")
+    if true_state not in ordered_states:
+        raise ValueError("true_state must belong to declared valid_states.")
 
     prior = {sid: 1.0 / state_count for sid in state_ids}
     posterior = infer_state_posterior(
@@ -271,10 +254,10 @@ def solve_noisy_adaptive_certificate(
         query_records.append((question, responses_norm))
         asked.add(question)
 
-        expanded = _aggregate_observations(query_records)
+        new_observations = [(question, value) for value in responses_norm]
         posterior = infer_state_posterior(
             knowledge_space,
-            expanded,
+            new_observations,
             noise=noise,
             prior=posterior.state_posteriors,
         )
@@ -304,5 +287,6 @@ def solve_noisy_adaptive_certificate(
         method="noisy_adaptive",
         asked_tasks=sorted(asked),
         map_probability=posterior.confidence,
+        state_posteriors=dict(posterior.state_posteriors),
         query_history=history,
     )

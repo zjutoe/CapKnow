@@ -43,6 +43,24 @@ def _available_questions(task_ids: Sequence[str], asked: set[str]) -> list[str]:
     return [task_id for task_id in task_ids if task_id not in asked]
 
 
+def _splitting_questions(
+    candidate_states: Sequence[KnowledgeState],
+    task_ids: Sequence[str],
+    asked: set[str],
+    response_signature_fn: Callable[[KnowledgeState, Sequence[str]], Signature],
+) -> list[tuple[str, int, int]]:
+    questions: list[tuple[str, int, int]] = []
+    for question in _available_questions(task_ids, asked):
+        no_count, yes_count = _split_counts(
+            candidate_states,
+            question,
+            response_signature_fn,
+        )
+        if no_count and yes_count:
+            questions.append((question, no_count, yes_count))
+    return questions
+
+
 def _split_counts(
     candidate_states: Sequence[KnowledgeState],
     question: str,
@@ -64,10 +82,15 @@ def select_random_question(
     response_signature_fn: Callable[[KnowledgeState, Sequence[str]], Signature],
     rng: Random | None = None,
 ) -> str | None:
-    del response_signature_fn
-    del candidate_states
-
-    candidates = _available_questions(task_ids, asked)
+    candidates = [
+        question
+        for question, _, _ in _splitting_questions(
+            candidate_states,
+            task_ids,
+            asked,
+            response_signature_fn,
+        )
+    ]
     if not candidates:
         return None
 
@@ -84,7 +107,12 @@ def select_entropy_reduction_question(
 ) -> str | None:
     del rng
 
-    questions = _available_questions(task_ids, asked)
+    questions = _splitting_questions(
+        candidate_states,
+        task_ids,
+        asked,
+        response_signature_fn,
+    )
     if not questions:
         return None
 
@@ -92,14 +120,10 @@ def select_entropy_reduction_question(
     best_gain = -1.0
 
     total = len(candidate_states)
-    for question in questions:
-        no_count, yes_count = _split_counts(candidate_states, question, response_signature_fn)
-        if yes_count == 0 or no_count == 0:
-            gain = 0.0
-        else:
-            p_yes = yes_count / total
-            p_no = no_count / total
-            gain = -(p_yes * log2(p_yes) + p_no * log2(p_no))
+    for question, no_count, yes_count in questions:
+        p_yes = yes_count / total
+        p_no = no_count / total
+        gain = -(p_yes * log2(p_yes) + p_no * log2(p_no))
         if gain > best_gain:
             best_gain = gain
             best_question = question
@@ -116,15 +140,19 @@ def select_balanced_split_question(
 ) -> str | None:
     del rng
 
-    questions = _available_questions(task_ids, asked)
+    questions = _splitting_questions(
+        candidate_states,
+        task_ids,
+        asked,
+        response_signature_fn,
+    )
     if not questions:
         return None
 
     best_question: str | None = None
     best_balance = len(candidate_states) + 1
 
-    for question in questions:
-        no_count, yes_count = _split_counts(candidate_states, question, response_signature_fn)
+    for question, no_count, yes_count in questions:
         balance = max(no_count, yes_count)
         if balance < best_balance:
             best_balance = balance

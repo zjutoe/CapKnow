@@ -9,6 +9,7 @@ from capability_certificate_lab.certificate import (
     validate_adaptive_certificate,
 )
 from capability_certificate_lab.knowledge_space.state import KnowledgeState
+from capability_certificate_lab.knowledge_space import KnowledgeSpace, TaskUniverse
 from capability_certificate_lab.certificate.policies import select_entropy_reduction_question
 from capability_certificate_lab.generators import (
     generate_chain_world,
@@ -94,3 +95,101 @@ def test_non_binary_signature_is_rejected():
 
     with pytest.raises(ValueError, match="binary response signatures"):
         solve_adaptive_certificate(space, response_signature_fn=_non_binary_signature)
+
+
+def test_random_policy_returns_valid_tree_for_many_seeds():
+    space = generate_tree_world({"A": ["B", "C"], "B": ["D"]})
+
+    for seed in range(100):
+        result = solve_adaptive_certificate(space, policy="random", seed=seed)
+        assert result.valid
+        assert validate_adaptive_certificate(result.root, space)
+
+
+def test_custom_policy_returning_non_splitting_task_raises():
+    space = generate_unstructured_world(["A", "B"])
+
+    def _bad_policy(*args):
+        del args
+        return "A"
+
+    with pytest.raises(ValueError, match="non-splitting task"):
+        solve_adaptive_certificate(
+            space,
+            policy=_bad_policy,
+            response_signature_fn=_collapsed_signature,
+        )
+
+
+def test_custom_policy_cannot_stop_while_a_split_remains():
+    space = generate_unstructured_world(["A", "B"])
+
+    def _premature_stop(*args):
+        del args
+        return None
+
+    with pytest.raises(ValueError, match="unasked splitting task remains"):
+        solve_adaptive_certificate(space, policy=_premature_stop)
+
+
+def test_adaptive_validator_rejects_incomplete_and_non_progressing_trees():
+    space = generate_unstructured_world(["A", "B"])
+
+    incomplete = DecisionNode(
+        question="A",
+        yes_child=DecisionNode(question=None, candidate_state_ids=['["A"]']),
+        no_child=None,
+    )
+    assert not validate_adaptive_certificate(incomplete, space)
+
+    leaf_with_two_states = DecisionNode(
+        question=None,
+        candidate_state_ids=["[]", '["A"]'],
+    )
+    assert not validate_adaptive_certificate(leaf_with_two_states, space)
+
+    duplicated_leaf_id = DecisionNode(
+        question=None,
+        candidate_state_ids=["[]", "[]"],
+    )
+    assert not validate_adaptive_certificate(
+        duplicated_leaf_id,
+        generate_unstructured_world([]),
+    )
+
+    non_progressing = DecisionNode(
+        question="A",
+        yes_child=DecisionNode(question=None, candidate_state_ids=['["A"]']),
+        no_child=DecisionNode(question=None, candidate_state_ids=["[]"]),
+    )
+    assert not validate_adaptive_certificate(
+        non_progressing,
+        space,
+        response_signature_fn=_collapsed_signature,
+    )
+
+
+def test_adaptive_solver_rejects_empty_declared_state_population():
+    space = KnowledgeSpace(tasks=TaskUniverse(("A",)), valid_states=())
+    empty_leaf = DecisionNode(question=None, candidate_state_ids=[])
+
+    with pytest.raises(ValueError, match="valid_states must not be empty"):
+        solve_adaptive_certificate(space)
+
+    assert not validate_adaptive_certificate(empty_leaf, space)
+
+
+def test_adaptive_serialization_contains_concrete_tree_structure():
+    space = generate_chain_world(["A"])
+    result = solve_adaptive_certificate(space, policy="balanced")
+    payload = result.to_dict()
+
+    assert payload["root"]["question"] == "A"
+    assert payload["root"]["yes_child"] == {
+        "question": None,
+        "candidate_state_ids": ['["A"]'],
+    }
+    assert payload["root"]["no_child"] == {
+        "question": None,
+        "candidate_state_ids": ["[]"],
+    }

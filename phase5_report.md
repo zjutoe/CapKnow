@@ -1,63 +1,65 @@
 # Phase 5 Report: Probabilistic Certificate
 
-## 实施内容
+Status: pending clean committed revalidation. The artifact summary below is historical dirty-run context until regenerated from a clean source commit.
 
-- 新增 `capability_certificate_lab/probabilistic/response_model.py`
-  - `ResponseNoiseModel(slip, guess)`
-  - `response_probability(state_has_task, noise)`
-  - `simulate_probabilistic_response(state_has_task, noise, attempts=1, rng=None)`
-- 新增 `capability_certificate_lab/probabilistic/posterior.py`
-  - `infer_state_posterior(knowledge_space, observations, noise, prior=None)`
-  - `PosteriorResult(state_count, state_posteriors, map_state, entropy, confidence, observation_count)`
-- 新增 `capability_certificate_lab/probabilistic/adaptive_policy.py`
-  - `select_random_question`
-  - `select_entropy_reduction_question`
-  - `select_expected_error_reduction_question`
-  - `resolve_policy`
-- 新增 `capability_certificate_lab/probabilistic/noisy_certificate.py`
-  - `NoisyFixedCertificate`
-  - `NoisyAdaptiveCertificate`
-  - `solve_noisy_fixed_certificate(...)`
-  - `solve_noisy_adaptive_certificate(...)`
-- 新增导出 `capability_certificate_lab/probabilistic/__init__.py`
-- 新增 `tests/test_probabilistic.py`
+## Corrected Contract
 
-## 方法
+- `infer_state_posterior` computes likelihoods in log space and normalizes with log-sum-exp.
+- Mathematically impossible observations remain explicit: all posterior masses are zero and `map_state=""`.
+- Adaptive Bayesian updating uses the previous posterior as prior and only the newly observed responses as likelihood evidence.
+- Complete query history is retained for reporting but is not counted twice.
+- MAP selection uses a shared deterministic tie rule with tolerance `1e-12`.
+- Phase 5 consistency gates compare batch, sequential, and solver-observed posterior MAP states, confidence, and near-tie state sets.
+- Adaptive simulation requires `true_state` to belong to the declared state population.
+- Attempt counts and query limits reject booleans instead of treating them as integers.
 
-- 以 task 成功/失败为二值输出，定义 slip/guess 噪声：
-  - 若任务在状态内：`P(Y=1)=1-slip`
-  - 若任务不在状态内：`P(Y=1)=guess`
-- 在 `infer_state_posterior` 中直接使用贝叶斯更新：
-  - 先验来自均匀分布或 `prior` 输入
-  - 对每个观测独立乘积似然
-  - 归一化后输出后验分布、MAP、熵、最大后验置信度
-- `solve_noisy_fixed_certificate`
-  - 给定已选问题和观测，多次观测可直接展开为多个独立样本
-  - 使用 `confidence >= 1 - delta` 判定是否通过
-- `solve_noisy_adaptive_certificate`
-  - 使用 posterior 初始化；
-  - 逐步调用 policy 选择问题；
-  - 模拟真实状态响应（含重复尝试）并更新 posterior；
-  - 直到达到置信阈值或耗尽问题/上限
-- `expected_error` 与 `entropy` policy 都使用后验分布和重复探测（`attempts_per_query`）条件下的一步响应计数分支做期望减益评估。
+## Tests
 
-## 测试结果
+- `python -m pytest -q tests/test_probabilistic.py`
+- Result: `23 passed in 0.05s`
 
-- 文件：`tests/test_probabilistic.py`
-- 覆盖：
-  - 无噪声时与确定性 baseline 一致性
-  - slip 高噪声导致识别不稳定
-  - 高猜测率下避免过度高置信
-  - 后验归一化
-  - 重复观测的后验收敛性质
+Exact regression coverage includes:
 
-## 风险与限制
+- zero-probability Bernoulli sampling returns `0` when the RNG boundary value is exactly `0.0`;
+- sequential updates equal batch updates;
+- Phase 5 consistency rejects near-tie MAP-set drift between batch and sequential posterior paths;
+- exact two-task posterior values for `A=1, B=0`;
+- long possible observation sequences do not underflow;
+- impossible zero-probability observations are not smoothed;
+- adaptive stopping does not cross threshold solely because old evidence was counted again;
+- undeclared adaptive true states and boolean attempt controls are rejected.
 
-- 本实现未引入任何 learned policy（按阶段排除项处理）；
-- 重复 probing 当前默认按独立重复观测纳入同一 query 的贝叶斯更新；
-- 未对大规模状态空间运行完整鲁棒性曲线实验（保留为后续实验计划，当前报告先给出实现与单元级鲁棒性验证）。
+## Revalidation Summary
 
-## 未完成/后续
+Superseded dirty-run artifact: `artifacts/phase2_6_revalidation/phase5_robustness.json`
 
-- 未覆盖 handoff 要求中的完整 `robustness curves` 与固定/自适应噪声扫描曲线（实验脚本与指标汇总计划中预留）。
-- 当前版本实现了重复观测后验更新与策略评估的一致性，但未接入持久实验产物导出流程。
+Conditions:
+
+- worlds: chain, tree, unstructured;
+- noise pairs: `(0,0)`, `(0.05,0.05)`, `(0.10,0.10)`, `(0.20,0.20)`, `(0.30,0.30)`, `(0.30,0.05)`, `(0.05,0.30)`;
+- seeds: `0..99`;
+- attempts per queried task: `1, 3, 5`;
+- methods: fixed certificate and entropy-reduction adaptive certificate.
+
+Sanity checks:
+
+- zero-noise fixed/adaptive MAP results match deterministic behavior for all three worlds;
+- zero-noise adaptive query counts match deterministic entropy-tree leaf depths for every state;
+- zero-noise average/worst adaptive query counts equal deterministic depths: chain `2/2`, tree `2.4/3`, unstructured `2/2`, for attempts `1`, `3`, and `5`;
+- fixed sequential/batch posterior consistency failures: `0`;
+- adaptive sequential/batch posterior consistency failures: `0`;
+- fixed and adaptive consistency rates are both `1.0` for all sampled conditions;
+- maximum fixed/adaptive posterior-map difference across summaries is `1.5543122344752192e-15`, below the `1e-12` gate tolerance;
+- symmetric-noise aggregates are reported descriptively, and sampled non-monotonicity is not interpreted as improved evidence.
+
+Selected high-noise examples from the artifact:
+
+| world | method | slip | guess | attempts | MAP accuracy | mean confidence | threshold rate |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| chain | fixed | 0.30 | 0.30 | 5 | 0.74 | 0.7025 | 0.08 |
+| tree | fixed | 0.30 | 0.30 | 5 | 0.67 | 0.6735 | 0.03 |
+| unstructured | fixed | 0.30 | 0.30 | 5 | 0.74 | 0.6815 | 0.01 |
+
+## Historical Correction
+
+Superseded Phase 5 adaptive robustness results generated before this repair are not scientific evidence. The prior implementation could double-count old observations and the earlier consistency report failed to gate MAP disagreements.
