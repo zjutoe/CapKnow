@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from math import isfinite, log2
+from math import exp, isfinite, log, log2
 
 from ..knowledge_space.space import KnowledgeSpace
 from ..knowledge_space.state import KnowledgeState
+from ..certificate.validator import _ordered_valid_states
 from ..validation.identifiability.core import stable_state_id
 from .response_model import ResponseNoiseModel, response_probability
 
 
 Observation = tuple[str, int | Sequence[int]]
+MAP_TIE_TOLERANCE = 1e-12
 
 
 def _as_binary(value: object) -> int:
@@ -110,35 +112,31 @@ def infer_state_posterior(
 ) -> PosteriorResult:
     """Compute posterior over valid states under an i.i.d. noisy response model."""
 
-    task_ids = list(knowledge_space.tasks.task_ids)
-    valid_states = [
-        state for state in knowledge_space.valid_states if knowledge_space.is_valid_state(state)
-    ]
-    ordered_states = sorted(valid_states, key=lambda state: state.as_tuple(task_ids))
+    ordered_states, task_ids = _ordered_valid_states(knowledge_space)
 
     if not ordered_states:
-        return PosteriorResult(
-            state_count=0,
-            state_posteriors={},
-            map_state="",
-            entropy=0.0,
-            confidence=0.0,
-            observation_count=0,
-        )
+        raise ValueError("Declared valid_states must not be empty for probabilistic inference.")
 
     expanded = _flatten_observations(observations, set(task_ids))
     state_ids = [stable_state_id(state, task_ids) for state in ordered_states]
     state_prior = _normalize_prior(state_ids, prior)
 
-    unnormalized: dict[str, float] = {}
+    log_weights: dict[str, float] = {}
     for state_id, state in zip(state_ids, ordered_states):
-        likelihood = 1.0
+        prior_mass = state_prior[state_id]
+        log_weight = float("-inf") if prior_mass == 0.0 else log(prior_mass)
         for response in expanded:
-            likelihood *= _observation_likelihood(state, response, noise)
-        unnormalized[state_id] = state_prior[state_id] * likelihood
+            if log_weight == float("-inf"):
+                break
+            likelihood = _observation_likelihood(state, response, noise)
+            if likelihood == 0.0:
+                log_weight = float("-inf")
+                break
+            log_weight += log(likelihood)
+        log_weights[state_id] = log_weight
 
-    total_mass = sum(unnormalized.values())
-    if total_mass == 0.0:
+    finite_weights = [weight for weight in log_weights.values() if weight != float("-inf")]
+    if not finite_weights:
         return PosteriorResult(
             state_count=len(ordered_states),
             state_posteriors={state_id: 0.0 for state_id in state_ids},
@@ -148,13 +146,24 @@ def infer_state_posterior(
             observation_count=len(expanded),
         )
 
-    normalized = {sid: weight / total_mass for sid, weight in unnormalized.items()}
-    map_state = max(normalized.items(), key=lambda kv: kv[1])[0]
+    max_log_weight = max(finite_weights)
+    scaled = {
+        sid: 0.0 if weight == float("-inf") else exp(weight - max_log_weight)
+        for sid, weight in log_weights.items()
+    }
+    total_mass = sum(scaled.values())
+    normalized = {sid: weight / total_mass for sid, weight in scaled.items()}
+    confidence = max(normalized.values())
+    map_state = min(
+        sid
+        for sid, probability in normalized.items()
+        if confidence - probability <= MAP_TIE_TOLERANCE
+    )
     return PosteriorResult(
         state_count=len(ordered_states),
         state_posteriors=normalized,
         map_state=map_state,
         entropy=_entropy(normalized.values()),
-        confidence=normalized[map_state],
+        confidence=confidence,
         observation_count=len(expanded),
     )

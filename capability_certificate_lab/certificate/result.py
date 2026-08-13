@@ -43,6 +43,7 @@ class AdaptiveCertificate:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "root": self.root.to_dict(),
             "worst_case_depth": self.worst_case_depth,
             "average_depth": self.average_depth,
             "node_count": self.node_count,

@@ -1,0 +1,71 @@
+{
+  "cases": [
+    {
+      "collision_count": 0,
+      "collision_groups": [],
+      "compression_ratio": 1.0,
+      "identifiable": true,
+      "name": "chain",
+      "num_states": 5,
+      "num_tasks": 4,
+      "num_unique_signatures": 5,
+      "task_ids": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ]
+    },
+    {
+      "collision_count": 0,
+      "collision_groups": [],
+      "compression_ratio": 1.0,
+      "identifiable": true,
+      "name": "tree",
+      "num_states": 7,
+      "num_tasks": 4,
+      "num_unique_signatures": 7,
+      "task_ids": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ]
+    },
+    {
+      "collision_count": 0,
+      "collision_groups": [],
+      "compression_ratio": 1.0,
+      "identifiable": true,
+      "name": "unstructured",
+      "num_states": 8,
+      "num_tasks": 3,
+      "num_unique_signatures": 8,
+      "task_ids": [
+        "Q0",
+        "Q1",
+        "Q2"
+      ]
+    },
+    {
+      "collision_count": 1,
+      "collision_groups": [
+        [
+          "[\"A\"]",
+          "[\"B\"]"
+        ]
+      ],
+      "compression_ratio": 0.5,
+      "identifiable": false,
+      "name": "artificial_full_vector_collision",
+      "num_states": 2,
+      "num_tasks": 2,
+      "num_unique_signatures": 1,
+      "task_ids": [
+        "A",
+        "B"
+      ]
+    }
+  ],
+  "phase": "phase2_identifiability"
+}

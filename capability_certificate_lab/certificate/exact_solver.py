@@ -8,7 +8,11 @@ from typing import FrozenSet
 
 from ..knowledge_space.space import KnowledgeSpace
 from ..knowledge_space.state import KnowledgeState
-from ..validation.identifiability.core import Signature, response_signature
+from ..validation.identifiability.core import (
+    Signature,
+    response_signature,
+    validate_response_signature,
+)
 from .result import CertificateResult
 from .validator import validate_certificate, _ordered_valid_states
 
@@ -21,11 +25,11 @@ def _pair_difference_task_sets(
     num_states = len(states)
     signatures: list[Signature] = []
     for state in states:
-        signature = response_signature_fn(state, task_ids)
-        if len(signature) != len(task_ids):
-            raise ValueError(
-                "Response signature length must match task count for exact certificate solver."
-            )
+        signature = validate_response_signature(
+            response_signature_fn(state, task_ids),
+            len(task_ids),
+            "Response signature",
+        )
         signatures.append(signature)
 
     pair_differences: list[FrozenSet[str]] = []

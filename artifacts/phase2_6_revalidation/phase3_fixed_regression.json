@@ -1,0 +1,194 @@
+{
+  "exact_solver_note": "Exhaustive subset search remains the accepted temporary exact method.",
+  "phase": "phase3_fixed_regression",
+  "worlds": [
+    {
+      "name": "chain",
+      "results": {
+        "exact": {
+          "certificate_size": 4,
+          "method": "exact",
+          "runtime_ms": 0.08529052138328552,
+          "selected_tasks": [
+            "A",
+            "B",
+            "C",
+            "D"
+          ],
+          "separated_pairs": 10,
+          "state_count": 5,
+          "task_count": 4,
+          "total_pairs": 10,
+          "valid": true,
+          "validated_independently": true
+        },
+        "greedy": {
+          "certificate_size": 4,
+          "method": "greedy",
+          "runtime_ms": 0.056587159633636475,
+          "selected_tasks": [
+            "B",
+            "C",
+            "A",
+            "D"
+          ],
+          "separated_pairs": 10,
+          "state_count": 5,
+          "task_count": 4,
+          "total_pairs": 10,
+          "valid": true,
+          "validated_independently": true
+        },
+        "random": {
+          "certificate_size": 4,
+          "method": "random",
+          "runtime_ms": 0.06021559238433838,
+          "seed": 123,
+          "selected_tasks": [
+            "C",
+            "D",
+            "B",
+            "A"
+          ],
+          "separated_pairs": 10,
+          "state_count": 5,
+          "task_count": 4,
+          "total_pairs": 10,
+          "valid": true,
+          "validated_independently": true
+        }
+      },
+      "state_count": 5,
+      "task_ids": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ]
+    },
+    {
+      "name": "tree",
+      "results": {
+        "exact": {
+          "certificate_size": 4,
+          "method": "exact",
+          "runtime_ms": 0.07889419794082642,
+          "selected_tasks": [
+            "A",
+            "B",
+            "C",
+            "D"
+          ],
+          "separated_pairs": 21,
+          "state_count": 7,
+          "task_count": 4,
+          "total_pairs": 21,
+          "valid": true,
+          "validated_independently": true
+        },
+        "greedy": {
+          "certificate_size": 4,
+          "method": "greedy",
+          "runtime_ms": 0.06585940718650818,
+          "selected_tasks": [
+            "B",
+            "C",
+            "D",
+            "A"
+          ],
+          "separated_pairs": 21,
+          "state_count": 7,
+          "task_count": 4,
+          "total_pairs": 21,
+          "valid": true,
+          "validated_independently": true
+        },
+        "random": {
+          "certificate_size": 4,
+          "method": "random",
+          "runtime_ms": 0.06763637065887451,
+          "seed": 123,
+          "selected_tasks": [
+            "C",
+            "D",
+            "B",
+            "A"
+          ],
+          "separated_pairs": 21,
+          "state_count": 7,
+          "task_count": 4,
+          "total_pairs": 21,
+          "valid": true,
+          "validated_independently": true
+        }
+      },
+      "state_count": 7,
+      "task_ids": [
+        "A",
+        "B",
+        "C",
+        "D"
+      ]
+    },
+    {
+      "name": "unstructured",
+      "results": {
+        "exact": {
+          "certificate_size": 3,
+          "method": "exact",
+          "runtime_ms": 0.06972998380661011,
+          "selected_tasks": [
+            "Q0",
+            "Q1",
+            "Q2"
+          ],
+          "separated_pairs": 28,
+          "state_count": 8,
+          "task_count": 3,
+          "total_pairs": 28,
+          "valid": true,
+          "validated_independently": true
+        },
+        "greedy": {
+          "certificate_size": 3,
+          "method": "greedy",
+          "runtime_ms": 0.05965307354927063,
+          "selected_tasks": [
+            "Q0",
+            "Q1",
+            "Q2"
+          ],
+          "separated_pairs": 28,
+          "state_count": 8,
+          "task_count": 3,
+          "total_pairs": 28,
+          "valid": true,
+          "validated_independently": true
+        },
+        "random": {
+          "certificate_size": 3,
+          "method": "random",
+          "runtime_ms": 0.06577372550964355,
+          "seed": 123,
+          "selected_tasks": [
+            "Q2",
+            "Q1",
+            "Q0"
+          ],
+          "separated_pairs": 28,
+          "state_count": 8,
+          "task_count": 3,
+          "total_pairs": 28,
+          "valid": true,
+          "validated_independently": true
+        }
+      },
+      "state_count": 8,
+      "task_ids": [
+        "Q0",
+        "Q1",
+        "Q2"
+      ]
+    }
+  ]
+}

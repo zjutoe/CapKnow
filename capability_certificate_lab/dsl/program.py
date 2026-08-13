@@ -6,6 +6,11 @@ from typing import Any
 from .primitives import PrimitiveOperation
 
 
+def _validate_loop_max_iterations(max_iterations: object) -> None:
+    if type(max_iterations) is not int or max_iterations <= 0:
+        raise ValueError("Loop max_iterations must be a positive integer.")
+
+
 @dataclass(frozen=True)
 class Program:
     """Base interface for DSL nodes."""
@@ -61,7 +66,7 @@ class ConditionNode(Program):
     otherwise: Program | None = None
 
     def required_primitive_ids(self) -> set[str]:
-        required: set[str] = set()
+        required: set[str] = {"CONDITION"}
         required |= self.condition.required_primitive_ids()
         required |= self.then.required_primitive_ids()
         if self.otherwise is not None:
@@ -90,17 +95,14 @@ class LoopNode(Program):
     max_iterations: int
 
     def required_primitive_ids(self) -> set[str]:
-        if self.max_iterations <= 0:
-            # validation in constructor, keep consistent for all callers
-            raise ValueError("Loop max_iterations must be a positive integer.")
+        _validate_loop_max_iterations(self.max_iterations)
         return {"LOOP"} | self.body.required_primitive_ids()
 
     def to_task_id(self) -> str:
         return f"LOOP[{self.max_iterations}x{self.body.to_task_id()}]"
 
     def to_dict(self) -> dict[str, Any]:
-        if self.max_iterations <= 0:
-            raise ValueError("Loop max_iterations must be a positive integer.")
+        _validate_loop_max_iterations(self.max_iterations)
         return {
             "type": "loop",
             "max_iterations": self.max_iterations,

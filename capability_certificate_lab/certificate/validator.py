@@ -4,15 +4,35 @@ from collections.abc import Callable, Sequence
 
 from ..knowledge_space.space import KnowledgeSpace
 from ..knowledge_space.state import KnowledgeState
-from ..validation.identifiability.core import response_signature, Signature
+from ..validation.identifiability.core import (
+    response_signature,
+    Signature,
+    stable_state_id,
+    validate_response_signature,
+)
 
 
 def _ordered_valid_states(knowledge_space: KnowledgeSpace):
     task_ids = list(knowledge_space.tasks.task_ids)
-    valid_states = [
-        state for state in knowledge_space.valid_states if knowledge_space.is_valid_state(state)
+    declared_states = list(knowledge_space.valid_states)
+    seen: set[KnowledgeState] = set()
+    duplicates: list[str] = []
+    for state in declared_states:
+        if state in seen:
+            duplicates.append(stable_state_id(state, task_ids))
+        seen.add(state)
+    if duplicates:
+        raise ValueError(f"Duplicate declared states are not allowed: {duplicates}")
+
+    invalid = [
+        stable_state_id(state, task_ids)
+        for state in declared_states
+        if not knowledge_space.is_valid_state(state)
     ]
-    return sorted(valid_states, key=lambda state: state.as_tuple(task_ids)), task_ids
+    if invalid:
+        raise ValueError(f"Declared states violate world rules: {invalid}")
+
+    return sorted(declared_states, key=lambda state: state.as_tuple(task_ids)), task_ids
 
 
 def validate_certificate(
@@ -32,10 +52,10 @@ def validate_certificate(
     selected_tasks = list(certificate)
     signatures: list[Signature] = []
     for state in states:
-        signature = response_signature_fn(state, selected_tasks)
-        if len(signature) != len(selected_tasks):
-            raise ValueError(
-                "Response signature length must match selected task count for certificate validation."
-            )
+        signature = validate_response_signature(
+            response_signature_fn(state, selected_tasks),
+            len(selected_tasks),
+            "Response signature",
+        )
         signatures.append(signature)
     return len(set(signatures)) == len(states)

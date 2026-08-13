@@ -22,6 +22,7 @@ def _build_composite_rules(
     base_programs: dict[str, Program],
     composition_rules: Sequence[CompositionRule],
 ) -> dict[str, Program]:
+    _validate_composition_rules(base_programs, composition_rules)
     program_map = dict(base_programs)
     pending = list(composition_rules)
     changed = True
@@ -36,7 +37,7 @@ def _build_composite_rules(
                 next_pending.append(rule)
                 continue
             if rule.result in program_map:
-                continue
+                raise ValueError(f"Composition result id already exists: {rule.result}")
             program_map[rule.result] = build_composite_program(
                 rule,
                 left_program,
@@ -55,6 +56,32 @@ def _build_composite_rules(
         )
 
     return program_map
+
+
+def _validate_composition_rules(
+    base_programs: Mapping[str, Program],
+    composition_rules: Sequence[CompositionRule],
+) -> None:
+    primitive_ids = set(base_programs)
+    result_ids: set[str] = set()
+    pair_results: dict[tuple[str, str], str] = {}
+    for rule in composition_rules:
+        if rule.result in primitive_ids:
+            raise ValueError(
+                f"Composition result id '{rule.result}' collides with a primitive id."
+            )
+        if rule.result in result_ids:
+            raise ValueError(f"Duplicate composition result id '{rule.result}'.")
+        result_ids.add(rule.result)
+
+        pair = (rule.left, rule.right)
+        previous = pair_results.get(pair)
+        if previous is not None and previous != rule.result:
+            raise ValueError(
+                f"Conflicting composition results for {rule.left}+{rule.right}: "
+                f"{previous} vs {rule.result}."
+            )
+        pair_results[pair] = rule.result
 
 
 def _effective_composition_rules(

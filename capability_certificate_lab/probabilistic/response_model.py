@@ -40,11 +40,11 @@ def simulate_probabilistic_response(
 ) -> int | list[int]:
     """Simulate one or more Bernoulli draws for the same task."""
 
-    if not isinstance(attempts, int) or attempts <= 0:
+    if type(attempts) is not int or attempts <= 0:
         raise ValueError("attempts must be a positive integer.")
 
     generator = rng if rng is not None else Random()
     p_yes = response_probability(state_has_task, noise)
-    responses = [_binary_response_value(generator.random() <= p_yes) for _ in range(attempts)]
+    responses = [_binary_response_value(generator.random() < p_yes) for _ in range(attempts)]
 
     return responses[0] if attempts == 1 else responses

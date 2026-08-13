@@ -75,16 +75,31 @@ def _build_adaptive_tree(
         rng,
     )
     if question is None:
+        for task_id in task_ids:
+            if task_id in asked:
+                continue
+            no_states, yes_states = _split_states(
+                candidate_states,
+                task_id,
+                response_signature_fn,
+            )
+            if no_states and yes_states:
+                raise ValueError(
+                    "Adaptive policy returned None while an unasked splitting task remains."
+                )
         return DecisionNode(
             question=None,
             candidate_state_ids=_candidate_state_ids(candidate_states, task_ids),
         )
+    if question not in task_ids:
+        raise ValueError(f"Adaptive policy returned unknown task '{question}'.")
+    if question in asked:
+        raise ValueError(f"Adaptive policy returned repeated task '{question}'.")
 
     no_states, yes_states = _split_states(candidate_states, question, response_signature_fn)
     if not no_states or not yes_states:
-        return DecisionNode(
-            question=None,
-            candidate_state_ids=_candidate_state_ids(candidate_states, task_ids),
+        raise ValueError(
+            f"Adaptive policy returned non-splitting task '{question}' for current candidates."
         )
 
     next_asked = set(asked)
@@ -157,20 +172,7 @@ def solve_adaptive_certificate(
     start = perf_counter()
     states, task_ids = _ordered_valid_states(knowledge_space)
     if not states:
-        return AdaptiveCertificate(
-            root=DecisionNode(
-                question=None,
-                candidate_state_ids=[],
-            ),
-            worst_case_depth=0,
-            average_depth=0.0,
-            node_count=1,
-            valid=True,
-            method="adaptive",
-            policy="custom" if callable(policy) else str(policy),
-            seed=seed,
-            runtime_ms=(perf_counter() - start) * 1000,
-        )
+        raise ValueError("Declared valid_states must not be empty for adaptive certificates.")
 
     policy_name, policy_fn = resolve_policy(policy)
     rng = Random(seed) if seed is not None else None
@@ -215,32 +217,48 @@ def validate_adaptive_certificate(
 ) -> bool:
     states, task_ids = _ordered_valid_states(knowledge_space)
     if not states:
-        return certificate is not None and certificate.is_leaf()
+        return False
 
     if certificate is None:
         return False
 
     task_set = set(knowledge_space.tasks.task_ids)
 
-    for state in states:
-        node = certificate
-        target_id = stable_state_id(state, task_ids)
-        while node.question is not None:
-            if node.question not in task_set:
+    def _validate_node(
+        node: DecisionNode | None,
+        candidate_states: Sequence[KnowledgeState],
+        asked: set[str],
+    ) -> bool:
+        if node is None:
+            return False
+        if node.question is None:
+            if len(candidate_states) != 1:
                 return False
-            if node.yes_child is None and node.no_child is None:
+            candidate_state_ids = list(node.candidate_state_ids or ())
+            if len(candidate_state_ids) != 1:
                 return False
+            expected_id = stable_state_id(candidate_states[0], task_ids)
+            return candidate_state_ids == [expected_id]
 
-            response = _answer_bit(state, node.question, response_signature_fn)
-            node = node.yes_child if response else node.no_child
-            if node is None:
-                return False
-
-        candidate_state_ids = set(node.candidate_state_ids or ())
-        if len(candidate_state_ids) != 1:
+        if node.question not in task_set or node.question in asked:
+            return False
+        if node.yes_child is None or node.no_child is None:
             return False
 
-        if target_id not in candidate_state_ids:
+        no_states, yes_states = _split_states(
+            candidate_states,
+            node.question,
+            response_signature_fn,
+        )
+        if not no_states or not yes_states:
             return False
 
-    return True
+        next_asked = set(asked)
+        next_asked.add(node.question)
+        return _validate_node(node.yes_child, yes_states, next_asked) and _validate_node(
+            node.no_child,
+            no_states,
+            next_asked,
+        )
+
+    return _validate_node(certificate, states, set())

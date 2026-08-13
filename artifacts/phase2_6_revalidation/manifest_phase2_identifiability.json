@@ -1,0 +1,29 @@
+{
+  "command": "PYTHONPATH=. python scripts/revalidation_phase2_identifiability.py",
+  "config": {
+    "cases": [
+      "chain",
+      "tree",
+      "unstructured",
+      "artificial_full_vector_collision"
+    ]
+  },
+  "outputs": {
+    "artifacts/phase2_6_revalidation/phase2_identifiability.json": "fe0d5c959816fe9b6578eb1c45756f7d57079d914be6a5529e36c5ee5cea3a5c"
+  },
+  "phase": "phase2_identifiability",
+  "python_version": "3.13.9",
+  "script": "scripts/revalidation_phase2_identifiability.py",
+  "source": {
+    "baseline_commit": "1648c8f201936e56f7eb0544b39c45cf0f431c9b",
+    "clean_worktree_before_run": true,
+    "git_head": "1bfc6ced88cf3397f240c3e79d1996955e9d589f",
+    "git_status_porcelain_before_run": "",
+    "handoff_paths": [
+      "Capability_Certificate_Task_Handoff_007_Correctness_Repair_and_Revalidation.md",
+      "Capability_Certificate_Task_Handoff_008_Second_Review_Repair.md"
+    ],
+    "source_binding": "git_commit",
+    "tracked_source_note": "Git commit is the source identity; checksums bind outputs only."
+  }
+}

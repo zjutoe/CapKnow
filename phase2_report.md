@@ -1,36 +1,35 @@
 # Phase 2 Report: Identifiability Audit
 
-## 实现内容
+Status: the clean revalidation below is bound to source commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`. The combined Phase 2-6 evidence package was accepted by final independent scientific review on 2026-08-13.
 
-- 新增 `validation/identifiability` 审计模块。
-- 新增 `response_signature(state, task_ids)`。
-- 新增 `check_identifiability(knowledge_space)`。
-- 新增稳定状态 ID 及压缩比指标。
-- 新增 `IdentifiabilityReport` 数据结构与 `to_dict`。
-- 新增示例：`examples/run_identifiability_audit.py`。
-- 新增单测：`tests/test_identifiability.py`。
+## Corrected Contract
 
-## identifiability 定义
+Phase 2 now treats `KnowledgeSpace.valid_states` as the declared scientific population.
 
-- 对每个合法状态 K 生成完整响应签名 R(K) = (Y(q1),...,Y(qn))。
-- 若存在 K_i ≠ K_j 且 R(K_i)=R(K_j)，则判定出现 collision。
-- 当 collision 组数为 0 时，定义为可识别（identifiable）。
+- Empty declared populations raise `ValueError`.
+- Invalid declared states raise `ValueError`; they are not silently filtered.
+- Duplicate declared `KnowledgeState` entries raise `ValueError`.
+- Response signatures must have exactly one binary coordinate per queried task.
+- Stable state IDs use canonical JSON arrays, so task IDs containing commas, quotes, braces, or backslashes do not collide.
 
-## 测试结果
+## Tests
 
-- 运行 `python -m pytest tests/test_identifiability.py`
-- 收集并执行 4 项：全部通过
-  - `test_chain_space_is_identifiable`
-  - `test_artificial_collision_is_detected`
-  - `test_tree_space_is_identifiable`
-  - `test_unstructured_state_signatures_are_unique`
-- 示例脚本命令为 `python examples/run_identifiability_audit.py`（从仓库根目录直接运行）。
+- `python -m pytest -q tests/test_identifiability.py`
+- Result: `7 passed in 0.01s`
 
-## Collision 示例
+## Revalidation Summary
 
-- 人工世界测试通过 `response_signature_fn` 注入验证 collision 的发现能力。
+Current clean artifact: `artifacts/phase2_6_revalidation/phase2_identifiability.json` (source commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`; result `fe0d5c959816fe9b6578eb1c45756f7d57079d914be6a5529e36c5ee5cea3a5c`; manifest `fc31ab28ed66e8f54d808fcae28d94a5c44a8e495785211d219e296c66174bcd`).
 
-## 当前限制
+| case | tasks | states | unique signatures | identifiable | collisions |
+| --- | ---: | ---: | ---: | --- | ---: |
+| chain | 4 | 5 | 5 | true | 0 |
+| tree | 4 | 7 | 7 | true | 0 |
+| unstructured | 3 | 8 | 8 | true | 0 |
+| artificial full-vector collision | 2 | 2 | 1 | false | 1 |
 
-- 审计默认按 `KnowledgeSpace.valid_states` 进行，并默认只对 `is_valid_state` 为真的状态进行统计。
-- 人工 collision 用例依赖于可选的签名构造函数注入。
+Malformed-world cases are covered by pytest and are not counted as scientific experiment conditions.
+
+## Historical Correction
+
+The earlier report said the audit filtered states through `is_valid_state`. That behavior is invalid for this milestone because it can turn malformed declared populations into vacuous success.

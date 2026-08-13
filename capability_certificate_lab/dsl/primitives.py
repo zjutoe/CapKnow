@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 
 @dataclass(frozen=True)
@@ -24,18 +24,18 @@ class PrimitiveOperation:
         }
 
 
-def _primitive_id(op_id: str) -> PrimitiveOperation:
-    return PrimitiveOperation(op_id=op_id, input_type="any", output_type="any")
+def _primitive_id(op_id: str, input_type: str, output_type: str) -> PrimitiveOperation:
+    return PrimitiveOperation(op_id=op_id, input_type=input_type, output_type=output_type)
 
 
 PRIMITIVES: dict[str, PrimitiveOperation] = {
-    "ADD": _primitive_id("ADD"),
-    "COMPARE": _primitive_id("COMPARE"),
-    "MEMORY": _primitive_id("MEMORY"),
-    "SEARCH": _primitive_id("SEARCH"),
-    "FILTER": _primitive_id("FILTER"),
-    "LOOP": _primitive_id("LOOP"),
-    "CONDITION": _primitive_id("CONDITION"),
+    "ADD": _primitive_id("ADD", "numeric_pair", "number"),
+    "COMPARE": _primitive_id("COMPARE", "comparison_pair", "bool"),
+    "MEMORY": _primitive_id("MEMORY", "memory_lookup", "memory_context"),
+    "SEARCH": _primitive_id("SEARCH", "search_context", "bool"),
+    "FILTER": _primitive_id("FILTER", "filter_context", "list"),
+    "LOOP": _primitive_id("LOOP", "loop_value", "loop_value"),
+    "CONDITION": _primitive_id("CONDITION", "condition_value", "bool"),
 }
 
 
@@ -58,4 +58,3 @@ def get_primitive(op_id: str) -> PrimitiveOperation:
 
 def list_primitives() -> Sequence[PrimitiveOperation]:
     return tuple(PRIMITIVES.values())
-
