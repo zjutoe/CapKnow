@@ -110,7 +110,7 @@
     ]
   },
   "outputs": {
-    "artifacts/phase2_6_revalidation/phase4_adaptive_regression.json": "54ce70064d113b0b7d63c9f76596e30974e86c84be501bb12e9f158a5c280a07"
+    "artifacts/phase2_6_revalidation/phase4_adaptive_regression.json": "1d00e83570164b7253c724cb68e4c5760c283d459a4097621bd88079d96dd39d"
   },
   "phase": "phase4_adaptive_regression",
   "python_version": "3.13.9",
@@ -118,7 +118,7 @@
   "source": {
     "baseline_commit": "1648c8f201936e56f7eb0544b39c45cf0f431c9b",
     "clean_worktree_before_run": true,
-    "git_head": "dc6a837ac20aad967da76a69d50c0b5b2bfe7379",
+    "git_head": "1bfc6ced88cf3397f240c3e79d1996955e9d589f",
     "git_status_porcelain_before_run": "",
     "handoff_paths": [
       "Capability_Certificate_Task_Handoff_007_Correctness_Repair_and_Revalidation.md",

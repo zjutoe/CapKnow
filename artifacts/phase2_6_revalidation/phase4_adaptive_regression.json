@@ -162,7 +162,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.11241436004638672,
+              "runtime_ms": 0.10817497968673706,
               "seed": null,
               "valid": true,
               "worst_case_depth": 3
@@ -225,7 +225,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.16485527157783508,
+              "runtime_ms": 0.15492364764213562,
               "seed": null,
               "valid": true,
               "worst_case_depth": 3
@@ -288,7 +288,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.12544915080070496,
+              "runtime_ms": 0.11874735355377197,
               "seed": 0,
               "valid": true,
               "worst_case_depth": 3
@@ -341,7 +341,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.11508166790008545,
+              "runtime_ms": 0.10188296437263489,
               "seed": 1,
               "valid": true,
               "worst_case_depth": 3
@@ -394,7 +394,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1051872968673706,
+              "runtime_ms": 0.10818615555763245,
               "seed": 2,
               "valid": true,
               "worst_case_depth": 4
@@ -447,7 +447,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10496005415916443,
+              "runtime_ms": 0.09542331099510193,
               "seed": 3,
               "valid": true,
               "worst_case_depth": 3
@@ -500,7 +500,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.2664625644683838,
+              "runtime_ms": 0.2514757215976715,
               "seed": 4,
               "valid": true,
               "worst_case_depth": 3
@@ -553,7 +553,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10316073894500732,
+              "runtime_ms": 0.09379163384437561,
               "seed": 5,
               "valid": true,
               "worst_case_depth": 3
@@ -606,7 +606,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10328367352485657,
+              "runtime_ms": 0.09500235319137573,
               "seed": 6,
               "valid": true,
               "worst_case_depth": 3
@@ -659,7 +659,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10323897004127502,
+              "runtime_ms": 0.0955238938331604,
               "seed": 7,
               "valid": true,
               "worst_case_depth": 3
@@ -712,7 +712,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09763985872268677,
+              "runtime_ms": 0.09208545088768005,
               "seed": 8,
               "valid": true,
               "worst_case_depth": 3
@@ -765,7 +765,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10060518980026245,
+              "runtime_ms": 0.09620189666748047,
               "seed": 9,
               "valid": true,
               "worst_case_depth": 4
@@ -818,7 +818,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09866803884506226,
+              "runtime_ms": 0.09466707706451416,
               "seed": 10,
               "valid": true,
               "worst_case_depth": 3
@@ -871,7 +871,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10123476386070251,
+              "runtime_ms": 0.09668990969657898,
               "seed": 11,
               "valid": true,
               "worst_case_depth": 4
@@ -924,7 +924,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09987130761146545,
+              "runtime_ms": 0.093020498752594,
               "seed": 12,
               "valid": true,
               "worst_case_depth": 3
@@ -977,7 +977,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09888038039207458,
+              "runtime_ms": 0.09426474571228027,
               "seed": 13,
               "valid": true,
               "worst_case_depth": 3
@@ -1030,7 +1030,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.11645257472991943,
+              "runtime_ms": 0.10181963443756104,
               "seed": 14,
               "valid": true,
               "worst_case_depth": 4
@@ -1083,7 +1083,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09764730930328369,
+              "runtime_ms": 0.09307265281677246,
               "seed": 15,
               "valid": true,
               "worst_case_depth": 3
@@ -1136,7 +1136,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0979006290435791,
+              "runtime_ms": 0.09892135858535767,
               "seed": 16,
               "valid": true,
               "worst_case_depth": 3
@@ -1189,7 +1189,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09882822632789612,
+              "runtime_ms": 0.09459629654884338,
               "seed": 17,
               "valid": true,
               "worst_case_depth": 3
@@ -1242,7 +1242,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0986829400062561,
+              "runtime_ms": 0.09258836507797241,
               "seed": 18,
               "valid": true,
               "worst_case_depth": 3
@@ -1295,7 +1295,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09870156645774841,
+              "runtime_ms": 0.09357929229736328,
               "seed": 19,
               "valid": true,
               "worst_case_depth": 4
@@ -1348,7 +1348,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10091811418533325,
+              "runtime_ms": 0.09745731949806213,
               "seed": 20,
               "valid": true,
               "worst_case_depth": 3
@@ -1401,7 +1401,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09730085730552673,
+              "runtime_ms": 0.09242072701454163,
               "seed": 21,
               "valid": true,
               "worst_case_depth": 3
@@ -1454,7 +1454,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09686872363090515,
+              "runtime_ms": 0.09806454181671143,
               "seed": 22,
               "valid": true,
               "worst_case_depth": 3
@@ -1507,7 +1507,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10066106915473938,
+              "runtime_ms": 0.09329989552497864,
               "seed": 23,
               "valid": true,
               "worst_case_depth": 3
@@ -1560,7 +1560,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10177120566368103,
+              "runtime_ms": 0.09832903742790222,
               "seed": 24,
               "valid": true,
               "worst_case_depth": 4
@@ -1613,7 +1613,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09967759251594543,
+              "runtime_ms": 0.09203702211380005,
               "seed": 25,
               "valid": true,
               "worst_case_depth": 4
@@ -1666,7 +1666,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0964924693107605,
+              "runtime_ms": 0.09425356984138489,
               "seed": 26,
               "valid": true,
               "worst_case_depth": 3
@@ -1719,7 +1719,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10577961802482605,
+              "runtime_ms": 0.09856373071670532,
               "seed": 27,
               "valid": true,
               "worst_case_depth": 4
@@ -1772,7 +1772,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10378286242485046,
+              "runtime_ms": 0.09558349847793579,
               "seed": 28,
               "valid": true,
               "worst_case_depth": 4
@@ -1825,7 +1825,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10281428694725037,
+              "runtime_ms": 0.09524822235107422,
               "seed": 29,
               "valid": true,
               "worst_case_depth": 3
@@ -1878,7 +1878,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09971857070922852,
+              "runtime_ms": 0.09344145655632019,
               "seed": 30,
               "valid": true,
               "worst_case_depth": 3
@@ -1931,7 +1931,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10094791650772095,
+              "runtime_ms": 0.09175390005111694,
               "seed": 31,
               "valid": true,
               "worst_case_depth": 3
@@ -1984,7 +1984,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09673833847045898,
+              "runtime_ms": 0.0909753143787384,
               "seed": 32,
               "valid": true,
               "worst_case_depth": 4
@@ -2037,7 +2037,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09758397936820984,
+              "runtime_ms": 0.09293854236602783,
               "seed": 33,
               "valid": true,
               "worst_case_depth": 3
@@ -2090,7 +2090,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09780749678611755,
+              "runtime_ms": 0.09117275476455688,
               "seed": 34,
               "valid": true,
               "worst_case_depth": 3
@@ -2143,7 +2143,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09744241833686829,
+              "runtime_ms": 0.09273737668991089,
               "seed": 35,
               "valid": true,
               "worst_case_depth": 3
@@ -2196,7 +2196,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1012757420539856,
+              "runtime_ms": 0.09395554661750793,
               "seed": 36,
               "valid": true,
               "worst_case_depth": 3
@@ -2249,7 +2249,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10007619857788086,
+              "runtime_ms": 0.0945553183555603,
               "seed": 37,
               "valid": true,
               "worst_case_depth": 4
@@ -2302,7 +2302,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10031089186668396,
+              "runtime_ms": 0.09381771087646484,
               "seed": 38,
               "valid": true,
               "worst_case_depth": 3
@@ -2355,7 +2355,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09718537330627441,
+              "runtime_ms": 0.0987909734249115,
               "seed": 39,
               "valid": true,
               "worst_case_depth": 3
@@ -2408,7 +2408,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10460242629051208,
+              "runtime_ms": 0.09909644722938538,
               "seed": 40,
               "valid": true,
               "worst_case_depth": 4
@@ -2461,7 +2461,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09883567690849304,
+              "runtime_ms": 0.09718537330627441,
               "seed": 41,
               "valid": true,
               "worst_case_depth": 3
@@ -2514,7 +2514,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10003149509429932,
+              "runtime_ms": 0.09750574827194214,
               "seed": 42,
               "valid": true,
               "worst_case_depth": 4
@@ -2567,7 +2567,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1016668975353241,
+              "runtime_ms": 0.09514763951301575,
               "seed": 43,
               "valid": true,
               "worst_case_depth": 3
@@ -2620,7 +2620,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.1017153263092041,
+              "runtime_ms": 0.09616091847419739,
               "seed": 44,
               "valid": true,
               "worst_case_depth": 4
@@ -2673,7 +2673,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09772926568984985,
+              "runtime_ms": 0.09579956531524658,
               "seed": 45,
               "valid": true,
               "worst_case_depth": 3
@@ -2726,7 +2726,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09803473949432373,
+              "runtime_ms": 0.09559467434883118,
               "seed": 46,
               "valid": true,
               "worst_case_depth": 3
@@ -2779,7 +2779,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0985860824584961,
+              "runtime_ms": 0.09757652878761292,
               "seed": 47,
               "valid": true,
               "worst_case_depth": 3
@@ -2832,7 +2832,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09786337614059448,
+              "runtime_ms": 0.09402632713317871,
               "seed": 48,
               "valid": true,
               "worst_case_depth": 3
@@ -2885,7 +2885,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09848177433013916,
+              "runtime_ms": 0.09563565254211426,
               "seed": 49,
               "valid": true,
               "worst_case_depth": 3
@@ -2938,7 +2938,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09899958968162537,
+              "runtime_ms": 0.09434297680854797,
               "seed": 50,
               "valid": true,
               "worst_case_depth": 3
@@ -2991,7 +2991,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10596960783004761,
+              "runtime_ms": 0.09499862790107727,
               "seed": 51,
               "valid": true,
               "worst_case_depth": 3
@@ -3044,7 +3044,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09872019290924072,
+              "runtime_ms": 0.09648874402046204,
               "seed": 52,
               "valid": true,
               "worst_case_depth": 3
@@ -3097,7 +3097,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10185688734054565,
+              "runtime_ms": 0.09261444211006165,
               "seed": 53,
               "valid": true,
               "worst_case_depth": 3
@@ -3150,7 +3150,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10595470666885376,
+              "runtime_ms": 0.09615346789360046,
               "seed": 54,
               "valid": true,
               "worst_case_depth": 3
@@ -3203,7 +3203,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10056048631668091,
+              "runtime_ms": 0.09625032544136047,
               "seed": 55,
               "valid": true,
               "worst_case_depth": 4
@@ -3256,7 +3256,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10392069816589355,
+              "runtime_ms": 0.09895488619804382,
               "seed": 56,
               "valid": true,
               "worst_case_depth": 3
@@ -3309,7 +3309,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10050460696220398,
+              "runtime_ms": 0.09192526340484619,
               "seed": 57,
               "valid": true,
               "worst_case_depth": 3
@@ -3362,7 +3362,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10215491056442261,
+              "runtime_ms": 0.09406358003616333,
               "seed": 58,
               "valid": true,
               "worst_case_depth": 3
@@ -3415,7 +3415,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0995434820652008,
+              "runtime_ms": 0.09404867887496948,
               "seed": 59,
               "valid": true,
               "worst_case_depth": 3
@@ -3468,7 +3468,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09664148092269897,
+              "runtime_ms": 0.09158998727798462,
               "seed": 60,
               "valid": true,
               "worst_case_depth": 3
@@ -3521,7 +3521,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09921938180923462,
+              "runtime_ms": 0.0963062047958374,
               "seed": 61,
               "valid": true,
               "worst_case_depth": 4
@@ -3574,7 +3574,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09815394878387451,
+              "runtime_ms": 0.10371208190917969,
               "seed": 62,
               "valid": true,
               "worst_case_depth": 3
@@ -3627,7 +3627,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10078400373458862,
+              "runtime_ms": 0.0955723226070404,
               "seed": 63,
               "valid": true,
               "worst_case_depth": 3
@@ -3680,7 +3680,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.0984780490398407,
+              "runtime_ms": 0.09543076157569885,
               "seed": 64,
               "valid": true,
               "worst_case_depth": 4
@@ -3733,7 +3733,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10784342885017395,
+              "runtime_ms": 0.09663403034210205,
               "seed": 65,
               "valid": true,
               "worst_case_depth": 3
@@ -3786,7 +3786,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09864568710327148,
+              "runtime_ms": 0.09218975901603699,
               "seed": 66,
               "valid": true,
               "worst_case_depth": 3
@@ -3839,7 +3839,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09742751717567444,
+              "runtime_ms": 0.09160861372947693,
               "seed": 67,
               "valid": true,
               "worst_case_depth": 4
@@ -3892,7 +3892,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 1.5603713691234589,
+              "runtime_ms": 1.5808269381523132,
               "seed": 68,
               "valid": true,
               "worst_case_depth": 4
@@ -3945,7 +3945,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14412403106689453,
+              "runtime_ms": 0.10921061038970947,
               "seed": 69,
               "valid": true,
               "worst_case_depth": 4
@@ -3998,7 +3998,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10489672422409058,
+              "runtime_ms": 0.09800493717193604,
               "seed": 70,
               "valid": true,
               "worst_case_depth": 3
@@ -4051,7 +4051,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10431930422782898,
+              "runtime_ms": 0.0969618558883667,
               "seed": 71,
               "valid": true,
               "worst_case_depth": 3
@@ -4104,7 +4104,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10280683636665344,
+              "runtime_ms": 0.09576603770256042,
               "seed": 72,
               "valid": true,
               "worst_case_depth": 4
@@ -4157,7 +4157,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09976327419281006,
+              "runtime_ms": 0.09385868906974792,
               "seed": 73,
               "valid": true,
               "worst_case_depth": 3
@@ -4210,7 +4210,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0996217131614685,
+              "runtime_ms": 0.09227916598320007,
               "seed": 74,
               "valid": true,
               "worst_case_depth": 3
@@ -4263,7 +4263,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10220333933830261,
+              "runtime_ms": 0.09349361062049866,
               "seed": 75,
               "valid": true,
               "worst_case_depth": 4
@@ -4316,7 +4316,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10430440306663513,
+              "runtime_ms": 0.09145587682723999,
               "seed": 76,
               "valid": true,
               "worst_case_depth": 3
@@ -4369,7 +4369,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09746477007865906,
+              "runtime_ms": 0.09432807564735413,
               "seed": 77,
               "valid": true,
               "worst_case_depth": 3
@@ -4422,7 +4422,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09923800826072693,
+              "runtime_ms": 0.0928826630115509,
               "seed": 78,
               "valid": true,
               "worst_case_depth": 3
@@ -4475,7 +4475,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0965707004070282,
+              "runtime_ms": 0.09246543049812317,
               "seed": 79,
               "valid": true,
               "worst_case_depth": 3
@@ -4528,7 +4528,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09989365935325623,
+              "runtime_ms": 0.09072944521903992,
               "seed": 80,
               "valid": true,
               "worst_case_depth": 3
@@ -4581,7 +4581,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09950995445251465,
+              "runtime_ms": 0.09627267718315125,
               "seed": 81,
               "valid": true,
               "worst_case_depth": 3
@@ -4634,7 +4634,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09678676724433899,
+              "runtime_ms": 0.09224563837051392,
               "seed": 82,
               "valid": true,
               "worst_case_depth": 3
@@ -4687,7 +4687,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10070949792861938,
+              "runtime_ms": 0.0930391252040863,
               "seed": 83,
               "valid": true,
               "worst_case_depth": 3
@@ -4740,7 +4740,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0968053936958313,
+              "runtime_ms": 0.0951625406742096,
               "seed": 84,
               "valid": true,
               "worst_case_depth": 3
@@ -4793,7 +4793,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10051950812339783,
+              "runtime_ms": 0.09403005242347717,
               "seed": 85,
               "valid": true,
               "worst_case_depth": 3
@@ -4846,7 +4846,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09978190064430237,
+              "runtime_ms": 0.09613484144210815,
               "seed": 86,
               "valid": true,
               "worst_case_depth": 4
@@ -4899,7 +4899,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10009855031967163,
+              "runtime_ms": 0.09945780038833618,
               "seed": 87,
               "valid": true,
               "worst_case_depth": 3
@@ -4952,7 +4952,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10283291339874268,
+              "runtime_ms": 0.09491294622421265,
               "seed": 88,
               "valid": true,
               "worst_case_depth": 4
@@ -5005,7 +5005,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10028481483459473,
+              "runtime_ms": 0.1013539731502533,
               "seed": 89,
               "valid": true,
               "worst_case_depth": 4
@@ -5058,7 +5058,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.0961795449256897,
+              "runtime_ms": 0.09370595216751099,
               "seed": 90,
               "valid": true,
               "worst_case_depth": 3
@@ -5111,7 +5111,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10819360613822937,
+              "runtime_ms": 0.09154155850410461,
               "seed": 91,
               "valid": true,
               "worst_case_depth": 4
@@ -5164,7 +5164,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.10191649198532104,
+              "runtime_ms": 0.09528547525405884,
               "seed": 92,
               "valid": true,
               "worst_case_depth": 4
@@ -5217,7 +5217,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09767711162567139,
+              "runtime_ms": 0.0950060784816742,
               "seed": 93,
               "valid": true,
               "worst_case_depth": 4
@@ -5270,7 +5270,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09785965085029602,
+              "runtime_ms": 0.0929124653339386,
               "seed": 94,
               "valid": true,
               "worst_case_depth": 3
@@ -5323,7 +5323,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09890273213386536,
+              "runtime_ms": 0.09366869926452637,
               "seed": 95,
               "valid": true,
               "worst_case_depth": 3
@@ -5376,7 +5376,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09818375110626221,
+              "runtime_ms": 0.09262189269065857,
               "seed": 96,
               "valid": true,
               "worst_case_depth": 3
@@ -5429,7 +5429,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.09982287883758545,
+              "runtime_ms": 0.09943172335624695,
               "seed": 97,
               "valid": true,
               "worst_case_depth": 3
@@ -5482,7 +5482,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.10363385081291199,
+              "runtime_ms": 0.09131059050559998,
               "seed": 98,
               "valid": true,
               "worst_case_depth": 3
@@ -5535,7 +5535,7 @@
                   "question": null
                 }
               },
-              "runtime_ms": 0.09911507368087769,
+              "runtime_ms": 0.09387359023094177,
               "seed": 99,
               "valid": true,
               "worst_case_depth": 3
@@ -5626,7 +5626,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13541057705879211,
+              "runtime_ms": 0.12764334678649902,
               "seed": null,
               "valid": true,
               "worst_case_depth": 3
@@ -5707,7 +5707,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13811886310577393,
+              "runtime_ms": 0.13863667845726013,
               "seed": null,
               "valid": true,
               "worst_case_depth": 3
@@ -5788,7 +5788,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14665350317955017,
+              "runtime_ms": 0.14345720410346985,
               "seed": 0,
               "valid": true,
               "worst_case_depth": 4
@@ -5859,7 +5859,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13543665409088135,
+              "runtime_ms": 0.12882426381111145,
               "seed": 1,
               "valid": true,
               "worst_case_depth": 3
@@ -5930,7 +5930,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13779476284980774,
+              "runtime_ms": 0.13148784637451172,
               "seed": 2,
               "valid": true,
               "worst_case_depth": 4
@@ -6001,7 +6001,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1344829797744751,
+              "runtime_ms": 0.12760981917381287,
               "seed": 3,
               "valid": true,
               "worst_case_depth": 3
@@ -6072,7 +6072,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13352930545806885,
+              "runtime_ms": 0.13204291462898254,
               "seed": 4,
               "valid": true,
               "worst_case_depth": 3
@@ -6143,7 +6143,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1383274793624878,
+              "runtime_ms": 0.1289770007133484,
               "seed": 5,
               "valid": true,
               "worst_case_depth": 3
@@ -6214,7 +6214,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14149397611618042,
+              "runtime_ms": 0.13084709644317627,
               "seed": 6,
               "valid": true,
               "worst_case_depth": 4
@@ -6285,7 +6285,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14338642358779907,
+              "runtime_ms": 0.13319775462150574,
               "seed": 7,
               "valid": true,
               "worst_case_depth": 4
@@ -6356,7 +6356,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13403967022895813,
+              "runtime_ms": 0.12471526861190796,
               "seed": 8,
               "valid": true,
               "worst_case_depth": 3
@@ -6427,7 +6427,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13981759548187256,
+              "runtime_ms": 0.1323223114013672,
               "seed": 9,
               "valid": true,
               "worst_case_depth": 4
@@ -6498,7 +6498,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13396143913269043,
+              "runtime_ms": 0.1301877200603485,
               "seed": 10,
               "valid": true,
               "worst_case_depth": 4
@@ -6569,7 +6569,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14502927660942078,
+              "runtime_ms": 0.15357136726379395,
               "seed": 11,
               "valid": true,
               "worst_case_depth": 4
@@ -6640,7 +6640,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13328716158866882,
+              "runtime_ms": 0.12561678886413574,
               "seed": 12,
               "valid": true,
               "worst_case_depth": 4
@@ -6711,7 +6711,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1333281397819519,
+              "runtime_ms": 0.1332014799118042,
               "seed": 13,
               "valid": true,
               "worst_case_depth": 4
@@ -6782,7 +6782,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1433640718460083,
+              "runtime_ms": 0.13581663370132446,
               "seed": 14,
               "valid": true,
               "worst_case_depth": 4
@@ -6853,7 +6853,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1331046223640442,
+              "runtime_ms": 0.13076886534690857,
               "seed": 15,
               "valid": true,
               "worst_case_depth": 3
@@ -6924,7 +6924,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.15116482973098755,
+              "runtime_ms": 0.1399889588356018,
               "seed": 16,
               "valid": true,
               "worst_case_depth": 3
@@ -6995,7 +6995,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13553723692893982,
+              "runtime_ms": 0.13301149010658264,
               "seed": 17,
               "valid": true,
               "worst_case_depth": 4
@@ -7066,7 +7066,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.138796865940094,
+              "runtime_ms": 0.1293867826461792,
               "seed": 18,
               "valid": true,
               "worst_case_depth": 3
@@ -7137,7 +7137,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13776123523712158,
+              "runtime_ms": 0.1296401023864746,
               "seed": 19,
               "valid": true,
               "worst_case_depth": 4
@@ -7208,7 +7208,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13374164700508118,
+              "runtime_ms": 0.12924522161483765,
               "seed": 20,
               "valid": true,
               "worst_case_depth": 3
@@ -7279,7 +7279,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13279542326927185,
+              "runtime_ms": 0.12775138020515442,
               "seed": 21,
               "valid": true,
               "worst_case_depth": 3
@@ -7350,7 +7350,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14015287160873413,
+              "runtime_ms": 0.13646110892295837,
               "seed": 22,
               "valid": true,
               "worst_case_depth": 3
@@ -7421,7 +7421,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1420155167579651,
+              "runtime_ms": 0.13117492198944092,
               "seed": 23,
               "valid": true,
               "worst_case_depth": 4
@@ -7492,7 +7492,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.136595219373703,
+              "runtime_ms": 0.13059377670288086,
               "seed": 24,
               "valid": true,
               "worst_case_depth": 4
@@ -7563,7 +7563,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13829022645950317,
+              "runtime_ms": 0.1326054334640503,
               "seed": 25,
               "valid": true,
               "worst_case_depth": 4
@@ -7634,7 +7634,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13423338532447815,
+              "runtime_ms": 0.12834742665290833,
               "seed": 26,
               "valid": true,
               "worst_case_depth": 3
@@ -7705,7 +7705,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.24840980768203735,
+              "runtime_ms": 0.23866072297096252,
               "seed": 27,
               "valid": true,
               "worst_case_depth": 4
@@ -7776,7 +7776,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14155730605125427,
+              "runtime_ms": 0.13732165098190308,
               "seed": 28,
               "valid": true,
               "worst_case_depth": 4
@@ -7847,7 +7847,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14027580618858337,
+              "runtime_ms": 0.13153627514839172,
               "seed": 29,
               "valid": true,
               "worst_case_depth": 4
@@ -7918,7 +7918,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13780221343040466,
+              "runtime_ms": 0.13052672147750854,
               "seed": 30,
               "valid": true,
               "worst_case_depth": 3
@@ -7989,7 +7989,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13457238674163818,
+              "runtime_ms": 0.12994185090065002,
               "seed": 31,
               "valid": true,
               "worst_case_depth": 4
@@ -8060,7 +8060,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14236196875572205,
+              "runtime_ms": 0.1284293830394745,
               "seed": 32,
               "valid": true,
               "worst_case_depth": 4
@@ -8131,7 +8131,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13475865125656128,
+              "runtime_ms": 0.12720376253128052,
               "seed": 33,
               "valid": true,
               "worst_case_depth": 3
@@ -8202,7 +8202,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13785064220428467,
+              "runtime_ms": 0.1327618956565857,
               "seed": 34,
               "valid": true,
               "worst_case_depth": 4
@@ -8273,7 +8273,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13666972517967224,
+              "runtime_ms": 0.12950226664543152,
               "seed": 35,
               "valid": true,
               "worst_case_depth": 4
@@ -8344,7 +8344,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1365356147289276,
+              "runtime_ms": 0.13111159205436707,
               "seed": 36,
               "valid": true,
               "worst_case_depth": 3
@@ -8415,7 +8415,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.20844489336013794,
+              "runtime_ms": 0.13123825192451477,
               "seed": 37,
               "valid": true,
               "worst_case_depth": 4
@@ -8486,7 +8486,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13434886932373047,
+              "runtime_ms": 0.13535469770431519,
               "seed": 38,
               "valid": true,
               "worst_case_depth": 4
@@ -8557,7 +8557,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13295933604240417,
+              "runtime_ms": 0.12740492820739746,
               "seed": 39,
               "valid": true,
               "worst_case_depth": 3
@@ -8628,7 +8628,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13366341590881348,
+              "runtime_ms": 0.1291707158088684,
               "seed": 40,
               "valid": true,
               "worst_case_depth": 4
@@ -8699,7 +8699,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13675540685653687,
+              "runtime_ms": 0.12747198343276978,
               "seed": 41,
               "valid": true,
               "worst_case_depth": 4
@@ -8770,7 +8770,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1386776566505432,
+              "runtime_ms": 0.12661516666412354,
               "seed": 42,
               "valid": true,
               "worst_case_depth": 4
@@ -8841,7 +8841,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1354403793811798,
+              "runtime_ms": 0.12957677245140076,
               "seed": 43,
               "valid": true,
               "worst_case_depth": 4
@@ -8912,7 +8912,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13613328337669373,
+              "runtime_ms": 0.13175979256629944,
               "seed": 44,
               "valid": true,
               "worst_case_depth": 4
@@ -8983,7 +8983,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13616308569908142,
+              "runtime_ms": 0.1303553581237793,
               "seed": 45,
               "valid": true,
               "worst_case_depth": 3
@@ -9054,7 +9054,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1371912658214569,
+              "runtime_ms": 0.12726709246635437,
               "seed": 46,
               "valid": true,
               "worst_case_depth": 4
@@ -9125,7 +9125,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13337284326553345,
+              "runtime_ms": 0.12825429439544678,
               "seed": 47,
               "valid": true,
               "worst_case_depth": 4
@@ -9196,7 +9196,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13647973537445068,
+              "runtime_ms": 0.12870877981185913,
               "seed": 48,
               "valid": true,
               "worst_case_depth": 4
@@ -9267,7 +9267,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13635307550430298,
+              "runtime_ms": 0.1328401267528534,
               "seed": 49,
               "valid": true,
               "worst_case_depth": 4
@@ -9338,7 +9338,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13932958245277405,
+              "runtime_ms": 0.13032928109169006,
               "seed": 50,
               "valid": true,
               "worst_case_depth": 4
@@ -9409,7 +9409,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1364387571811676,
+              "runtime_ms": 0.12814998626708984,
               "seed": 51,
               "valid": true,
               "worst_case_depth": 3
@@ -9480,7 +9480,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13671815395355225,
+              "runtime_ms": 0.12844055891036987,
               "seed": 52,
               "valid": true,
               "worst_case_depth": 3
@@ -9551,7 +9551,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14100968837738037,
+              "runtime_ms": 0.12732669711112976,
               "seed": 53,
               "valid": true,
               "worst_case_depth": 3
@@ -9622,7 +9622,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13251230120658875,
+              "runtime_ms": 0.13123825192451477,
               "seed": 54,
               "valid": true,
               "worst_case_depth": 3
@@ -9693,7 +9693,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14010071754455566,
+              "runtime_ms": 0.13425946235656738,
               "seed": 55,
               "valid": true,
               "worst_case_depth": 4
@@ -9764,7 +9764,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13444945216178894,
+              "runtime_ms": 0.13348087668418884,
               "seed": 56,
               "valid": true,
               "worst_case_depth": 4
@@ -9835,7 +9835,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13753026723861694,
+              "runtime_ms": 0.1282617449760437,
               "seed": 57,
               "valid": true,
               "worst_case_depth": 4
@@ -9906,7 +9906,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13633444905281067,
+              "runtime_ms": 0.1269020140171051,
               "seed": 58,
               "valid": true,
               "worst_case_depth": 3
@@ -9977,7 +9977,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13478845357894897,
+              "runtime_ms": 0.12843310832977295,
               "seed": 59,
               "valid": true,
               "worst_case_depth": 3
@@ -10048,7 +10048,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13685226440429688,
+              "runtime_ms": 0.13052672147750854,
               "seed": 60,
               "valid": true,
               "worst_case_depth": 3
@@ -10119,7 +10119,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13832375407218933,
+              "runtime_ms": 0.13469532132148743,
               "seed": 61,
               "valid": true,
               "worst_case_depth": 4
@@ -10190,7 +10190,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13141706585884094,
+              "runtime_ms": 0.12534484267234802,
               "seed": 62,
               "valid": true,
               "worst_case_depth": 3
@@ -10261,7 +10261,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1340024173259735,
+              "runtime_ms": 0.1301504671573639,
               "seed": 63,
               "valid": true,
               "worst_case_depth": 4
@@ -10332,7 +10332,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13774260878562927,
+              "runtime_ms": 0.12944266200065613,
               "seed": 64,
               "valid": true,
               "worst_case_depth": 4
@@ -10403,7 +10403,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1329183578491211,
+              "runtime_ms": 0.1308247447013855,
               "seed": 65,
               "valid": true,
               "worst_case_depth": 4
@@ -10474,7 +10474,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1362338662147522,
+              "runtime_ms": 0.12894347310066223,
               "seed": 66,
               "valid": true,
               "worst_case_depth": 4
@@ -10545,7 +10545,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.132732093334198,
+              "runtime_ms": 0.12743473052978516,
               "seed": 67,
               "valid": true,
               "worst_case_depth": 4
@@ -10616,7 +10616,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1364201307296753,
+              "runtime_ms": 0.12924522161483765,
               "seed": 68,
               "valid": true,
               "worst_case_depth": 4
@@ -10687,7 +10687,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1389235258102417,
+              "runtime_ms": 0.12859702110290527,
               "seed": 69,
               "valid": true,
               "worst_case_depth": 4
@@ -10758,7 +10758,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13634562492370605,
+              "runtime_ms": 0.1294352114200592,
               "seed": 70,
               "valid": true,
               "worst_case_depth": 4
@@ -10829,7 +10829,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13212114572525024,
+              "runtime_ms": 0.12801587581634521,
               "seed": 71,
               "valid": true,
               "worst_case_depth": 4
@@ -10900,7 +10900,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13696029782295227,
+              "runtime_ms": 0.13495609164237976,
               "seed": 72,
               "valid": true,
               "worst_case_depth": 4
@@ -10971,7 +10971,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13632699847221375,
+              "runtime_ms": 0.13063102960586548,
               "seed": 73,
               "valid": true,
               "worst_case_depth": 4
@@ -11042,7 +11042,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14071166515350342,
+              "runtime_ms": 0.13113394379615784,
               "seed": 74,
               "valid": true,
               "worst_case_depth": 4
@@ -11113,7 +11113,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13510510325431824,
+              "runtime_ms": 0.13025104999542236,
               "seed": 75,
               "valid": true,
               "worst_case_depth": 4
@@ -11184,7 +11184,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13254955410957336,
+              "runtime_ms": 0.12786686420440674,
               "seed": 76,
               "valid": true,
               "worst_case_depth": 4
@@ -11255,7 +11255,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13482198119163513,
+              "runtime_ms": 0.13235583901405334,
               "seed": 77,
               "valid": true,
               "worst_case_depth": 4
@@ -11326,7 +11326,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13174861669540405,
+              "runtime_ms": 0.12975558638572693,
               "seed": 78,
               "valid": true,
               "worst_case_depth": 3
@@ -11397,7 +11397,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13088807463645935,
+              "runtime_ms": 0.13073906302452087,
               "seed": 79,
               "valid": true,
               "worst_case_depth": 3
@@ -11468,7 +11468,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14471635222434998,
+              "runtime_ms": 0.12605637311935425,
               "seed": 80,
               "valid": true,
               "worst_case_depth": 3
@@ -11539,7 +11539,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13391301035881042,
+              "runtime_ms": 0.1375153660774231,
               "seed": 81,
               "valid": true,
               "worst_case_depth": 4
@@ -11610,7 +11610,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13648346066474915,
+              "runtime_ms": 0.12868642807006836,
               "seed": 82,
               "valid": true,
               "worst_case_depth": 3
@@ -11681,7 +11681,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.2340264618396759,
+              "runtime_ms": 0.22646039724349976,
               "seed": 83,
               "valid": true,
               "worst_case_depth": 4
@@ -11752,7 +11752,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13731420040130615,
+              "runtime_ms": 0.13274699449539185,
               "seed": 84,
               "valid": true,
               "worst_case_depth": 4
@@ -11823,7 +11823,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13737007975578308,
+              "runtime_ms": 0.12903660535812378,
               "seed": 85,
               "valid": true,
               "worst_case_depth": 3
@@ -11894,7 +11894,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13763457536697388,
+              "runtime_ms": 0.1336708664894104,
               "seed": 86,
               "valid": true,
               "worst_case_depth": 4
@@ -11965,7 +11965,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.134199857711792,
+              "runtime_ms": 0.13038888573646545,
               "seed": 87,
               "valid": true,
               "worst_case_depth": 3
@@ -12036,7 +12036,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14000385999679565,
+              "runtime_ms": 0.13700872659683228,
               "seed": 88,
               "valid": true,
               "worst_case_depth": 4
@@ -12107,7 +12107,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13522058725357056,
+              "runtime_ms": 0.12783333659172058,
               "seed": 89,
               "valid": true,
               "worst_case_depth": 4
@@ -12178,7 +12178,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13952329754829407,
+              "runtime_ms": 0.12616068124771118,
               "seed": 90,
               "valid": true,
               "worst_case_depth": 3
@@ -12249,7 +12249,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13226643204689026,
+              "runtime_ms": 0.12749433517456055,
               "seed": 91,
               "valid": true,
               "worst_case_depth": 4
@@ -12320,7 +12320,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1349709928035736,
+              "runtime_ms": 0.13028830289840698,
               "seed": 92,
               "valid": true,
               "worst_case_depth": 4
@@ -12391,7 +12391,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13724341988563538,
+              "runtime_ms": 0.1282431185245514,
               "seed": 93,
               "valid": true,
               "worst_case_depth": 4
@@ -12462,7 +12462,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13161078095436096,
+              "runtime_ms": 0.12847036123275757,
               "seed": 94,
               "valid": true,
               "worst_case_depth": 3
@@ -12533,7 +12533,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13826414942741394,
+              "runtime_ms": 0.13133510947227478,
               "seed": 95,
               "valid": true,
               "worst_case_depth": 3
@@ -12604,7 +12604,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1365281641483307,
+              "runtime_ms": 0.12450665235519409,
               "seed": 96,
               "valid": true,
               "worst_case_depth": 4
@@ -12675,7 +12675,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1393929123878479,
+              "runtime_ms": 0.13004615902900696,
               "seed": 97,
               "valid": true,
               "worst_case_depth": 3
@@ -12746,7 +12746,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13007596135139465,
+              "runtime_ms": 0.12642517685890198,
               "seed": 98,
               "valid": true,
               "worst_case_depth": 3
@@ -12817,7 +12817,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13342499732971191,
+              "runtime_ms": 0.12996047735214233,
               "seed": 99,
               "valid": true,
               "worst_case_depth": 4
@@ -12917,7 +12917,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13283267617225647,
+              "runtime_ms": 0.13345852494239807,
               "seed": null,
               "valid": true,
               "worst_case_depth": 3
@@ -13007,7 +13007,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1457110047340393,
+              "runtime_ms": 0.14005601406097412,
               "seed": null,
               "valid": true,
               "worst_case_depth": 3
@@ -13097,7 +13097,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14335662126541138,
+              "runtime_ms": 0.14036893844604492,
               "seed": 0,
               "valid": true,
               "worst_case_depth": 3
@@ -13177,7 +13177,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13459846377372742,
+              "runtime_ms": 0.1396089792251587,
               "seed": 1,
               "valid": true,
               "worst_case_depth": 3
@@ -13257,7 +13257,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13635680079460144,
+              "runtime_ms": 0.13122707605361938,
               "seed": 2,
               "valid": true,
               "worst_case_depth": 3
@@ -13337,7 +13337,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1390501856803894,
+              "runtime_ms": 0.13037770986557007,
               "seed": 3,
               "valid": true,
               "worst_case_depth": 3
@@ -13417,7 +13417,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1338869333267212,
+              "runtime_ms": 0.13281404972076416,
               "seed": 4,
               "valid": true,
               "worst_case_depth": 3
@@ -13497,7 +13497,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13422220945358276,
+              "runtime_ms": 0.13399124145507812,
               "seed": 5,
               "valid": true,
               "worst_case_depth": 3
@@ -13577,7 +13577,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1351572573184967,
+              "runtime_ms": 0.13572722673416138,
               "seed": 6,
               "valid": true,
               "worst_case_depth": 3
@@ -13657,7 +13657,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13479962944984436,
+              "runtime_ms": 0.13389438390731812,
               "seed": 7,
               "valid": true,
               "worst_case_depth": 3
@@ -13737,7 +13737,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13701245188713074,
+              "runtime_ms": 0.1320280134677887,
               "seed": 8,
               "valid": true,
               "worst_case_depth": 3
@@ -13817,7 +13817,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1315772533416748,
+              "runtime_ms": 0.12739375233650208,
               "seed": 9,
               "valid": true,
               "worst_case_depth": 3
@@ -13897,7 +13897,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13813748955726624,
+              "runtime_ms": 0.12956932187080383,
               "seed": 10,
               "valid": true,
               "worst_case_depth": 3
@@ -13977,7 +13977,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13558194041252136,
+              "runtime_ms": 0.13013556599617004,
               "seed": 11,
               "valid": true,
               "worst_case_depth": 3
@@ -14057,7 +14057,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1345425844192505,
+              "runtime_ms": 0.13258680701255798,
               "seed": 12,
               "valid": true,
               "worst_case_depth": 3
@@ -14137,7 +14137,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13245269656181335,
+              "runtime_ms": 0.13310089707374573,
               "seed": 13,
               "valid": true,
               "worst_case_depth": 3
@@ -14217,7 +14217,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1380518078804016,
+              "runtime_ms": 0.13157352805137634,
               "seed": 14,
               "valid": true,
               "worst_case_depth": 3
@@ -14297,7 +14297,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13697892427444458,
+              "runtime_ms": 0.12879818677902222,
               "seed": 15,
               "valid": true,
               "worst_case_depth": 3
@@ -14377,7 +14377,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1331903040409088,
+              "runtime_ms": 0.13196095824241638,
               "seed": 16,
               "valid": true,
               "worst_case_depth": 3
@@ -14457,7 +14457,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13268738985061646,
+              "runtime_ms": 0.12888386845588684,
               "seed": 17,
               "valid": true,
               "worst_case_depth": 3
@@ -14537,7 +14537,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13356655836105347,
+              "runtime_ms": 0.13838335871696472,
               "seed": 18,
               "valid": true,
               "worst_case_depth": 3
@@ -14617,7 +14617,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14051422476768494,
+              "runtime_ms": 0.1321658492088318,
               "seed": 19,
               "valid": true,
               "worst_case_depth": 3
@@ -14697,7 +14697,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13287365436553955,
+              "runtime_ms": 0.13283640146255493,
               "seed": 20,
               "valid": true,
               "worst_case_depth": 3
@@ -14777,7 +14777,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13546273112297058,
+              "runtime_ms": 0.12834742665290833,
               "seed": 21,
               "valid": true,
               "worst_case_depth": 3
@@ -14857,7 +14857,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1316852867603302,
+              "runtime_ms": 0.13209879398345947,
               "seed": 22,
               "valid": true,
               "worst_case_depth": 3
@@ -14937,7 +14937,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13502687215805054,
+              "runtime_ms": 0.12943893671035767,
               "seed": 23,
               "valid": true,
               "worst_case_depth": 3
@@ -15017,7 +15017,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13188645243644714,
+              "runtime_ms": 0.13285502791404724,
               "seed": 24,
               "valid": true,
               "worst_case_depth": 3
@@ -15097,7 +15097,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1329183578491211,
+              "runtime_ms": 0.13409554958343506,
               "seed": 25,
               "valid": true,
               "worst_case_depth": 3
@@ -15177,7 +15177,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13296306133270264,
+              "runtime_ms": 0.1314692199230194,
               "seed": 26,
               "valid": true,
               "worst_case_depth": 3
@@ -15257,7 +15257,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13492628931999207,
+              "runtime_ms": 0.13149529695510864,
               "seed": 27,
               "valid": true,
               "worst_case_depth": 3
@@ -15337,7 +15337,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13054534792900085,
+              "runtime_ms": 0.1289956271648407,
               "seed": 28,
               "valid": true,
               "worst_case_depth": 3
@@ -15417,7 +15417,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12961775064468384,
+              "runtime_ms": 0.13210251927375793,
               "seed": 29,
               "valid": true,
               "worst_case_depth": 3
@@ -15497,7 +15497,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12798607349395752,
+              "runtime_ms": 0.12754276394844055,
               "seed": 30,
               "valid": true,
               "worst_case_depth": 3
@@ -15577,7 +15577,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13171136379241943,
+              "runtime_ms": 0.13203546404838562,
               "seed": 31,
               "valid": true,
               "worst_case_depth": 3
@@ -15657,7 +15657,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.128868967294693,
+              "runtime_ms": 0.13730302453041077,
               "seed": 32,
               "valid": true,
               "worst_case_depth": 3
@@ -15737,7 +15737,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13159960508346558,
+              "runtime_ms": 0.13186782598495483,
               "seed": 33,
               "valid": true,
               "worst_case_depth": 3
@@ -15817,7 +15817,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.2237185835838318,
+              "runtime_ms": 0.2280808985233307,
               "seed": 34,
               "valid": true,
               "worst_case_depth": 3
@@ -15897,7 +15897,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13784319162368774,
+              "runtime_ms": 0.13632327318191528,
               "seed": 35,
               "valid": true,
               "worst_case_depth": 3
@@ -15977,7 +15977,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1345910131931305,
+              "runtime_ms": 0.1360177993774414,
               "seed": 36,
               "valid": true,
               "worst_case_depth": 3
@@ -16057,7 +16057,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13315677642822266,
+              "runtime_ms": 0.1327209174633026,
               "seed": 37,
               "valid": true,
               "worst_case_depth": 3
@@ -16137,7 +16137,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.128868967294693,
+              "runtime_ms": 0.1311078667640686,
               "seed": 38,
               "valid": true,
               "worst_case_depth": 3
@@ -16217,7 +16217,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13433769345283508,
+              "runtime_ms": 0.1330636441707611,
               "seed": 39,
               "valid": true,
               "worst_case_depth": 3
@@ -16297,7 +16297,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13338029384613037,
+              "runtime_ms": 0.13059377670288086,
               "seed": 40,
               "valid": true,
               "worst_case_depth": 3
@@ -16377,7 +16377,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13139471411705017,
+              "runtime_ms": 0.13000145554542542,
               "seed": 41,
               "valid": true,
               "worst_case_depth": 3
@@ -16457,7 +16457,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1316070556640625,
+              "runtime_ms": 0.12964382767677307,
               "seed": 42,
               "valid": true,
               "worst_case_depth": 3
@@ -16537,7 +16537,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13225898146629333,
+              "runtime_ms": 0.13260170817375183,
               "seed": 43,
               "valid": true,
               "worst_case_depth": 3
@@ -16617,7 +16617,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12785568833351135,
+              "runtime_ms": 0.12844055891036987,
               "seed": 44,
               "valid": true,
               "worst_case_depth": 3
@@ -16697,7 +16697,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12907013297080994,
+              "runtime_ms": 0.1328885555267334,
               "seed": 45,
               "valid": true,
               "worst_case_depth": 3
@@ -16777,7 +16777,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13270974159240723,
+              "runtime_ms": 0.13506785035133362,
               "seed": 46,
               "valid": true,
               "worst_case_depth": 3
@@ -16857,7 +16857,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13080984354019165,
+              "runtime_ms": 0.13525784015655518,
               "seed": 47,
               "valid": true,
               "worst_case_depth": 3
@@ -16937,7 +16937,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1310296356678009,
+              "runtime_ms": 0.13070553541183472,
               "seed": 48,
               "valid": true,
               "worst_case_depth": 3
@@ -17017,7 +17017,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1309029757976532,
+              "runtime_ms": 0.13192370533943176,
               "seed": 49,
               "valid": true,
               "worst_case_depth": 3
@@ -17097,7 +17097,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13443082571029663,
+              "runtime_ms": 0.13294070959091187,
               "seed": 50,
               "valid": true,
               "worst_case_depth": 3
@@ -17177,7 +17177,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13688579201698303,
+              "runtime_ms": 0.13746321201324463,
               "seed": 51,
               "valid": true,
               "worst_case_depth": 3
@@ -17257,7 +17257,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14079362154006958,
+              "runtime_ms": 0.13009458780288696,
               "seed": 52,
               "valid": true,
               "worst_case_depth": 3
@@ -17337,7 +17337,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13072416186332703,
+              "runtime_ms": 0.1309700310230255,
               "seed": 53,
               "valid": true,
               "worst_case_depth": 3
@@ -17417,7 +17417,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1312829554080963,
+              "runtime_ms": 0.13032928109169006,
               "seed": 54,
               "valid": true,
               "worst_case_depth": 3
@@ -17497,7 +17497,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12839213013648987,
+              "runtime_ms": 0.12970715761184692,
               "seed": 55,
               "valid": true,
               "worst_case_depth": 3
@@ -17577,7 +17577,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13262033462524414,
+              "runtime_ms": 0.13466551899909973,
               "seed": 56,
               "valid": true,
               "worst_case_depth": 3
@@ -17657,7 +17657,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12873858213424683,
+              "runtime_ms": 0.13048946857452393,
               "seed": 57,
               "valid": true,
               "worst_case_depth": 3
@@ -17737,7 +17737,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13016164302825928,
+              "runtime_ms": 0.13042986392974854,
               "seed": 58,
               "valid": true,
               "worst_case_depth": 3
@@ -17817,7 +17817,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1294463872909546,
+              "runtime_ms": 0.12864917516708374,
               "seed": 59,
               "valid": true,
               "worst_case_depth": 3
@@ -17897,7 +17897,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13133510947227478,
+              "runtime_ms": 0.13559311628341675,
               "seed": 60,
               "valid": true,
               "worst_case_depth": 3
@@ -17977,7 +17977,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1308545470237732,
+              "runtime_ms": 0.12849271297454834,
               "seed": 61,
               "valid": true,
               "worst_case_depth": 3
@@ -18057,7 +18057,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14196708798408508,
+              "runtime_ms": 0.13165175914764404,
               "seed": 62,
               "valid": true,
               "worst_case_depth": 3
@@ -18137,7 +18137,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1315586268901825,
+              "runtime_ms": 0.1331530511379242,
               "seed": 63,
               "valid": true,
               "worst_case_depth": 3
@@ -18217,7 +18217,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1320876181125641,
+              "runtime_ms": 0.13729557394981384,
               "seed": 64,
               "valid": true,
               "worst_case_depth": 3
@@ -18297,7 +18297,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.133465975522995,
+              "runtime_ms": 0.13056397438049316,
               "seed": 65,
               "valid": true,
               "worst_case_depth": 3
@@ -18377,7 +18377,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1283884048461914,
+              "runtime_ms": 0.1322813332080841,
               "seed": 66,
               "valid": true,
               "worst_case_depth": 3
@@ -18457,7 +18457,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13203173875808716,
+              "runtime_ms": 0.1322925090789795,
               "seed": 67,
               "valid": true,
               "worst_case_depth": 3
@@ -18537,7 +18537,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12806057929992676,
+              "runtime_ms": 0.13243407011032104,
               "seed": 68,
               "valid": true,
               "worst_case_depth": 3
@@ -18617,7 +18617,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12994930148124695,
+              "runtime_ms": 0.12919679284095764,
               "seed": 69,
               "valid": true,
               "worst_case_depth": 3
@@ -18697,7 +18697,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1294165849685669,
+              "runtime_ms": 0.13159587979316711,
               "seed": 70,
               "valid": true,
               "worst_case_depth": 3
@@ -18777,7 +18777,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13066455721855164,
+              "runtime_ms": 0.1304149627685547,
               "seed": 71,
               "valid": true,
               "worst_case_depth": 3
@@ -18857,7 +18857,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1272447407245636,
+              "runtime_ms": 0.13241171836853027,
               "seed": 72,
               "valid": true,
               "worst_case_depth": 3
@@ -18937,7 +18937,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13747811317443848,
+              "runtime_ms": 0.13756752014160156,
               "seed": 73,
               "valid": true,
               "worst_case_depth": 3
@@ -19017,7 +19017,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1352354884147644,
+              "runtime_ms": 0.13785064220428467,
               "seed": 74,
               "valid": true,
               "worst_case_depth": 3
@@ -19097,7 +19097,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.132635235786438,
+              "runtime_ms": 0.13737753033638,
               "seed": 75,
               "valid": true,
               "worst_case_depth": 3
@@ -19177,7 +19177,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13151764869689941,
+              "runtime_ms": 0.12886151671409607,
               "seed": 76,
               "valid": true,
               "worst_case_depth": 3
@@ -19257,7 +19257,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13228878378868103,
+              "runtime_ms": 0.13203546404838562,
               "seed": 77,
               "valid": true,
               "worst_case_depth": 3
@@ -19337,7 +19337,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13522058725357056,
+              "runtime_ms": 0.13430416584014893,
               "seed": 78,
               "valid": true,
               "worst_case_depth": 3
@@ -19417,7 +19417,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13436004519462585,
+              "runtime_ms": 0.13558566570281982,
               "seed": 79,
               "valid": true,
               "worst_case_depth": 3
@@ -19497,7 +19497,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12947991490364075,
+              "runtime_ms": 0.1313239336013794,
               "seed": 80,
               "valid": true,
               "worst_case_depth": 3
@@ -19577,7 +19577,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13294443488121033,
+              "runtime_ms": 0.13760477304458618,
               "seed": 81,
               "valid": true,
               "worst_case_depth": 3
@@ -19657,7 +19657,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.14016777276992798,
+              "runtime_ms": 0.13601407408714294,
               "seed": 82,
               "valid": true,
               "worst_case_depth": 3
@@ -19737,7 +19737,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13238564133644104,
+              "runtime_ms": 0.13567879796028137,
               "seed": 83,
               "valid": true,
               "worst_case_depth": 3
@@ -19817,7 +19817,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13741478323936462,
+              "runtime_ms": 0.13409927487373352,
               "seed": 84,
               "valid": true,
               "worst_case_depth": 3
@@ -19897,7 +19897,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12978538870811462,
+              "runtime_ms": 0.13089925050735474,
               "seed": 85,
               "valid": true,
               "worst_case_depth": 3
@@ -19977,7 +19977,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.22228434681892395,
+              "runtime_ms": 0.2257898449897766,
               "seed": 86,
               "valid": true,
               "worst_case_depth": 3
@@ -20057,7 +20057,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13466551899909973,
+              "runtime_ms": 0.13827532529830933,
               "seed": 87,
               "valid": true,
               "worst_case_depth": 3
@@ -20137,7 +20137,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1349411904811859,
+              "runtime_ms": 0.1344829797744751,
               "seed": 88,
               "valid": true,
               "worst_case_depth": 3
@@ -20217,7 +20217,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13779103755950928,
+              "runtime_ms": 0.1319386065006256,
               "seed": 89,
               "valid": true,
               "worst_case_depth": 3
@@ -20297,7 +20297,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13488531112670898,
+              "runtime_ms": 0.13073161244392395,
               "seed": 90,
               "valid": true,
               "worst_case_depth": 3
@@ -20377,7 +20377,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13449043035507202,
+              "runtime_ms": 0.1303255558013916,
               "seed": 91,
               "valid": true,
               "worst_case_depth": 3
@@ -20457,7 +20457,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13271719217300415,
+              "runtime_ms": 0.13147667050361633,
               "seed": 92,
               "valid": true,
               "worst_case_depth": 3
@@ -20537,7 +20537,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13395771384239197,
+              "runtime_ms": 0.14211609959602356,
               "seed": 93,
               "valid": true,
               "worst_case_depth": 3
@@ -20617,7 +20617,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13251975178718567,
+              "runtime_ms": 0.13033300638198853,
               "seed": 94,
               "valid": true,
               "worst_case_depth": 3
@@ -20697,7 +20697,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.13127923011779785,
+              "runtime_ms": 0.1336820423603058,
               "seed": 95,
               "valid": true,
               "worst_case_depth": 3
@@ -20777,7 +20777,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12891367077827454,
+              "runtime_ms": 0.13125315308570862,
               "seed": 96,
               "valid": true,
               "worst_case_depth": 3
@@ -20857,7 +20857,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1298747956752777,
+              "runtime_ms": 0.13611838221549988,
               "seed": 97,
               "valid": true,
               "worst_case_depth": 3
@@ -20937,7 +20937,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.1302473247051239,
+              "runtime_ms": 0.1304224133491516,
               "seed": 98,
               "valid": true,
               "worst_case_depth": 3
@@ -21017,7 +21017,7 @@
                   }
                 }
               },
-              "runtime_ms": 0.12809038162231445,
+              "runtime_ms": 0.13120844960212708,
               "seed": 99,
               "valid": true,
               "worst_case_depth": 3

@@ -1,5 +1,7 @@
 # Phase 3 Report: Exact Fixed Certificate Solver
 
+Status: the clean revalidation below is bound to source commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`. The combined Phase 2-6 evidence package remains pending independent review.
+
 ## 实现内容
 
 - 新增 `certificate/` 模块
@@ -42,6 +44,16 @@
 
 - `solve_exact_certificate`: 返回最小证书。
 - `solve_greedy_certificate`、`solve_random_certificate`: 提供 baseline，通常在同一实例中不优于 exact。
+
+## Revalidation Summary
+
+Current clean artifact: `artifacts/phase2_6_revalidation/phase3_fixed_regression.json` (source commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`; result `6b7186d7da60e7655036f88c39314264e9ee0004b272525ab11e9eae4744edef`; manifest `acbdfaefcc0f64c8eac8db1f2e65744c3575a3cc8335966ca3ec6832d764a3c9`).
+
+| world | tasks | states | exact certificate size | exact valid | greedy valid | random valid | separated pairs |
+| --- | ---: | ---: | ---: | --- | --- | --- | ---: |
+| chain | 4 | 5 | 4 | true | true | true | 10 |
+| tree | 4 | 7 | 4 | true | true | true | 21 |
+| unstructured | 3 | 8 | 3 | true | true | true | 28 |
 
 ## 已知限制
 

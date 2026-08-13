@@ -8,7 +8,7 @@
         "exact": {
           "certificate_size": 4,
           "method": "exact",
-          "runtime_ms": 0.09090080857276917,
+          "runtime_ms": 0.08529052138328552,
           "selected_tasks": [
             "A",
             "B",
@@ -25,7 +25,7 @@
         "greedy": {
           "certificate_size": 4,
           "method": "greedy",
-          "runtime_ms": 0.05387142300605774,
+          "runtime_ms": 0.056587159633636475,
           "selected_tasks": [
             "B",
             "C",
@@ -42,7 +42,7 @@
         "random": {
           "certificate_size": 4,
           "method": "random",
-          "runtime_ms": 0.06218254566192627,
+          "runtime_ms": 0.06021559238433838,
           "seed": 123,
           "selected_tasks": [
             "C",
@@ -72,7 +72,7 @@
         "exact": {
           "certificate_size": 4,
           "method": "exact",
-          "runtime_ms": 0.07919594645500183,
+          "runtime_ms": 0.07889419794082642,
           "selected_tasks": [
             "A",
             "B",
@@ -89,7 +89,7 @@
         "greedy": {
           "certificate_size": 4,
           "method": "greedy",
-          "runtime_ms": 0.06554275751113892,
+          "runtime_ms": 0.06585940718650818,
           "selected_tasks": [
             "B",
             "C",
@@ -106,7 +106,7 @@
         "random": {
           "certificate_size": 4,
           "method": "random",
-          "runtime_ms": 0.06988272070884705,
+          "runtime_ms": 0.06763637065887451,
           "seed": 123,
           "selected_tasks": [
             "C",
@@ -136,7 +136,7 @@
         "exact": {
           "certificate_size": 3,
           "method": "exact",
-          "runtime_ms": 0.07917732000350952,
+          "runtime_ms": 0.06972998380661011,
           "selected_tasks": [
             "Q0",
             "Q1",
@@ -152,7 +152,7 @@
         "greedy": {
           "certificate_size": 3,
           "method": "greedy",
-          "runtime_ms": 0.06407126784324646,
+          "runtime_ms": 0.05965307354927063,
           "selected_tasks": [
             "Q0",
             "Q1",
@@ -168,7 +168,7 @@
         "random": {
           "certificate_size": 3,
           "method": "random",
-          "runtime_ms": 0.06929412484169006,
+          "runtime_ms": 0.06577372550964355,
           "seed": 123,
           "selected_tasks": [
             "Q2",

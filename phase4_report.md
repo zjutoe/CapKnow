@@ -1,6 +1,6 @@
 # Phase 4 Report: Adaptive Certificate Solver
 
-Status: the clean revalidation below is bound to source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`. A later strict review rejected the combined package; this artifact does not bind the post-review repair.
+Status: the clean revalidation below is bound to source commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`. The combined Phase 2-6 evidence package remains pending independent review.
 
 ## Corrected Contract
 
@@ -19,7 +19,7 @@ Status: the clean revalidation below is bound to source commit `dc6a837ac20aad96
 
 ## Revalidation Summary
 
-Prior clean committed artifact: `artifacts/phase2_6_revalidation/phase4_adaptive_regression.json` (source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`; historical for the post-review repair).
+Current clean artifact: `artifacts/phase2_6_revalidation/phase4_adaptive_regression.json` (source commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`; result `1d00e83570164b7253c724cb68e4c5760c283d459a4097621bd88079d96dd39d`; manifest `738fd13570b3ec4b3662ff4b84bf3e3076cebf49b7806af91c7076484237a9d3`).
 
 | world | fixed exact size | policy | valid run rate | mean average depth | max worst-case depth | mean nodes |
 | --- | ---: | --- | ---: | ---: | ---: | ---: |
