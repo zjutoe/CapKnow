@@ -37,7 +37,7 @@
 
 ## 3. 阶段成果总览
 
-证据边界：Phase 2-4 已在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上正式重跑；Phase 5/6 已在 clean source repair commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 上正式重跑，并记录在 accepted evidence commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`。合并后的 Phase 2-6 evidence package 仍需独立审查后才能作为已接受证据。
+证据边界：Phase 2-4 已在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上正式重跑；Phase 5/6 已在 clean source repair commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 上正式重跑，并记录在 evidence commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`。合并后的 Phase 2-6 evidence package 冻结于 `8039dcfa88a1a6a1856b19c5301bd74e1616e76c`，并于 2026-08-13 通过 fresh-context `gpt-5.6-sol` 最终严格只读科学验收。
 
 | 阶段 | 研究问题 | 阶段结果（含历史结果） | 结论边界 |
 | --- | --- | --- | --- |
@@ -70,7 +70,7 @@ Y(K,q)=\mathbf 1[q\in K]
 
 Phase 2 首先检查最基本的可识别性：如果询问全部任务，两个不同状态是否仍可能得到同一响应 signature。若存在这种 collision，则任何固定或自适应 certificate 都无法在当前观测语义下唯一识别状态。
 
-当前重验证结果如下（绑定 `1bfc6ced88cf3397f240c3e79d1996955e9d589f`，合并 evidence package 待独立审查）：
+当前重验证结果如下（绑定 `1bfc6ced88cf3397f240c3e79d1996955e9d589f`，合并 evidence package 已通过最终独立审查）：
 
 | 世界 | 任务数 | 状态数 | 唯一 signature 数 | 可识别 |
 | --- | ---: | ---: | ---: | --- |
@@ -79,7 +79,7 @@ Phase 2 首先检查最基本的可识别性：如果询问全部任务，两个
 | unstructured | 3 | 8 | 8 | 是 |
 | artificial full-vector collision（自定义非单射响应函数） | 2 | 2 | 1 | 否 |
 
-该 artifact 支持的受限结论是：在其 membership 响应语义和声明的状态总体下，三个标准世界具有 full-information identifiability。人工 collision 世界不是 membership 响应的反例，而是通过自定义 `response_signature_fn` 刻意让不同状态产生相同完整向量，用来验证审计器能够发现不可识别输入。这不是“所有结构化能力空间都可识别”的一般性证明；该结论仍需随合并 evidence package 完成独立审查后接受。
+该 artifact 支持的受限结论是：在其 membership 响应语义和声明的状态总体下，三个标准世界具有 full-information identifiability。人工 collision 世界不是 membership 响应的反例，而是通过自定义 `response_signature_fn` 刻意让不同状态产生相同完整向量，用来验证审计器能够发现不可识别输入。这不是“所有结构化能力空间都可识别”的一般性证明；该结论已随合并 evidence package 通过最终独立审查。
 
 修订后的契约把 `KnowledgeSpace.valid_states` 视为科学实验声明的总体。空总体、非法状态、重复状态以及长度或取值非法的响应 signature 都会直接失败，不再通过静默过滤制造虚假的可识别结论。状态 ID 使用规范 JSON 数组，已覆盖含逗号、引号、反斜杠和花括号的 task ID。
 
@@ -89,7 +89,7 @@ Phase 3 将固定 certificate 写成 minimum hitting set：对每一对状态 \(
 
 当前 exact solver 采用按 certificate 大小枚举任务子集的穷举方案。这与 handoff 最初建议的整数规划不同，但已经被明确接受为中小规模实验的临时实现。
 
-以下是绑定 `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 的当前重验证结果，合并 evidence package 待独立审查：
+以下是绑定 `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 的当前重验证结果，合并 evidence package 已通过最终独立审查：
 
 - chain：最小固定 certificate 为 4，等于全部 4 个任务；
 - tree：最小固定 certificate 为 4，等于全部 4 个任务；
@@ -101,7 +101,7 @@ Phase 3 将固定 certificate 写成 minimum hitting set：对每一对状态 \(
 
 Phase 4 把固定任务集合扩展为决策树。每一步维护当前候选状态集合，只允许选择尚未询问且能把候选集合分成两个非空分支的任务，直到叶节点只剩一个状态。
 
-当前重验证结果如下（绑定 `1bfc6ced88cf3397f240c3e79d1996955e9d589f`，合并 evidence package 待独立审查）：
+当前重验证结果如下（绑定 `1bfc6ced88cf3397f240c3e79d1996955e9d589f`，合并 evidence package 已通过最终独立审查）：
 
 | 世界 | 固定最小规模 | 策略 | 平均深度 | 最坏深度 | 有效运行率 |
 | --- | ---: | --- | ---: | ---: | ---: |
@@ -111,7 +111,7 @@ Phase 4 把固定任务集合扩展为决策树。每一步维护当前候选状
 
 在该 artifact 中，random policy 在 100 个种子上也全部有效，但 chain 和 tree 的平均深度更高，最大最坏深度为 4。
 
-该 artifact 支持的受限结构性推论是：在 chain 和 tree 这两个结构化世界中，自适应提问降低了按状态等权计算的平均问题数；在完整幂集构成的 unstructured world 中，自适应方法没有获得同样优势。它为“结构先验可以被自适应评估利用”提供了实验支持，但只适用于当前的小规模、确定性、状态等权设置；该结论仍需随合并 evidence package 完成独立审查后接受。
+该 artifact 支持的受限结构性推论是：在 chain 和 tree 这两个结构化世界中，自适应提问降低了按状态等权计算的平均问题数；在完整幂集构成的 unstructured world 中，自适应方法没有获得同样优势。它为“结构先验可以被自适应评估利用”提供了实验支持，但只适用于当前的小规模、确定性、状态等权设置；该结论已随合并 evidence package 通过最终独立审查。
 
 validator 已修订为递归检查两个分支、候选集合是否严格缩小、任务是否重复以及叶节点是否唯一。报告也已把平均深度和最坏深度分开，废弃了曾将 worst-case query count 描述为平均成本的旧表述。
 
@@ -161,15 +161,17 @@ Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非�
 - previous evidence commit：`4e235ab5baff6c9882100b390f39eeb4bf0ac22f`；
 - latest source repair commit：`66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`；
 - accepted Phase 5/6 evidence commit：`1bfc6ced88cf3397f240c3e79d1996955e9d589f`；
+- Phase 2-4 evidence 与冻结 package commit：`8039dcfa88a1a6a1856b19c5301bd74e1616e76c`；
 - source repair review：fresh-context strict read-only `ACCEPT`；
 - latest formal Phase 2 artifact：result `fe0d5c959816fe9b6578eb1c45756f7d57079d914be6a5529e36c5ee5cea3a5c`，manifest `fc31ab28ed66e8f54d808fcae28d94a5c44a8e495785211d219e296c66174bcd`，source `1bfc6ced88cf3397f240c3e79d1996955e9d589f`；
 - latest formal Phase 3 artifact：result `6b7186d7da60e7655036f88c39314264e9ee0004b272525ab11e9eae4744edef`，manifest `acbdfaefcc0f64c8eac8db1f2e65744c3575a3cc8335966ca3ec6832d764a3c9`，source `1bfc6ced88cf3397f240c3e79d1996955e9d589f`；
 - latest formal Phase 4 artifact：result `1d00e83570164b7253c724cb68e4c5760c283d459a4097621bd88079d96dd39d`，manifest `738fd13570b3ec4b3662ff4b84bf3e3076cebf49b7806af91c7076484237a9d3`，source `1bfc6ced88cf3397f240c3e79d1996955e9d589f`；
 - latest formal Phase 5 artifact：result `b554bafa863ace1dd4729ab3b0c435b3dfd0d0e28a3a8b5c9efe43c4b2457d2a`，manifest `dee175d2eee039efece909d6e78d5c84c3bb86b63137a4197a6872e4404c20e2`；
 - latest formal Phase 6 artifact：result `252d8043ea73a087b77be919bce91bc91e0b0cfaa40ecaca5887b69006abc5e0`，manifest `814b3cc1320090677fe6d6feb73b5fe3804cb001ff96c445e238a1b4b14b487d`；
-- current evidence gate：Phase 2-4 已重跑并更新报告；合并后的 package 为 `PENDING INDEPENDENT RE-REVIEW`。
+- final milestone scientific review：fresh-context `gpt-5.6-sol` strict read-only `ACCEPT`；12 项 acceptance criteria 全部通过，未发现任何未解决的 correctness、protocol、provenance、统计口径或科学性过度声明 finding；
+- current evidence gate：`ACCEPTED`。
 
-独立 reviewer 没有自行重跑测试或实验，其结论基于冻结源码、diff、manifest、artifact 和已记录验证的只读检查。上一轮 clean evidence package 的 artifact hash 全部匹配，manifest 均绑定当时的 source commit；拒绝原因是报告证据状态不一致、DSL 条件任务声明与执行不一致、DSL 输入依赖 Python 隐式转换，以及公开概率策略接受 boolean attempts。上述问题已在 `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 中修复并通过 source repair review。Phase 5/6 evidence package 的数值与 provenance 检查通过并已提交；随后 Phase 2-4 也在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上重跑。本次合并后的 package 仍需重新独立审查。更早的 source-snapshot 证据包仅保留为历史记录。hash 证明字节身份和来源绑定，不代替数学、实现和实验协议审查。
+独立 reviewer 没有自行重跑测试或实验，其结论基于冻结源码、diff、manifest、artifact、JSON 结构与聚合一致性以及已记录验证的只读检查。上一轮 clean evidence package 的 artifact hash 全部匹配，manifest 均绑定当时的 source commit；拒绝原因是报告证据状态不一致、DSL 条件任务声明与执行不一致、DSL 输入依赖 Python 隐式转换，以及公开概率策略接受 boolean attempts。上述问题已在 `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 中修复并通过 source repair review。Phase 5/6 evidence package 的数值与 provenance 检查通过并已提交；随后 Phase 2-4 也在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上重跑。最终 reviewer 独立复核了十个当前 result/manifest SHA-256，并确认实现/协议一致、统计口径正确、历史无效证据已隔离且报告没有超出实验边界的科学声明。更早的 source-snapshot 证据包仅保留为历史记录。hash 证明字节身份和来源绑定，不代替数学、实现和实验协议审查。
 
 ## 11. 迄今为止的综合研究结论
 

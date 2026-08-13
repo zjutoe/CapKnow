@@ -1,6 +1,6 @@
 # Phase 5 Report: Probabilistic Certificate
 
-Status: formal Phase 5 revalidation was rerun from clean source commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`. The result content hash is unchanged from the prior clean run; the manifest now binds it to the post-review repair source. Current evidence gate: pending independent review.
+Status: formal Phase 5 revalidation was rerun from clean source commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`. The result content hash is unchanged from the prior clean run; the manifest binds it to the post-review repair source. The combined Phase 2-6 evidence package was accepted by final independent scientific review on 2026-08-13.
 
 ## Corrected Contract
 
@@ -37,7 +37,7 @@ Latest formal artifact: `artifacts/phase2_6_revalidation/phase5_robustness.json`
 - result sha256: `b554bafa863ace1dd4729ab3b0c435b3dfd0d0e28a3a8b5c9efe43c4b2457d2a`
 - manifest sha256: `dee175d2eee039efece909d6e78d5c84c3bb86b63137a4197a6872e4404c20e2`
 - pre-run source tree: clean
-- review state: pending independent evidence review
+- review state: accepted by final independent scientific review
 
 Conditions:
 

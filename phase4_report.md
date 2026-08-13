@@ -1,6 +1,6 @@
 # Phase 4 Report: Adaptive Certificate Solver
 
-Status: the clean revalidation below is bound to source commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`. The combined Phase 2-6 evidence package remains pending independent review.
+Status: the clean revalidation below is bound to source commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`. The combined Phase 2-6 evidence package was accepted by final independent scientific review on 2026-08-13.
 
 ## Corrected Contract
 

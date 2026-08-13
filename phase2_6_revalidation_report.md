@@ -2,15 +2,16 @@
 
 ## Current Gate Status
 
-Latest evidence gate: `PENDING INDEPENDENT REVIEW`.
+Latest evidence gate: `ACCEPTED`.
 
-The previous source/evidence package `dc6a837ac20aad967da76a69d50c0b5b2bfe7379` plus `4e235ab5baff6c9882100b390f39eeb4bf0ac22f` remains `REJECT`. The post-review source repair was frozen as `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` and reviewed independently as an implementation repair. Phase 5/6 were formally rerun from that clean source and recorded in accepted evidence commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`. Phase 2-4 were then formally rerun from clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`. The combined Phase 2-6 evidence package is not accepted evidence until independent evidence review.
+The previous source/evidence package `dc6a837ac20aad967da76a69d50c0b5b2bfe7379` plus `4e235ab5baff6c9882100b390f39eeb4bf0ac22f` remains `REJECT`. The post-review source repair was frozen as `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` and reviewed independently as an implementation repair. Phase 5/6 were formally rerun from that clean source and recorded in evidence commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`. Phase 2-4 were then formally rerun from clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` and recorded in frozen package commit `8039dcfa88a1a6a1856b19c5301bd74e1616e76c`. A fresh-context `gpt-5.6-sol` strict read-only final scientific review accepted the combined package on 2026-08-13.
 
 ## Source Binding
 
 - Baseline reference commit: `1648c8f201936e56f7eb0544b39c45cf0f431c9b`
 - Source repair commit: `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`
-- Current evidence commit: `1bfc6ced88cf3397f240c3e79d1996955e9d589f`
+- Phase 5/6 evidence commit: `1bfc6ced88cf3397f240c3e79d1996955e9d589f`
+- Phase 2-4 evidence and frozen package commit: `8039dcfa88a1a6a1856b19c5301bd74e1616e76c`
 - Previous rejected source commit: `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`
 - Source binding: `git_commit`
 - Worktree state before each run: clean source tree, with only the fixed output root excluded by the launcher gate.
@@ -116,10 +117,30 @@ Latest strict read-only independent review verdict for source commit `dc6a837ac2
 - Reviewer started with `fork_context=false` and did not rerun tests or experiments.
 - Confirmed findings: reports exposed conflicting current evidence states; conditional execution did not require capabilities from inactive branches; `ADD` and `CONDITION` relied on Python coercion outside the declared DSL contract; exported probabilistic policies accepted boolean attempt counts.
 - Artifact hashes and manifest source bindings were confirmed sound. Phase 2 response-matrix semantics, Phase 3 exhaustive minimal search, Phase 4 adaptive behavior, and Phase 5 posterior and aggregate calculations were also confirmed sound.
-- Current evidence gate remains `PENDING INDEPENDENT REVIEW` until the combined Phase 2-6 artifacts are independently reviewed and accepted.
+- At that review point, the evidence gate remained `PENDING INDEPENDENT REVIEW` until the combined Phase 2-6 artifacts could be independently reviewed.
 
 Post-review source repair commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`: implementation review `ACCEPT`.
 
 - Reviewer started with `fork_context=false` and did not rerun tests or experiments.
 - The review confirmed that the prior report conflicts, conditional branch capability contract, DSL type coercion, and boolean probabilistic attempt-count issues were repaired.
 - The repair was then frozen as a source commit before formal Phase 5/6 revalidation.
+
+## Final Milestone Scientific Acceptance (2026-08-13)
+
+- Reviewer: fresh-context `gpt-5.6-sol`, independent strict read-only review.
+- Frozen range: `b7f54fff90fb218dd57d04b2a7d90b9bd9387521..8039dcfa88a1a6a1856b19c5301bd74e1616e76c`.
+- Source repair: `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`.
+- Phase 5/6 evidence: `1bfc6ced88cf3397f240c3e79d1996955e9d589f`, generated from source `66c0efa`.
+- Phase 2-4 evidence and frozen tip: `8039dcfa88a1a6a1856b19c5301bd74e1616e76c`, generated from source `1bfc6ce`.
+- Verdict: `ACCEPT`.
+- Findings: none; no unresolved correctness, protocol, provenance, statistical-semantics, or scientific-reporting finding was confirmed at any severity.
+
+The review found the implementation consistent with the Phase 2-6 contracts: Bayesian sequential and batch inference agree; declared scientific inputs and state identities are validated; adaptive trees and policies satisfy their recursive contracts; and DSL capability, input, output, and composition semantics are concrete and deterministic. The `capability_certificate_lab`, `scripts`, and `tests` Git trees are identical at `66c0efa`, `1bfc6ce`, and `8039dcf`, so the later evidence commits introduce no implementation-semantic drift.
+
+The reviewer independently checked claim-to-oracle mappings and statistical denominators. Phase 4 leaf depths reproduce the recorded average and worst-case depths, with only floating-point accumulation differences up to `2.6645352591003757e-15`. Phase 5 contains 126 unique world/method/noise/attempt cells with 100 seeds per cell; its consistency rates, failure counts, tie handling, posterior tolerance, and zero-noise adaptive oracles agree with the recorded claims. No independence-based significance test, confidence interval, or universal fixed-versus-adaptive superiority claim is made. No training or model selection occurs, so no train/evaluation leakage path was identified.
+
+All five result hashes and all five manifest hashes in the experiment table above were independently recomputed and matched both the committed files and report. Current manifests bind only `66c0efa` or `1bfc6ce`; the rejected `dc6a837` plus `4e235ab` package remains historical and is not used as current evidence. All twelve acceptance criteria in the repair handoff passed.
+
+Accepted limitations remain: the Phase 3 solver is exponential; tree mapping assumes no empty child list; Phase 5 uses fixed seed grids, descriptive point estimates, and aggregate summaries rather than raw per-seed traces; Phase 6 rules and held-out examples are handcrafted; and the experiments cover small artificial worlds rather than real LLM capability measurement. These constraints bound the claims and are not acceptance failures.
+
+The reviewer performed Git, source, test, report, manifest, JSON-structure, aggregate-consistency, and SHA-256 inspection only. No tests or Phase 2-6 experiments were rerun, and no files were modified during review.
