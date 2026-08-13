@@ -1,6 +1,6 @@
 # Phase 6 Report: DSL Bridge and Executable Capability World
 
-Status: the clean revalidation below is bound to source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`. A later strict review rejected the combined package; this artifact does not bind the post-review repair.
+Status: formal Phase 6 revalidation was rerun from clean source commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`. Current evidence gate: pending independent review.
 
 ## Corrected Contract
 
@@ -37,7 +37,13 @@ Status: the clean revalidation below is bound to source commit `dc6a837ac20aad96
 
 ## Revalidation Summary
 
-Prior clean committed artifact: `artifacts/phase2_6_revalidation/phase6_dsl.json` (source commit `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`; historical for the post-review repair).
+Latest formal artifact: `artifacts/phase2_6_revalidation/phase6_dsl.json`
+
+- source commit: `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`
+- result sha256: `252d8043ea73a087b77be919bce91bc91e0b0cfaa40ecaca5887b69006abc5e0`
+- manifest sha256: `814b3cc1320090677fe6d6feb73b5fe3804cb001ff96c445e238a1b4b14b487d`
+- pre-run source tree: clean
+- review state: pending independent evidence review
 
 - Observed primitive execution exact outputs: `ADD=5`, `COMPARE=true`, `MEMORY=42`, `SEARCH=true`, `FILTER=["keep","keep"]`, `LOOP="unchanged"`, `CONDITION=false`.
 - Acceptance oracle for primitive execution freezes those seven exact outputs.

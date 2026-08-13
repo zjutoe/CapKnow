@@ -197,7 +197,7 @@
     "held_out_rule": "FILTER+CONDITION->FILTER_CHECK"
   },
   "outputs": {
-    "artifacts/phase2_6_revalidation/phase6_dsl.json": "aa6a5fea5024a3486e7f432a9d2a29a090f76734ecb9d5acea922232e14f94d2"
+    "artifacts/phase2_6_revalidation/phase6_dsl.json": "252d8043ea73a087b77be919bce91bc91e0b0cfaa40ecaca5887b69006abc5e0"
   },
   "phase": "phase6_dsl",
   "python_version": "3.13.9",
@@ -205,7 +205,7 @@
   "source": {
     "baseline_commit": "1648c8f201936e56f7eb0544b39c45cf0f431c9b",
     "clean_worktree_before_run": true,
-    "git_head": "dc6a837ac20aad967da76a69d50c0b5b2bfe7379",
+    "git_head": "66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40",
     "git_status_porcelain_before_run": "",
     "handoff_paths": [
       "Capability_Certificate_Task_Handoff_007_Correctness_Repair_and_Revalidation.md",

@@ -176,7 +176,7 @@
     "direct": {
       "certificate_size": 7,
       "method": "exact",
-      "runtime_ms": 14.408502727746964,
+      "runtime_ms": 10.295156389474869,
       "selected_tasks": [
         "ADD",
         "COMPARE",
@@ -195,7 +195,7 @@
     "dsl": {
       "certificate_size": 7,
       "method": "exact",
-      "runtime_ms": 15.905316919088364,
+      "runtime_ms": 11.787332594394684,
       "selected_tasks": [
         "ADD",
         "COMPARE",

@@ -2,16 +2,18 @@
 
 ## Current Gate Status
 
-Reviewed package gate: `REJECT`.
+Latest evidence gate: `PENDING INDEPENDENT REVIEW`.
 
-Phase 2-6 were rerun from clean committed source revision `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`. The artifacts and hashes below remain the evidence for that frozen source, but a later independent strict read-only review rejected the combined package. Post-review repairs require their own verification, frozen source identity, and independent review.
+The previous source/evidence package `dc6a837ac20aad967da76a69d50c0b5b2bfe7379` plus `4e235ab5baff6c9882100b390f39eeb4bf0ac22f` remains `REJECT`. The post-review source repair was frozen as `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`, reviewed independently as an implementation repair, and then Phase 5/6 were formally rerun from that clean source. The new Phase 5/6 artifacts below are not accepted evidence until independent evidence review.
 
 ## Source Binding
 
 - Baseline reference commit: `1648c8f201936e56f7eb0544b39c45cf0f431c9b`
-- Current source commit: `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`
+- Current source commit: `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`
+- Previous rejected source commit: `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`
 - Source binding: `git_commit`
 - Worktree state before each run: clean source tree, with only the fixed output root excluded by the launcher gate.
+- Phase 2-4 artifacts were not rerun in this step and remain bound to `dc6a837ac20aad967da76a69d50c0b5b2bfe7379`; the latest Phase 5/6 artifacts are bound to `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`.
 - Superseded dirty-run source identifier: `source_snapshot_sha256=c5146b05b8ab21dbc61b781807d4e2c7e4530b4c3f0ed051defd6c37561f6175`
 - Superseded dirty-run `git_head`: `b7f54fff90fb218dd57d04b2a7d90b9bd9387521`
 
@@ -43,13 +45,13 @@ No repository-level ruff, mypy, tox, setup.cfg, or pyproject static-check config
 
 ## Experiments Run
 
-| command | result artifact | result sha256 | manifest sha256 |
-| --- | --- | --- | --- |
-| `PYTHONPATH=. python scripts/revalidation_phase2_identifiability.py` | `artifacts/phase2_6_revalidation/phase2_identifiability.json` | `fe0d5c959816fe9b6578eb1c45756f7d57079d914be6a5529e36c5ee5cea3a5c` | `66ec50210c53e226a372bd09ddb53dae0997d13b8255fd468d6f8a1cc40faf66` |
-| `PYTHONPATH=. python scripts/revalidation_phase3_fixed.py` | `artifacts/phase2_6_revalidation/phase3_fixed_regression.json` | `c4a097fa4bf886cfcb3d7f13263844823583d2bfdd8081f16ea2ef3c483b7b72` | `dae111c6a33ecc4eae0d4b2cd25ce00ee05ef8a8bd60d9fac51504e7c6d79936` |
-| `PYTHONPATH=. python scripts/revalidation_phase4_adaptive.py` | `artifacts/phase2_6_revalidation/phase4_adaptive_regression.json` | `54ce70064d113b0b7d63c9f76596e30974e86c84be501bb12e9f158a5c280a07` | `e5ab6f5f98346f9fa5d61fc47196ea8985afbd0e33f56cd48168e3780f378f94` |
-| `PYTHONPATH=. python scripts/revalidation_phase5_robustness.py` | `artifacts/phase2_6_revalidation/phase5_robustness.json` | `b554bafa863ace1dd4729ab3b0c435b3dfd0d0e28a3a8b5c9efe43c4b2457d2a` | `4443f248806a671f7493b902cf3a7cd0d29aeb0f79b7b3e9b3e12d846503b24b` |
-| `PYTHONPATH=. python scripts/revalidation_phase6_dsl.py` | `artifacts/phase2_6_revalidation/phase6_dsl.json` | `aa6a5fea5024a3486e7f432a9d2a29a090f76734ecb9d5acea922232e14f94d2` | `7e31ecaef0221b03994373c969331b5b2cc37b306cdc0bc7e4b7a69c3f8c7ea7` |
+| command | source commit | result artifact | result sha256 | manifest sha256 |
+| --- | --- | --- | --- | --- |
+| `PYTHONPATH=. python scripts/revalidation_phase2_identifiability.py` | `dc6a837ac20aad967da76a69d50c0b5b2bfe7379` | `artifacts/phase2_6_revalidation/phase2_identifiability.json` | `fe0d5c959816fe9b6578eb1c45756f7d57079d914be6a5529e36c5ee5cea3a5c` | `66ec50210c53e226a372bd09ddb53dae0997d13b8255fd468d6f8a1cc40faf66` |
+| `PYTHONPATH=. python scripts/revalidation_phase3_fixed.py` | `dc6a837ac20aad967da76a69d50c0b5b2bfe7379` | `artifacts/phase2_6_revalidation/phase3_fixed_regression.json` | `c4a097fa4bf886cfcb3d7f13263844823583d2bfdd8081f16ea2ef3c483b7b72` | `dae111c6a33ecc4eae0d4b2cd25ce00ee05ef8a8bd60d9fac51504e7c6d79936` |
+| `PYTHONPATH=. python scripts/revalidation_phase4_adaptive.py` | `dc6a837ac20aad967da76a69d50c0b5b2bfe7379` | `artifacts/phase2_6_revalidation/phase4_adaptive_regression.json` | `54ce70064d113b0b7d63c9f76596e30974e86c84be501bb12e9f158a5c280a07` | `e5ab6f5f98346f9fa5d61fc47196ea8985afbd0e33f56cd48168e3780f378f94` |
+| `PYTHONPATH=. python scripts/revalidation_phase5_robustness.py` | `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` | `artifacts/phase2_6_revalidation/phase5_robustness.json` | `b554bafa863ace1dd4729ab3b0c435b3dfd0d0e28a3a8b5c9efe43c4b2457d2a` | `dee175d2eee039efece909d6e78d5c84c3bb86b63137a4197a6872e4404c20e2` |
+| `PYTHONPATH=. python scripts/revalidation_phase6_dsl.py` | `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` | `artifacts/phase2_6_revalidation/phase6_dsl.json` | `252d8043ea73a087b77be919bce91bc91e0b0cfaa40ecaca5887b69006abc5e0` | `814b3cc1320090677fe6d6feb73b5fe3804cb001ff96c445e238a1b4b14b487d` |
 
 ## Corrected Results
 
@@ -113,4 +115,10 @@ Latest strict read-only independent review verdict for source commit `dc6a837ac2
 - Reviewer started with `fork_context=false` and did not rerun tests or experiments.
 - Confirmed findings: reports exposed conflicting current evidence states; conditional execution did not require capabilities from inactive branches; `ADD` and `CONDITION` relied on Python coercion outside the declared DSL contract; exported probabilistic policies accepted boolean attempt counts.
 - Artifact hashes and manifest source bindings were confirmed sound. Phase 2 response-matrix semantics, Phase 3 exhaustive minimal search, Phase 4 adaptive behavior, and Phase 5 posterior and aggregate calculations were also confirmed sound.
-- Current gate remains `REJECT` until the post-review repair is verified, frozen, and independently accepted.
+- Current evidence gate remains `PENDING INDEPENDENT REVIEW` until the latest Phase 5/6 artifacts are independently reviewed and accepted.
+
+Post-review source repair commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40`: implementation review `ACCEPT`.
+
+- Reviewer started with `fork_context=false` and did not rerun tests or experiments.
+- The review confirmed that the prior report conflicts, conditional branch capability contract, DSL type coercion, and boolean probabilistic attempt-count issues were repaired.
+- The repair was then frozen as a source commit before formal Phase 5/6 revalidation.
