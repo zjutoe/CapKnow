@@ -14,9 +14,12 @@ Accepted baseline:
 main commit: 02380501e5def5d9f624578a93bc0580de1e030a
 ```
 
-Phase 2-6 is accepted evidence. Do not edit or regenerate its source-bound artifacts,
-manifests, reports, or revalidation scripts in this milestone. Phase 7 starts a new
-evidence boundary.
+Phase 2-6 is accepted evidence. Do not edit or regenerate its accepted result
+artifacts, manifests, phase-specific reports, or revalidation scripts in this
+milestone. `Capability_Certificate_Research_Progress_Summary.md` is a living
+cross-milestone summary and Phase 7 is allowed and expected to update it, while
+preserving accurate Phase 2-6 conclusions, provenance, and acceptance status. Phase
+7 starts a new evidence boundary.
 
 No implementation or experiment is authorized until this handoff passes a
 fresh-context milestone-start scientific protocol review.
@@ -29,8 +32,9 @@ previously easy to conflate:
 
 1. prerequisite structure alone reduces the number of legal states;
 2. observational redundancy permits a smaller fixed certificate;
-3. an ordered state population permits an adaptive decision tree to outperform a
-   fixed certificate under a uniform state prior.
+3. ordered prefix populations have adaptive average depth below fixed size under
+   uniform state weighting for `B >= 2`, and adaptive worst-case depth below fixed
+   size only for `B >= 3`.
 
 This milestone must explain why the accepted chain, tree, and unstructured worlds
 required every task in their fixed certificates, then introduce the smallest
@@ -153,7 +157,11 @@ prefix-block state may contain only the union of the first `j` blocks for some
 `j ∈ {0, ..., B}`.
 
 The generated `valid_states` must be the complete population admitted by these rules
-for the declared task universe, not a sampled subset.
+for the declared task universe, not a sampled subset. For every structured grid
+world (`n <= 12`), an independent closure oracle must enumerate every subset of `Q`
+and require exact set equality between `valid_states` and the subsets accepted by
+`KnowledgeSpace.is_valid_state`; checking only declared states or representative
+illegal states is insufficient.
 
 ### 5.2 Independent block world
 
@@ -185,13 +193,17 @@ successive block prefixes. For uniform block size `s`:
 - entropy and balanced adaptive worst-case depth: exactly
   `ceil(log2(B + 1))`;
 - the adaptive tree contains exactly `B + 1` leaves and `2 * (B + 1) - 1` nodes;
-- for `B >= 2`, adaptive average depth must be strictly smaller than the fixed
-  certificate size; for `B >= 3`, adaptive worst-case depth must also be strictly
-  smaller.
+- across the frozen prefix grid (`B >= 2`), adaptive average depth must be strictly
+  smaller than the fixed certificate size; adaptive worst-case depth is strictly
+  smaller only for `B >= 3`, and equals the fixed certificate size for `B = 2`.
 
 Adjacent prefix states differ on one complete block. This proves the fixed lower
 bound of one representative per block. Balanced threshold questions over the
 ordered prefixes attain the frozen adaptive worst-case bound.
+
+The one-representative-per-block result is limited to these two complete declared
+block-family populations and their block-toggle or adjacent-prefix witnesses; block
+synchronization alone does not establish it for another population.
 
 ## 6. Frozen Experiment Grid
 
@@ -280,13 +292,16 @@ calling private exact-solver helpers:
 1. canonical state signatures;
 2. response columns and their equivalence classes;
 3. single-coordinate witness pairs and indispensable tasks;
-4. theoretical state count for each structured family;
-5. expected block coverage of the selected exact certificate;
-6. fixed task ratio, savings, and information lower bound;
-7. adaptive leaf count, node count, per-state leaf depths, average depth, and
+4. structured-population closure by enumerating every subset of `Q` and requiring
+   exact equality between declared `valid_states` and states accepted by
+   `KnowledgeSpace.is_valid_state`;
+5. theoretical state count for each structured family;
+6. expected block coverage of the selected exact certificate;
+7. fixed task ratio, savings, and information lower bound;
+8. adaptive leaf count, node count, per-state leaf depths, average depth, and
    worst-case depth reconstructed from the serialized tree;
-8. agreement between reconstructed tree metrics and solver-reported metrics;
-9. exact and adaptive independent validator results.
+9. agreement between reconstructed tree metrics and solver-reported metrics;
+10. exact and adaptive independent validator results.
 
 Runtime may be recorded but is not a scientific outcome. Do not claim scalability
 from these bounded runs.
@@ -319,7 +334,9 @@ scripts/phase7_structural_compressibility.py
 tests/test_block_worlds.py
 ```
 
-Expected evidence paths after an accepted formal run:
+The initial/default formal output root is
+`artifacts/phase7_structural_compressibility`. Its expected evidence paths after an
+accepted formal run are:
 
 ```text
 artifacts/phase7_structural_compressibility/structural_compressibility.json
@@ -327,6 +344,9 @@ artifacts/phase7_structural_compressibility/manifest.json
 phase7_report.md
 Capability_Certificate_Research_Progress_Summary.md
 ```
+
+The summary is the sole permitted Phase 2-6-facing document update: it must retain
+the accuracy of the accepted prior evidence while adding Phase 7 status and results.
 
 Do not modify the exact, adaptive, identifiability, or validation semantics merely to
 make a Phase 7 oracle pass. If a confirmed existing defect blocks the protocol,
@@ -339,16 +359,19 @@ Targeted tests must cover at least:
 1. rejection of empty block collections, empty blocks, and duplicate task IDs;
 2. deterministic task, block, and state ordering;
 3. exact independent-block and prefix-block state populations;
-4. every generated state passes `is_valid_state`;
-5. representative illegal partial-block and skipped-prefix states fail
+4. structured-population closure by exhaustive enumeration of every subset of `Q`
+   (`n <= 12`), requiring exact equality of `valid_states` and
+   `is_valid_state`-accepted states;
+5. every generated state passes `is_valid_state`;
+6. representative illegal partial-block and skipped-prefix states fail
    `is_valid_state`;
-6. expected response-column equivalence classes;
-7. exact fixed-size and block-coverage formulas across the full frozen grid;
-8. independent-block adaptive depth formula;
-9. prefix-block adaptive leaf, node, average-depth, and worst-case gates;
-10. canonical no-compression witness oracles;
-11. matched-control reproducibility and constraint enforcement;
-12. a deliberately malformed or duplicate-row control is rejected.
+7. expected response-column equivalence classes;
+8. exact fixed-size and block-coverage formulas across the full frozen grid;
+9. independent-block adaptive depth formula;
+10. prefix-block adaptive leaf, node, average-depth, and worst-case gates;
+11. canonical no-compression witness oracles;
+12. matched-control reproducibility and constraint enforcement;
+13. a deliberately malformed or duplicate-row control is rejected.
 
 Run targeted tests first, then the repository-wide canonical command:
 
@@ -370,17 +393,22 @@ PYTHONPATH=. python scripts/phase7_structural_compressibility.py
 ```
 
 Formal execution is permitted only after implementation and tests are committed and
-the worktree is clean. The operator handoff must bind:
+an unexcluded full `git status --short` confirms a clean worktree before any Phase 7
+output is created. The target fixed output root must not exist; refuse overwrite.
+The operator handoff must bind:
 
 - exact source commit;
 - exact script path and command;
 - Python version;
 - frozen grid and seeds;
 - fixed output root;
-- pre-run clean status;
+- unexcluded pre-run clean status;
 - result and manifest paths.
 
-The script may exclude only its fixed output root from its clean-worktree check.
+Only the post-generation source-cleanliness check may exclude exactly the newly
+created fixed output root; no pre-run check may use an exclusion. The script must
+stage output and publish the fixed root atomically. The manifest
+must bind the exact output-root path and a complete exact output-file inventory.
 During generation, SHA-256 binds the uncommitted result bytes to the manifest. Final
 scientific review must bind the committed evidence SHA; Git is the final identity for
 versioned source, configuration, scripts, reports, manifests, and artifacts.
@@ -395,8 +423,10 @@ Store enough raw evidence to audit results without rerunning the experiment:
 - all matched-control per-seed results;
 - aggregate inputs as well as aggregate outputs.
 
-Do not overwrite an accepted or rejected run in place. A rerun must use a new fixed
-output root or a new evidence commit with its provenance stated explicitly.
+Do not overwrite an accepted or rejected run in place. A rerun must change to a
+fresh, run-specific fixed output root/path and bind it in a new committed
+protocol/source before the unchanged formal command runs. Record that root and its
+exact inventory in the rerun manifest.
 
 ## 13. Hypotheses Versus Acceptance Gates
 
@@ -404,10 +434,14 @@ The following are protocol or implementation gates. A mismatch blocks acceptance
 must be investigated:
 
 - the single-coordinate witness theorem checks;
+- structured-population closure against exhaustive `is_valid_state` enumeration;
 - independent-block and prefix-block state-count formulas;
 - exact fixed certificate size `B` for both block families;
 - independent-block adaptive depth `B`;
 - prefix-block adaptive worst-case depth `ceil(log2(B + 1))`;
+- across the frozen prefix grid, adaptive average depth is strictly below fixed size
+  for `B >= 2`; adaptive worst-case depth is strictly below fixed size only for
+  `B >= 3` and equals it for `B = 2`;
 - validator, tree reconstruction, source-binding, and artifact-consistency gates.
 
 The following are empirical scientific outcomes and may be negative without making
@@ -426,7 +460,8 @@ Phase 7 is complete only when all of the following hold:
 1. The mathematical definitions and single-coordinate witness proof are reflected in
    executable, independent diagnostics.
 2. Both block generators enforce their declared rules and enumerate their complete
-   legal populations deterministically.
+   legal populations deterministically; exhaustive structured-population closure
+   matches `valid_states` exactly to `is_valid_state`-accepted subsets.
 3. All structured grid cells satisfy their frozen state-count, fixed-size,
    equivalence-class, and adaptive-tree oracles.
 4. Canonical chain, tree, and unstructured controls satisfy the frozen
@@ -438,11 +473,14 @@ Phase 7 is complete only when all of the following hold:
 7. Statistical denominators and aggregation semantics match Section 9.
 8. Targeted and repository-wide tests pass with exact recorded results.
 9. The formal experiment runs from a clean committed source with the exact frozen
-   command, grid, seeds, and output root.
+   command, grid, seeds, fresh nonexistent output root, required atomic publication,
+   and exact root/file-inventory manifest binding.
 10. The report distinguishes theorem-backed results, descriptive controls, unsupported
     hypotheses, and accepted limitations.
-11. Phase 2-6 accepted evidence remains byte-identical and is not reused as Phase 7
-    output.
+11. Phase 2-6 accepted result artifacts, manifests, phase-specific reports, and
+    revalidation scripts remain unedited and are not reused as Phase 7 output; the
+    living summary retains accurate prior conclusions, provenance, and acceptance
+    status while recording Phase 7.
 12. A fresh-context strict read-only final scientific review finds no unresolved
     correctness, protocol, provenance, statistical, or overclaiming finding.
 
@@ -450,12 +488,14 @@ Phase 7 is complete only when all of the following hold:
 
 If all frozen structured oracles pass, the strongest allowed claims are:
 
-- membership spaces with synchronized task blocks have fixed certificates requiring
-  one representative per block;
+- the two complete declared block families have fixed certificates requiring one
+  representative per block, as witnessed by their complete block toggles or adjacent
+  prefixes;
 - acyclic prerequisite examples with single-coordinate witness pairs need not provide
   fixed compression;
-- ordered prefix-block populations permit lower adaptive query depth than their fixed
-  representative sets under uniform state weighting;
+- across the frozen prefix grid under uniform state weighting, adaptive average
+  depth is strictly below fixed size for `B >= 2`; adaptive worst-case depth is
+  strictly below fixed size for `B >= 3` and equals it for `B = 2`;
 - matched controls show where these cells fall among explicitly constrained random
   populations.
 
