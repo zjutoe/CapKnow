@@ -1,0 +1,95 @@
+{
+  "command": "PYTHONPATH=. python scripts/phase7_structural_compressibility.py",
+  "config": {
+    "grid": [
+      {
+        "block_count": 2,
+        "block_size": 2
+      },
+      {
+        "block_count": 3,
+        "block_size": 2
+      },
+      {
+        "block_count": 4,
+        "block_size": 2
+      },
+      {
+        "block_count": 5,
+        "block_size": 2
+      },
+      {
+        "block_count": 6,
+        "block_size": 2
+      },
+      {
+        "block_count": 2,
+        "block_size": 3
+      },
+      {
+        "block_count": 3,
+        "block_size": 3
+      },
+      {
+        "block_count": 4,
+        "block_size": 3
+      }
+    ],
+    "matched_control_seeds": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19
+    ],
+    "output_root": "artifacts/phase7_structural_compressibility"
+  },
+  "file_inventory": [
+    {
+      "path": "artifacts/phase7_structural_compressibility/structural_compressibility.json",
+      "role": "scientific_result",
+      "sha256": "9ffd95abfe4ad85ee55aa833342de175d8bebdb39bf9ac808259943282842270",
+      "size_bytes": 5037723
+    },
+    {
+      "path": "artifacts/phase7_structural_compressibility/manifest.json",
+      "role": "manifest",
+      "sha256": null,
+      "sha256_note": "Manifest self-hash is reported after write; embedding it would change the manifest bytes.",
+      "size_bytes": 2401
+    }
+  ],
+  "output_root": {
+    "path": "artifacts/phase7_structural_compressibility",
+    "publication": "staged in sibling directory and atomically renamed into place"
+  },
+  "phase": "phase7_structural_compressibility",
+  "python_version": "3.13.9",
+  "script": "scripts/phase7_structural_compressibility.py",
+  "source": {
+    "baseline_commit": "02380501e5def5d9f624578a93bc0580de1e030a",
+    "clean_worktree_before_run": true,
+    "command": "PYTHONPATH=. python scripts/phase7_structural_compressibility.py",
+    "git_head": "b44cad06dbe1859008c9ce47f6434ef1ac7774a4",
+    "git_status_porcelain_before_run": "",
+    "handoff_path": "Capability_Certificate_Task_Handoff_009_Phase7_Structural_Compressibility.md",
+    "implementation_start_commit": "a727c5e9dd8619e0d8135b8530af691d5a9e6694",
+    "script_path": "scripts/phase7_structural_compressibility.py",
+    "source_binding": "git_commit"
+  }
+}
