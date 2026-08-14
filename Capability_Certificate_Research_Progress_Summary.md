@@ -1,6 +1,6 @@
 # Capability Certificate 项目研究目标与阶段成果回顾
 
-更新时间：2026-08-13
+更新时间：2026-08-14
 
 ## 1. 项目研究目标
 
@@ -13,7 +13,8 @@
 3. 唯一识别状态最少需要哪些固定任务；
 4. 根据先前回答动态选题能否降低评估成本；
 5. 存在失误、猜测和随机性时，能否进行可靠的概率推断；
-6. 抽象能力标签能否落到可执行语义，并支持能力组合。
+6. 抽象能力标签能否落到可执行语义，并支持能力组合；
+7. 什么样的声明状态族能产生固定 certificate 压缩，以及这种压缩和自适应压缩有何区别。
 
 这里的 certificate 有两种主要形式：
 
@@ -47,6 +48,7 @@
 | Phase 4 | 自适应提问能否降低成本 | structured worlds 的平均深度低于固定规模；unstructured 无优势 | 优势是小型确定性世界中的平均成本优势 |
 | Phase 5 | 噪声下能否可靠推断 | 建立稳定 Bayesian 推断和 fixed/adaptive noisy assessment；通过一致性 oracle | 尚不能据此声称噪声下 adaptive 普遍优于 fixed |
 | Phase 6 | 能力能否具有可执行和组合语义 | primitive、组合、held-out 组合均可确定执行；证书可转移到 primitive DSL world | 语义和组合规则仍由人工定义 |
+| Phase 7 | 何时存在固定 certificate 压缩 | 两个完整 block family 的固定 certificate 只需每个 block 一个代表任务；prefix family 的自适应平均深度低于固定规模 | 只适用于人工声明的小型确定性 block worlds；final scientific review 尚未完成 |
 
 ## 4. Phase 1：Knowledge Space Core
 
@@ -151,7 +153,37 @@ Phase 6 将抽象 capability label 落到确定性的可执行程序。当前 pr
 
 这一阶段尚未证明 DSL 能自动发现能力结构，也未建立到真实神经语言模型的桥梁。primitive 语义、输入上下文和组合规则仍是人工设计的，certificate transfer 结果也仅覆盖 pure primitive world。
 
-## 10. 经过修订后的证据状态
+## 10. Phase 7：Structural Compressibility
+
+Phase 7 构造了两个最小参数化 block world family，用来区分“先修结构减少合法状态数”和“观测列冗余允许固定任务压缩”。
+
+- independent block world：每个 block 内任务同步出现，不同 block 可独立开关，状态总体为所有完整 block union；
+- prefix block world：状态总体为空状态和连续 ordered block prefixes。
+
+两个生成器均使用普通 prerequisite rules 表达同步/前缀约束，并用 exhaustive closure oracle 检查：在 `n <= 12` 的冻结网格内，`valid_states` 必须和 `KnowledgeSpace.is_valid_state` 接受的所有子集完全一致。
+
+正式 Phase 7 artifact 由 clean source commit `b44cad06dbe1859008c9ce47f6434ef1ac7774a4` 生成：
+
+- command：`PYTHONPATH=. python scripts/phase7_structural_compressibility.py`；
+- result：`artifacts/phase7_structural_compressibility/structural_compressibility.json`，sha256 `9ffd95abfe4ad85ee55aa833342de175d8bebdb39bf9ac808259943282842270`；
+- manifest：`artifacts/phase7_structural_compressibility/manifest.json`，sha256 `a496f502f0230089d220a90c86873b0ae1ed258c8a267fa887f960b7c9e6caa0`；
+- structured cells：16；
+- matched random controls：320；
+- structured oracle status：`passed`。
+
+Phase 7 结果显示：
+
+- 两个完整 block family 的 exact fixed certificate size 都等于 block 数 `B`，也就是每个 block 一个代表任务；
+- 对 uniform block size `s`，fixed task ratio 为 `1/s`；
+- independent block world 的 adaptive 平均和最坏深度都等于 `B`，与 fixed certificate size 相同；
+- prefix block world 的 adaptive 平均深度在冻结网格中对 `B >= 2` 均低于 fixed size；adaptive 最坏深度对 `B=2` 等于 fixed size，对 `B>=3` 严格低于 fixed size；
+- chain、accepted tree 和 full unstructured controls 均通过 single-coordinate witness oracle，每个任务都 individually indispensable，因此 fixed certificate size 等于 task count。
+
+matched controls 只是描述性参照，不是工程 acceptance gate。独立 block cells 的 fixed size 在本次结果中均低于 matched-control mean；prefix cells 虽然相对 task count 有固定压缩，但在 `B>=3` 时 fixed size 高于 matched-control mean。因此 Phase 7 不支持“结构本身相对随机总体总是更省固定任务”的一般声明。
+
+Phase 7 目前的证据状态是：formal artifacts 已生成，implementation review 已通过，final fresh-context scientific review 尚未完成。
+
+## 11. 经过修订后的证据状态
 
 Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非法状态被静默过滤、adaptive tree validator 不完整、平均和最坏成本混淆、Bayesian history 重复计数、DSL 只返回 membership 而不执行具体语义，以及实验脚本缺少可失败的 expected-output oracle。
 
@@ -173,7 +205,7 @@ Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非�
 
 独立 reviewer 没有自行重跑测试或实验，其结论基于冻结源码、diff、manifest、artifact、JSON 结构与聚合一致性以及已记录验证的只读检查。上一轮 clean evidence package 的 artifact hash 全部匹配，manifest 均绑定当时的 source commit；拒绝原因是报告证据状态不一致、DSL 条件任务声明与执行不一致、DSL 输入依赖 Python 隐式转换，以及公开概率策略接受 boolean attempts。上述问题已在 `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 中修复并通过 source repair review。Phase 5/6 evidence package 的数值与 provenance 检查通过并已提交；随后 Phase 2-4 也在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上重跑。最终 reviewer 独立复核了十个当前 result/manifest SHA-256，并确认实现/协议一致、统计口径正确、历史无效证据已隔离且报告没有超出实验边界的科学声明。更早的 source-snapshot 证据包仅保留为历史记录。hash 证明字节身份和来源绑定，不代替数学、实现和实验协议审查。
 
-## 11. 迄今为止的综合研究结论
+## 12. 迄今为止的综合研究结论
 
 1. capability certificate 可以在有限、显式 knowledge space 中被严格定义、求解和验证。
 2. full-information identifiability 是 certificate 存在的前提，必须在求解前独立检查。
@@ -181,18 +213,18 @@ Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非�
 4. Phase 4 结果显示，结构可以为自适应评估提供平均成本优势；该优势出现在 chain/tree，而没有出现在 unstructured 对照组。
 5. 噪声把“逻辑上唯一识别”转化为“基于模型和先验的后验推断”；正确的增量更新、停止规则和一致性 oracle 是科学结论成立的必要条件。
 6. capability metadata 只有在对应当前世界实际可执行规则时才有行为含义。可执行 DSL 比单纯 membership label 提供了更强的验证边界。
-7. 目前最强的结果是受控小世界中的方法可行性和语义一致性，不是对真实 LLM 能力测量有效性的经验结论。
+7. Phase 7 进一步说明，固定任务压缩需要响应列冗余等更具体的状态总体结构；先修结构本身不足以保证 fixed certificate 变小。
+8. 目前最强的结果是受控小世界中的方法可行性和语义一致性，不是对真实 LLM 能力测量有效性的经验结论。
 
-## 12. 仍待回答的研究问题
+## 13. 仍待回答的研究问题
 
-- 如何构造既有结构、又确实存在固定 certificate 压缩的世界族，并系统研究结构参数与 certificate size 的关系；
 - 如何把 exact fixed solver 从穷举扩展到更大任务空间，同时保留可验证的最优性或近似界；
 - 如何在统一成本预算下比较 noisy fixed、adaptive 和 repeated-probe 方法，并报告置信区间与统计功效；
 - 如何处理非均匀状态先验、任务成本不同和噪声参数未知的情况；
 - 如何从数据中学习或检验 capability graph，而不是完全人工给定；
 - 如何把 DSL task 映射到真实模型输入输出，并验证 latent capability state 是否具有跨任务预测效度。
 
-## 13. 主要证据文档
+## 14. 主要证据文档
 
 - [Phase 1 report](phase1_report.md)
 - [Phase 2 report](phase2_report.md)
@@ -200,4 +232,5 @@ Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非�
 - [Phase 4 report](phase4_report.md)
 - [Phase 5 report](phase5_report.md)
 - [Phase 6 report](phase6_report.md)
+- [Phase 7 report](phase7_report.md)
 - [Phase 2-6 correctness repair and revalidation](phase2_6_revalidation_report.md)
