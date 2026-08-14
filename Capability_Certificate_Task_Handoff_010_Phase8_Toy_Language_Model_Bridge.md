@@ -32,7 +32,7 @@ read-only inspection of accepted APIs and the local runtime is allowed.
 
 ## 2. Scientific Objective
 
-Determine, in a small controlled setting, whether independently trained causal
+Determine, in a small controlled setting, whether separately trained causal
 language models can acquire behavioral response structure from natural-language
 corpora generated from executable DSL programs, and whether the resulting model
 population admits a capability certificate corresponding to the ground-truth DSL
@@ -49,7 +49,7 @@ The milestone separates four questions:
 4. Does coherent composition supervision outperform a token-matched randomized
    composition control?
 
-The unit being certified is an independently trained checkpoint. A contextual agent
+The unit being certified is a separately trained checkpoint. A contextual agent
 ID or state token is forbidden: a single model conditioned on multiple personas
 would certify prompt-conditioned personas rather than model behavior.
 
@@ -89,8 +89,11 @@ CONDITION
 The declared state population is the complete powerset of these primitives, in
 canonical bit-mask order from `0` through `15`, with bit positions assigned by the
 primitive order above (`MEMORY` is bit 0 and `CONDITION` is bit 3). Each state is
-assigned its own corpus and independently initialized model. For every experiment
-condition and training seed, train exactly 16 checkpoints, one per state.
+assigned its own corpus and separately instantiated and trained checkpoint. All 16
+checkpoints within a training seed intentionally use the same initial weights; they
+are separate evaluated systems, not independently initialized statistical
+replicates. For every experiment condition and training seed, train exactly 16
+checkpoints, one per state.
 
 The state must not be supplied to the model as a token, embedding, prompt, filename
 fragment inside a prompt, or inference-time side channel. It affects the model only
@@ -187,6 +190,31 @@ Every program/context/output contract must have independent exact-output tests. 
 not add a synthetic composition label to a model's state; composite success is
 defined only by executable primitive requirements.
 
+Freeze these task-specific context schemas:
+
+- primitive `MEMORY`: `{"case": c, "memory": {k: v}, "key": k}`; projection
+  returns `v`;
+- primitive `SEARCH` and `FILTER`:
+  `{"case": c, "items": [item, ...], "target": t}`;
+- primitive `CONDITION`: `{"case": c, "condition": b}` where `b` is Boolean;
+- `MEMORY_FILTER` and `MEMORY_SEARCH`:
+  `{"case": c, "memory": {k: v}, "key": k, "items": [item, ...]}`;
+- `FILTER_CONDITION` and `SEARCH_CONDITION`:
+  `{"case": c, "items": [item, ...], "target": t}`.
+
+Here `c`, `k`, `v`, `t`, and every item are strings except the explicitly Boolean
+`b`. These are exact top-level key sets, `memory` contains exactly the one shown
+entry, and extra fields are forbidden.
+
+The sequence schemas are semantically binding. Because accepted `MEMORY` adds
+`value` and sets `target` only when it is absent, forbidding an initial `target` and
+`value` ensures the downstream `FILTER` or `SEARCH` consumes the retrieved memory
+value. For both memory sequences, dependency tests must keep every other context
+field fixed and change only `memory[key]`; the final projected answer must change.
+One test value must be present in `items` and the other absent. A context that already
+contains `target` or `value` must be rejected by the Phase 8 generator rather than
+accepted as another template variant.
+
 ### 5.2 Ground-truth certificate oracle
 
 The 16 primitive states and eight program probes form the ground-truth world. Before
@@ -226,6 +254,17 @@ Metadata may contain internal IDs but must be stored separately from model-facin
 text. The leakage oracle scans decoded text, token sequences, and prompt/response
 fields before training.
 
+For every evaluation prompt, the encoded prefix consisting of BOS, rendered prompt,
+and SEP must satisfy
+
+```text
+encoded_evaluation_prefix_length + 64 <= 256
+```
+
+so the full frozen generation allowance fits the positional embedding table. Both
+training and evaluation reject overflow before model execution. Truncation, left
+truncation, rolling windows, and sliding-window generation are forbidden.
+
 Answers use canonical compact JSON values encoded as UTF-8. When a program is not
 executable in the assigned state, its training response is exactly:
 
@@ -256,9 +295,34 @@ and evaluation uses `j=0..63`. The base corpus is therefore an exact prefix of t
 large corpus for the same task and state.
 
 The generator must store canonical program dictionaries, template IDs, payload IDs,
-rendered prompts, answers, and split names in metadata. It must gate exact
-non-overlap of prompt text, template ID, payload ID, and the tuple
-`(program_dict, template_id, payload_id)` across training and evaluation.
+canonical compact-JSON input contexts, normalized payload-value tuples, rendered
+prompts, answers, and split names in metadata. Every generated context includes the
+zero-padded decimal payload seed as a task-facing case value using the same surface
+format in both splits; the disjoint numeric domains above make exact contexts and
+payload tuples constructively distinct without a train/evaluation split-name token.
+
+Normalize payload values without relying on mapping insertion order as follows:
+
+```text
+MEMORY:                    (case, key, memory[key])
+SEARCH or FILTER:          (case, tuple(items), target)
+CONDITION:                 (case, condition)
+MEMORY_FILTER or
+MEMORY_SEARCH:             (case, key, memory[key], tuple(items))
+FILTER_CONDITION or
+SEARCH_CONDITION:          (case, tuple(items), target)
+```
+
+Every listed value must also be rendered in the natural-language prompt; the `case`
+value is therefore not hidden metadata. Mappings are serialized with sorted keys and
+compact JSON separators for byte-level context comparison.
+
+For each task separately, gate empty intersections between training and evaluation
+sets of canonical input-context bytes and normalized payload-value tuples, in
+addition to exact non-overlap of prompt text, template ID, payload ID, and the tuple
+`(program_dict, template_id, payload_id)`. Any collision is a generator error; do not
+resample it silently. Tests must inject a duplicate canonical context and a duplicate
+normalized payload tuple and require both to be rejected.
 
 All Boolean-valued task families must have exactly 32 `true` and 32 `false`
 counterfactual answers in the 64 evaluation instances. Non-Boolean answer families
@@ -495,26 +559,58 @@ When identifiable:
 
 ### 10.3 Metrics
 
-Record at least:
+For every state/task cell retain `exact_success_count`, `exact_unable_count`, and all
+64 raw generations. Define
 
-- primitive, seen-composition, and held-out-composition raw exact accuracies;
-- full-matrix behavioral false-positive and false-negative counts relative to
-  `y_gt`;
-- `behavioral_regret`, defined as normalized Hamming loss over all `16 * 8` primary
-  response bits relative to the zero-loss ground-truth matrix;
-- state identification accuracy using the unique four-primitive ground-truth
-  certificate signature;
-- exact full-signature state-match accuracy, where a row must equal its assigned
-  state's complete ground-truth signature; another state's signature and a
-  non-ground-truth signature are both incorrect rather than mapped to a nearest
-  state;
-- exact behavioral certificate size, fixed task ratio, and task savings;
+```text
+a[K,q] = exact_success_count[K,q] / 64
+```
+
+and the task families `P` (four primitives), `S` (three seen compositions), and `H`
+(the held-out composition). For each family `F`, report:
+
+```text
+mastery[F] = mean a[K,q] over q in F and y_gt(K,q)=1
+false_positive_answer_rate[F] = mean a[K,q] over q in F and y_gt(K,q)=0
+correct_refusal_rate[F] = mean exact_unable_count[K,q]/64
+                          over q in F and y_gt(K,q)=0
+all_state_answer_success[F] = sum exact_success_count[K,q]
+                              / (64 * 16 * |F|)
+```
+
+Every `(K,q)` cell is equally weighted in these macro means. The exact positive and
+negative cell denominators are respectively `32/32` for `P`, `12/36` for `S`, and
+`4/12` for `H`. `all_state_answer_success` mixes mastery with capability prevalence
+and must never be called mastery or general accuracy; an oracle-consistent population
+would yield `0.5` for `P` and `0.25` for both composition families.
+
+On the primary binary matrix, record false-positive count and rate over the 80 cells
+with `y_gt=0`, false-negative count and rate over the 48 cells with `y_gt=1`, and
+`behavioral_regret`, defined as total Hamming disagreement divided by all `16 * 8 =
+128` cells. Also record family-stratified bit false-positive and false-negative rates
+using the cell denominators above.
+
+Record the following population-level metrics with these exact denominators:
+
+- ground-truth-certificate state identification: assigned-state matches divided by
+  `16`;
+- exact full-signature state matching: assigned-state complete-signature matches
+  divided by `16`; another state's signature and a non-ground-truth signature are
+  both incorrect rather than mapped to a nearest state;
+- exact behavioral certificate size `m`, `fixed_task_ratio = m/8`, and
+  `fixed_task_savings = 8-m`;
 - canonical selected-task Jaccard overlap with the unique ground-truth certificate;
-- minimum, mean, and maximum Jaccard overlap across all minimum behavioral
+- minimum, arithmetic mean, and maximum Jaccard overlap across all minimum behavioral
   certificates;
-- entropy and balanced adaptive average and worst-case query depths;
+- entropy and balanced adaptive average and worst-case query depths under equal state
+  weighting;
 - the earliest frozen checkpoint step at which the primary behavioral matrix is
   identifiable, if any.
+
+One certificate or adaptive-tree query means one 64-prompt task-family battery, not
+one model generation. Report both family-query depths and their raw-generation costs
+obtained by multiplying by `64`; do not compare a family-query count directly with an
+individual-generation budget.
 
 The canonical behavioral certificate is the accepted exact solver's deterministic
 selection. Family-wide overlap statistics prevent conclusions from depending only
@@ -535,9 +631,14 @@ must not be reported as evidence of ground-truth recovery.
 - Report every seed separately, then equal-weighted mean, median, minimum, and maximum
   across the three seeds when an aggregate is useful.
 - A certificate metric that is undefined because one or more seeds are not
-  identifiable remains undefined for those seeds; never average invalid certificates
-  away.
-- Report paired per-seed differences for A versus C and A versus B descriptively.
+  identifiable remains undefined for those seeds. The across-seed aggregate for that
+  certificate metric is JSON `null` unless all three seed values are defined; always
+  retain the three per-seed values and never average invalid certificates away.
+- For every scalar metric, report paired differences `A(seed)-C(seed)` and
+  `A(seed)-B(seed)` as ordered three-element seed vectors. Report their arithmetic
+  mean, median, minimum, and maximum only when all three pairs are defined; otherwise
+  set the paired aggregate to JSON `null` while retaining defined per-seed
+  differences. Do not substitute zero or drop a seed.
 - Do not pool checkpoints, model sizes, corpus sizes, task families, or threshold
   sensitivity matrices into pseudo-replicates.
 - Do not report p-values, confidence intervals, or claims of statistical
@@ -572,14 +673,17 @@ certificate metric reconstruction so tests do not need to launch the formal grid
 Targeted tests must cover at least:
 
 1. exact four-primitive state order and eight-task program order;
-2. exact DSL output and required-primitive contracts for every program;
+2. exact DSL output, required-primitive, task-specific context-schema, and memory
+   dependency-perturbation contracts for every program;
 3. ground-truth `16 x 8` matrix, identifiability, unique size-four certificate, and
    independent subset-enumeration agreement;
 4. deterministic corpus generation and record ordering for a seed;
-5. byte tokenizer round-trip, special-token validation, padding, truncation refusal,
-   and response-only loss mask;
+5. byte tokenizer round-trip, special-token validation, padding, training-record and
+   evaluation-prefix length gates, truncation refusal, and response-only loss mask;
 6. literal capability/graph/state leakage rejection in model-facing text;
-7. exact split non-overlap and complete absence of `MEMORY_SEARCH` from training;
+7. exact prompt/template/ID/canonical-context/normalized-payload split non-overlap,
+   deliberate semantic-collision rejection, and complete absence of `MEMORY_SEARCH`
+   from training;
 8. balanced Boolean and distinct non-Boolean evaluation answer gates;
 9. A/B structured outcome agreement and primitive-record identity;
 10. A/C primitive byte identity, degree preservation, aggregate byte/token histogram
@@ -591,7 +695,9 @@ Targeted tests must cover at least:
 15. four-record CPU overfit smoke control;
 16. evaluator isolation and exact-answer behavior, including refusal not counting as
     task success;
-17. primary and sensitivity threshold boundary cases;
+17. primary and sensitivity threshold boundaries, all raw/family-stratified metric
+    denominators, paired null aggregation, fixed ratio/savings, and query-unit
+    conversion;
 18. behavioral identifiability, collision, non-ground-truth signature, and
     no-certificate paths;
 19. all-minimum-certificate enumeration and overlap statistics;
@@ -664,7 +770,9 @@ silently resume a failed or accepted run.
 The following are implementation/protocol gates and block acceptance on mismatch:
 
 - ground-truth DSL program, matrix, identifiability, and unique-certificate oracles;
-- corpus reproducibility, leakage, split, answer-distribution, and held-out gates;
+- DSL context-schema and sequential dependency-perturbation oracles;
+- corpus reproducibility, leakage, canonical-context/payload split,
+  answer-distribution, evaluation-prefix length, and held-out gates;
 - randomized-control degree, token-statistic, determinism, and changed-relation
   gates;
 - tokenizer, causal model, training, save/load, evaluator, and threshold tests;
@@ -678,7 +786,7 @@ The following are implementation/protocol gates and block acceptance on mismatch
 
 The following are empirical outcomes, not acceptance gates:
 
-- whether primitive accuracy exceeds the mastery threshold;
+- whether primitive answer-success counts exceed the mastery threshold;
 - whether A outperforms B or C;
 - whether `MEMORY_SEARCH` generalizes;
 - whether the behavioral matrix is identifiable;
@@ -727,12 +835,18 @@ The report must state at least:
 - this is a synthetic, templated, byte-level language-model experiment;
 - each row is a separately trained checkpoint from a state-specific corpus, not a
   naturally occurring model population;
+- checkpoints within a seed share initial weights and are neither independently
+  initialized nor independent statistical replicates;
 - refusal demonstrations explicitly supervise missing capabilities;
 - natural task semantics remain visible even though symbolic capability IDs and graph
   rules are hidden;
 - the random control preserves declared aggregate statistics but does not identify a
   general causal effect of language structure;
 - the primary response matrix depends on a predeclared mastery threshold;
+- mastery and false-positive answer rates are stratified by `y_gt`; pooled all-state
+  answer-success values reflect capability prevalence and are not called accuracy;
+- one certificate query is a 64-prompt task-family battery rather than one model
+  generation;
 - three seeds and repeated probes do not justify population-level significance;
 - a recovered certificate describes only this frozen probe family and state
   population;
@@ -754,10 +868,12 @@ The reviewer must audit:
 
 - whether one-checkpoint-per-state makes the certificate object well defined;
 - DSL program/type compatibility and the ground-truth certificate proof;
-- leakage and held-out split semantics;
+- task-specific context schemas, sequential information dependence, evaluation
+  length bounds, leakage, and semantic held-out split semantics;
 - feasibility and fairness of the degree-preserving random control;
 - tokenizer/model/training sufficiency without architecture search;
-- response threshold, error, regret, overlap, state-identification, and query metrics;
+- response threshold, stratified raw rates, error, regret, overlap,
+  state-identification, paired-null aggregation, and query-unit metrics;
 - seed, state, probe, checkpoint, and scale denominators;
 - whether any empirical hypothesis has leaked into an acceptance gate;
 - artifact sufficiency and Git/checksum provenance;
