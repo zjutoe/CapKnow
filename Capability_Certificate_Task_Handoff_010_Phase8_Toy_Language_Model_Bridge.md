@@ -192,19 +192,18 @@ defined only by executable primitive requirements.
 
 Freeze these task-specific context schemas:
 
-- primitive `MEMORY`: `{"case": c, "memory": {k: v}, "key": k}`; projection
-  returns `v`;
+- primitive `MEMORY`: `{"memory": {k: v}, "key": k}`; projection returns `v`;
 - primitive `SEARCH` and `FILTER`:
-  `{"case": c, "items": [item, ...], "target": t}`;
-- primitive `CONDITION`: `{"case": c, "condition": b}` where `b` is Boolean;
+  `{"items": [item, ...], "target": t}`;
+- primitive `CONDITION`: `{"condition": b}` where `b` is Boolean;
 - `MEMORY_FILTER` and `MEMORY_SEARCH`:
-  `{"case": c, "memory": {k: v}, "key": k, "items": [item, ...]}`;
+  `{"memory": {k: v}, "key": k, "items": [item, ...]}`;
 - `FILTER_CONDITION` and `SEARCH_CONDITION`:
-  `{"case": c, "items": [item, ...], "target": t}`.
+  `{"items": [item, ...], "target": t}`.
 
-Here `c`, `k`, `v`, `t`, and every item are strings except the explicitly Boolean
-`b`. These are exact top-level key sets, `memory` contains exactly the one shown
-entry, and extra fields are forbidden.
+Here `k`, `v`, `t`, and every item are strings, while `b` is Boolean. These are exact
+top-level key sets, `memory` contains exactly the one shown entry, and extra fields
+are forbidden.
 
 The sequence schemas are semantically binding. Because accepted `MEMORY` adds
 `value` and sets `target` only when it is absent, forbidding an initial `target` and
@@ -296,38 +295,71 @@ large corpus for the same task and state.
 
 The generator must store canonical program dictionaries, template IDs, payload IDs,
 canonical compact-JSON input contexts, normalized payload-value tuples, rendered
-prompts, answers, and split names in metadata. Every generated context includes the
-zero-padded decimal payload seed as a task-facing case value using the same surface
-format in both splits; the disjoint numeric domains above make exact contexts and
-payload tuples constructively distinct without a train/evaluation split-name token.
+prompts, answers, and split names in metadata. Payload seeds are metadata only and
+must never be rendered. Derive each string operand as the first 16 lowercase
+hexadecimal characters of
+
+```text
+sha256("phase8-payload|" + task_id + "|" + payload_seed + "|" + field_name)
+```
+
+where each component is encoded as its canonical ASCII decimal or text form. This
+gives train and evaluation operands the same surface format without exposing their
+split-partitioned seed ranges. Hash collisions are not silently resampled: the split
+oracle below must reject them.
 
 Normalize payload values without relying on mapping insertion order as follows:
 
 ```text
-MEMORY:                    (case, key, memory[key])
-SEARCH or FILTER:          (case, tuple(items), target)
-CONDITION:                 (case, condition)
+MEMORY:                    (key, memory[key])
+SEARCH or FILTER:          (tuple(items), target)
+CONDITION:                 (condition,)
 MEMORY_FILTER or
-MEMORY_SEARCH:             (case, key, memory[key], tuple(items))
+MEMORY_SEARCH:             (key, memory[key], tuple(items))
 FILTER_CONDITION or
-SEARCH_CONDITION:          (case, tuple(items), target)
+SEARCH_CONDITION:          (tuple(items), target)
 ```
 
-Every listed value must also be rendered in the natural-language prompt; the `case`
-value is therefore not hidden metadata. Mappings are serialized with sorted keys and
-compact JSON separators for byte-level context comparison.
+These tuples contain only operands read by the accepted executor. Every listed value
+must also be rendered in the natural-language prompt. Mappings are serialized with
+sorted keys and compact JSON separators for byte-level context comparison.
 
-For each task separately, gate empty intersections between training and evaluation
-sets of canonical input-context bytes and normalized payload-value tuples, in
-addition to exact non-overlap of prompt text, template ID, payload ID, and the tuple
-`(program_dict, template_id, payload_id)`. Any collision is a generator error; do not
-resample it silently. Tests must inject a duplicate canonical context and a duplicate
-normalized payload tuple and require both to be rejected.
+For every task except primitive `CONDITION`, gate empty intersections between
+training and evaluation sets of canonical input-context bytes and normalized
+execution-relevant payload tuples, in addition to exact non-overlap of prompt text,
+template ID, payload ID, and the tuple `(program_dict, template_id, payload_id)`. Any
+collision is a generator error; do not resample it silently. Tests must inject a
+duplicate canonical context and a duplicate execution-relevant payload tuple and
+require both to be rejected.
+
+Primitive `CONDITION` has only the two execution-relevant inputs `true` and `false`
+under the accepted DSL and both are required in train and evaluation. Semantic
+payload overlap is therefore unavoidable and explicitly allowed only for that task;
+its evaluation measures held-out template rendering, not held-out operand
+generalization. Gate that both splits have the exact semantic set `{false,true}` and
+that their template IDs and complete rendered prompts remain disjoint. Do not add an
+ignored nonce and call it semantic separation.
 
 All Boolean-valued task families must have exactly 32 `true` and 32 `false`
 counterfactual answers in the 64 evaluation instances. Non-Boolean answer families
 must have 64 distinct counterfactual answers. These are evaluator difficulty and
 guessing diagnostics, not evidence of natural-language competence.
+
+Generate exactly one immutable evaluation probe pack containing the same ordered
+`8 * 64 = 512` prompts, opaque probe keys, and canonical answers for every condition,
+state, seed, model size, corpus size, and checkpoint. Generate and checksum it once;
+all evaluation records must reference that exact checksum. Per-condition or
+per-state evaluation rendering is forbidden.
+
+Primitive tasks use one shared source-controlled neutral evaluation-template set.
+For each of the four composition tasks, evaluation indices `0..31` use held-out
+explicit-stepwise paraphrases and indices `32..63` use held-out indirect end-to-end
+paraphrases. Both evaluation style sets are disjoint from every A and B training
+template. Within each Boolean composition task and each 32-instance style block,
+exactly 16 answers are `true` and 16 are `false`. The non-Boolean
+`MEMORY_FILTER` task has 32 distinct answers per style block. Report composition
+mastery separately for the explicit and indirect evaluation halves as well as for
+their fixed equal-weight combination; the combined value is the primary value.
 
 ### 6.3 Held-out composition
 
@@ -346,6 +378,9 @@ All conditions use the same state population, task payloads, number of records,
 training steps, batch schedule, tokenizer, optimizer, and model initialization seed
 for paired `(seed,state)` runs. Record ordering is deterministically derived from the
 training seed after a condition's records are built.
+
+All conditions also use the single byte-identical evaluation probe pack frozen in
+Section 6.2. Evaluation style is not a condition-specific choice.
 
 Curriculum is fixed rather than treated as another intervention: all conditions use
 the same task-stratified record layout followed by the same deterministic shuffle
@@ -681,10 +716,13 @@ Targeted tests must cover at least:
 5. byte tokenizer round-trip, special-token validation, padding, training-record and
    evaluation-prefix length gates, truncation refusal, and response-only loss mask;
 6. literal capability/graph/state leakage rejection in model-facing text;
-7. exact prompt/template/ID/canonical-context/normalized-payload split non-overlap,
-   deliberate semantic-collision rejection, and complete absence of `MEMORY_SEARCH`
-   from training;
-8. balanced Boolean and distinct non-Boolean evaluation answer gates;
+7. absence of rendered seed IDs; exact prompt/template/ID and non-`CONDITION`
+   execution-relevant context/payload split non-overlap; deliberate semantic-collision
+   rejection; the explicit `CONDITION` overlap contract; and complete absence of
+   `MEMORY_SEARCH` from training;
+8. one byte-identical 512-prompt evaluation-pack checksum across every run, frozen
+   explicit/indirect style allocation, within-style Boolean balance, and distinct
+   non-Boolean evaluation-answer gates;
 9. A/B structured outcome agreement and primitive-record identity;
 10. A/C primitive byte identity, degree preservation, aggregate byte/token histogram
     equality, changed-label threshold, and deterministic randomization;
@@ -748,7 +786,7 @@ The manifest must bind:
 - Python, PyTorch, CUDA, GPU, and driver versions;
 - deterministic-algorithm and backend flags;
 - frozen task/state order, conditions, grid, seeds, thresholds, and checkpoint steps;
-- template and payload inventories;
+- template and payload inventories and the single shared evaluation-pack checksum;
 - every corpus and split checksum;
 - every retained model checkpoint checksum;
 - every raw generation, response matrix, tree, result, and log checksum;
@@ -771,8 +809,10 @@ The following are implementation/protocol gates and block acceptance on mismatch
 
 - ground-truth DSL program, matrix, identifiability, and unique-certificate oracles;
 - DSL context-schema and sequential dependency-perturbation oracles;
-- corpus reproducibility, leakage, canonical-context/payload split,
-  answer-distribution, evaluation-prefix length, and held-out gates;
+- corpus reproducibility, raw-seed leakage, task-wise execution-relevant payload
+  split with the explicit `CONDITION` exception, single shared evaluation-pack
+  identity/style balance, answer-distribution, evaluation-prefix length, and held-out
+  gates;
 - randomized-control degree, token-statistic, determinism, and changed-relation
   gates;
 - tokenizer, causal model, training, save/load, evaluator, and threshold tests;
@@ -840,6 +880,11 @@ The report must state at least:
 - refusal demonstrations explicitly supervise missing capabilities;
 - natural task semantics remain visible even though symbolic capability IDs and graph
   rules are hidden;
+- executor-relevant train/evaluation operands are disjoint except for primitive
+  `CONDITION`, whose Boolean domain necessarily overlaps and therefore tests only
+  template generalization;
+- every condition and checkpoint uses one byte-identical evaluation pack with equal
+  explicit and indirect composition-template allocation;
 - the random control preserves declared aggregate statistics but does not identify a
   general causal effect of language structure;
 - the primary response matrix depends on a predeclared mastery threshold;
@@ -869,7 +914,10 @@ The reviewer must audit:
 - whether one-checkpoint-per-state makes the certificate object well defined;
 - DSL program/type compatibility and the ground-truth certificate proof;
 - task-specific context schemas, sequential information dependence, evaluation
-  length bounds, leakage, and semantic held-out split semantics;
+  length bounds, raw-seed leakage, execution-relevant payload separation with the
+  `CONDITION` exception, and held-out split semantics;
+- identity and explicit/indirect balance of the single evaluation probe pack across
+  conditions, states, seeds, scale cells, and checkpoints;
 - feasibility and fairness of the degree-preserving random control;
 - tokenizer/model/training sufficiency without architecture search;
 - response threshold, stratified raw rates, error, regret, overlap,
