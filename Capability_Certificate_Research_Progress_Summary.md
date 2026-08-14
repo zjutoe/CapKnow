@@ -38,7 +38,7 @@
 
 ## 3. 阶段成果总览
 
-证据边界：Phase 2-4 已在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上正式重跑；Phase 5/6 已在 clean source repair commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 上正式重跑，并记录在 evidence commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`。合并后的 Phase 2-6 evidence package 冻结于 `8039dcfa88a1a6a1856b19c5301bd74e1616e76c`，并于 2026-08-13 通过 fresh-context `gpt-5.6-sol` 最终严格只读科学验收。
+证据边界：Phase 2-4 已在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上正式重跑；Phase 5/6 已在 clean source repair commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 上正式重跑，并记录在 evidence commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`。合并后的 Phase 2-6 evidence package 冻结于 `8039dcfa88a1a6a1856b19c5301bd74e1616e76c`，并于 2026-08-13 通过 fresh-context `gpt-5.6-sol` 最终严格只读科学验收。Phase 7 formal evidence/report commit `e1c3a542cede8f873832149f0f205302e088a925` 于 2026-08-14 通过 fresh-context strict read-only final scientific review。
 
 | 阶段 | 研究问题 | 阶段结果（含历史结果） | 结论边界 |
 | --- | --- | --- | --- |
@@ -48,7 +48,7 @@
 | Phase 4 | 自适应提问能否降低成本 | structured worlds 的平均深度低于固定规模；unstructured 无优势 | 优势是小型确定性世界中的平均成本优势 |
 | Phase 5 | 噪声下能否可靠推断 | 建立稳定 Bayesian 推断和 fixed/adaptive noisy assessment；通过一致性 oracle | 尚不能据此声称噪声下 adaptive 普遍优于 fixed |
 | Phase 6 | 能力能否具有可执行和组合语义 | primitive、组合、held-out 组合均可确定执行；证书可转移到 primitive DSL world | 语义和组合规则仍由人工定义 |
-| Phase 7 | 何时存在固定 certificate 压缩 | 两个完整 block family 的固定 certificate 只需每个 block 一个代表任务；prefix family 的自适应平均深度低于固定规模 | 只适用于人工声明的小型确定性 block worlds；final scientific review 尚未完成 |
+| Phase 7 | 何时存在固定 certificate 压缩 | 两个完整 block family 的固定 certificate 只需每个 block 一个代表任务；prefix family 的自适应平均深度低于固定规模 | 只适用于人工声明的小型确定性 block worlds；已通过 final scientific review |
 
 ## 4. Phase 1：Knowledge Space Core
 
@@ -181,7 +181,7 @@ Phase 7 结果显示：
 
 matched controls 只是描述性参照，不是工程 acceptance gate。独立 block cells 的 fixed size 在本次结果中均低于 matched-control mean；prefix cells 虽然相对 task count 有固定压缩，但在 `B>=3` 时 fixed size 高于 matched-control mean。因此 Phase 7 不支持“结构本身相对随机总体总是更省固定任务”的一般声明。
 
-Phase 7 目前的证据状态是：formal artifacts 已生成，implementation review 已通过，final fresh-context scientific review 尚未完成。
+Phase 7 目前的证据状态是：formal artifacts 已生成，implementation review 已通过，fresh-context final scientific review 于 2026-08-14 给出 `ACCEPT`，未发现 correctness、protocol、provenance、统计口径或科学性过度声明 finding。
 
 ## 11. 经过修订后的证据状态
 

@@ -1,8 +1,8 @@
 # Phase 7 Report: Structural Compressibility
 
 Status: formal Phase 7 artifacts were generated from clean source commit
-`b44cad06dbe1859008c9ce47f6434ef1ac7774a4`. Final independent scientific
-review is pending.
+`b44cad06dbe1859008c9ce47f6434ef1ac7774a4`. The Phase 7 package was accepted by
+fresh-context strict read-only final scientific review on 2026-08-14.
 
 ## Source Binding
 
@@ -55,6 +55,27 @@ Python version was `3.13.9`; pytest version was `8.4.2`.
 Independent strict read-only implementation review accepted source commit
 `b44cad06dbe1859008c9ce47f6434ef1ac7774a4` with no blocking findings. The
 reviewer did not run the formal experiment or create outputs.
+
+## Final Independent Review
+
+Fresh-context strict read-only final scientific review accepted evidence/report
+commit `e1c3a542cede8f873832149f0f205302e088a925` on 2026-08-14.
+
+- Verdict: `ACCEPT`
+- Findings: none
+- Acceptance criteria: criteria 1-12 passed
+- Independent checks included committed JSON replay, adaptive tree traversal,
+  canonical control witness verification, matched-control regeneration from the
+  frozen RNG contract, artifact SHA-256 recomputation, manifest inventory checks,
+  report/artifact consistency, prior-evidence preservation, targeted tests, full
+  pytest, and `git diff --check`.
+
+Reviewer-noted residual test gaps are limited to untested atomic-publication failure
+paths and the matched-control 10,000-attempt exhaustion path. The reviewer also
+noted that two cells sharing `(task_count=6, state_count=4)` reuse the same 20
+seed-generated matched populations, leaving 300 unique population tuples among 320
+cell-seed records. Because the protocol treats controls as per-cell descriptive
+records and does not pool them for inference, this is not an acceptance issue.
 
 ## Formal Grid
 
