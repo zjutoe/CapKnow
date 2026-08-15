@@ -893,13 +893,13 @@ def validate_memory_dependency(task_id: str, context: Mapping[str, Any]) -> tupl
         raise ValueError("Memory dependency validation applies only to memory sequences.")
     validate_context_schema(task_id, context)
     key = context["key"]
-    original_value = context["memory"][key]
-    present_value = original_value
+    items = list(context["items"])
+    present_value = items[0]
     absent_value = "0" * 16
-    if absent_value in context["items"] or absent_value == present_value:
-        absent_value = "1" * 16
-    present_context = {"memory": {key: present_value}, "key": key, "items": list(context["items"])}
-    absent_context = {"memory": {key: absent_value}, "key": key, "items": list(context["items"])}
+    while absent_value in items or absent_value == present_value:
+        absent_value = sha256(absent_value.encode("ascii")).hexdigest()[:16]
+    present_context = {"memory": {key: present_value}, "key": key, "items": items}
+    absent_context = {"memory": {key: absent_value}, "key": key, "items": items}
     present_answer = canonical_answer(task_id, present_context)
     absent_answer = canonical_answer(task_id, absent_context)
     if present_answer == absent_answer:

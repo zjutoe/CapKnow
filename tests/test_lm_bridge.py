@@ -55,10 +55,32 @@ def test_exact_context_schema_rejects_extra_target_or_value_for_memory_sequences
 
 
 @pytest.mark.parametrize("task_id", ("MEMORY_FILTER", "MEMORY_SEARCH"))
-def test_memory_sequence_dependency_perturbation(task_id: str) -> None:
-    context = cg.context_for_payload(task_id, "evaluation", 0)
-    present_answer, absent_answer = cg.validate_memory_dependency(task_id, context)
-    assert present_answer != absent_answer
+def test_memory_sequence_dependency_perturbation_covers_all_evaluation_contexts(task_id: str) -> None:
+    original_false_count = 0
+    for record_index in range(64):
+        context = cg.context_for_payload(task_id, "evaluation", record_index)
+        items = list(context["items"])
+        present_context = {
+            "memory": {context["key"]: items[0]},
+            "key": context["key"],
+            "items": items,
+        }
+
+        if task_id == "MEMORY_SEARCH" and cg.canonical_answer(task_id, context) == "false":
+            original_false_count += 1
+
+        present_answer, absent_answer = cg.validate_memory_dependency(task_id, context)
+
+        assert present_answer == cg.canonical_answer(task_id, present_context)
+        assert present_answer != absent_answer
+        if task_id == "MEMORY_SEARCH":
+            assert present_answer == "true"
+            assert absent_answer == "false"
+        else:
+            assert absent_answer == "[]"
+
+    if task_id == "MEMORY_SEARCH":
+        assert original_false_count == 32
 
 
 def test_ground_truth_matrix_identifiability_and_unique_certificate() -> None:
