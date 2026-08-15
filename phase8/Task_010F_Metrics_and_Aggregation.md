@@ -42,8 +42,11 @@ Do not create a report or runner in this task.
 - Report task-family query units and raw-generation cost separately, with the latter
   equal to family-query count times 64.
 - Compute A/C response-target byte/token diagnostics by state/task family, including
-  minima, medians, means, maxima, answer/refusal lengths, unavailable ratios, and
-  paired differences. These fields cannot alter records or weights.
+  totals, minima, medians, means, maxima, literal non-`unable` answer lengths,
+  canonical `unable` length, and `literal_unable_target_ratio = count(target ==
+  "unable") / record_count`, plus paired differences. For C this is randomized target
+  composition, never DSL capability availability or `y_gt`. These fields cannot alter
+  records or weights.
 - For each sensitivity matrix emit primary Hamming distance, collisions,
   identifiability, certificate fields, canonical-set Jaccard, and
   minimum/mean/maximum pairwise Jaccard over the Cartesian product of the primary and

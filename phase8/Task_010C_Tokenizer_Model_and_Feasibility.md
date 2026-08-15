@@ -47,8 +47,12 @@ Do not modify corpus semantics or any other file.
   records per family, disjoint templates and operands, small/medium models, seeds
   0–2, 1500 steps, and the independent `52/64` pass requirement for every cell.
 - Make the feasibility launcher refuse overwrite, reject Phase 8 scientific markers,
-  retain per-record generations/checkpoints, publish atomic status, and build a
-  checksum-bound manifest at the fixed root supplied by `main`.
+  retain per-record generations/checkpoints, publish atomic terminal status, and build
+  a checksum-bound manifest at the immutable numbered root supplied by `main`.
+- Preserve failed roots and require the next numbered root for every retry or repair.
+  Provide pure validation for a separate immutable selection record binding a passing
+  root/manifest, exact source/configuration, per-cell counts, review verdict, and the
+  terminal/manifest checksums of every predecessor root.
 
 ## Acceptance checks
 
@@ -65,8 +69,10 @@ git status --short
 ```
 
 A local reduced smoke is allowed only when clearly marked non-evidence. Do not launch
-the accepted `feasibility_001` evidence run: `main` may do that only after committing
-and independently reviewing this stage from a clean worktree.
+an accepted feasibility evidence run: `main` may do that only after committing and
+independently reviewing this stage from a clean worktree. An early accepted pass is
+an engineering continuation decision; after later implementation stages, formal
+execution requires a newly selected pass from the exact final source commit.
 
 ## Stop boundary
 

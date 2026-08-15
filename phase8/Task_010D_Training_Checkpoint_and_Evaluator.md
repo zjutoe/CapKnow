@@ -10,7 +10,8 @@ working directory: /home/mye/src/llm/CapKnow
 ```
 
 `main` supplies the exact accepted 010C prerequisite commit and proof that the
-accepted feasibility run passed. Read master Sections 6.2, 8.3, 9.1–9.2, 10.3, 12–15.
+accepted feasibility decision passed. Read master Sections 4.2–4.4, 6.2, 8.3,
+9.1–9.2, 10.3, and 12–15.
 
 ## Objective
 
@@ -38,9 +39,18 @@ Change model or corpus code only by stopping and returning a prerequisite defect
 - Verify save/load tensor identity and logits before accepting a checkpoint path.
 - Require every run to reference the one 512-prompt evaluation-pack checksum and
   reject per-condition or per-state probe rendering.
+- Give the evaluator only a checkpoint and architecture/tokenizer configuration,
+  rendered natural-language prompts, opaque probe keys, canonical answer strings,
+  and decoding limits. Its callable surface must reject state, graph, DSL program,
+  primitive/task identity, corpus, condition, seed, and training metadata, and the
+  evaluator module must not import those objects or their defining packages.
 - Score exact canonical success and exact `unable` separately. Refusal never counts
   as success for a positive cell, and an answer never counts as correct refusal for a
   negative cell.
+- Atomically freeze immutable opaque-keyed prompts, generations, and exact-success/
+  exact-`unable` bits before any later code may join probe keys to task order,
+  programs, states, or the ground-truth matrix. No certificate or join code may run
+  inside the evaluator.
 - Record all 64 outputs per state/task cell and all fields needed for later
   sensitivity matrices and length diagnostics. Do not threshold or build
   certificates in this task.
@@ -49,8 +59,10 @@ Change model or corpus code only by stopping and returning a prerequisite defect
 
 ## Acceptance checks
 
-Add targeted tests for master Section 13 items 13–16, shared-pack checksum isolation,
-the exact checkpoint schedule, response-only labels, and raw-output completeness.
+Add targeted tests for master Section 13 items 13–16, the complete Section 4.4 input
+allowlist and forbidden-import contract, freeze-before-join behavior, shared-pack
+checksum isolation, the exact checkpoint schedule, response-only labels, and
+raw-output completeness.
 
 Run:
 

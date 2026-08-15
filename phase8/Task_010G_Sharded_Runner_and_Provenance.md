@@ -31,21 +31,35 @@ defects to `main`.
 ## Required implementation
 
 - Expose only `prepare`, `run-shard`, and `aggregate` with the master handoff's exact
-  arguments and fixed eighteen shard IDs.
+  arguments, explicit feasibility-selection/resource-authorization inputs, and fixed
+  eighteen shard IDs.
 - Make `prepare` require a clean committed source and accepted feasibility/resource
   inputs, refuse an existing root, and atomically bind source commit, configuration,
-  device/environment, shared evaluation pack, shard registry, resource authorization,
-  and output root.
+  device/environment, shared evaluation pack, shard registry, exact selected
+  feasibility manifest, benchmark manifest/summary, resource authorization,
+  projection/ceilings, and output root in immutable `run_contract.json`. Both
+  non-scientific evidence manifests must bind the exact current source commit.
+- Reject every tracked/staged change and every untracked path except the exact
+  selected feasibility root/record, accepted benchmark root, and finalized
+  predecessor roots enumerated and checksum-bound by those inputs. After preparation,
+  allow only those paths plus the exact formal root; never exclude an artifact
+  directory broadly.
 - Make each shard contain exactly one condition/model/corpus/seed cell, all sixteen
   state runs, and all five checkpoint evaluations. Reuse
   `core_A_small_base_seed*` for the small/base scale cell.
-- Publish logs plus atomic `status.json`, `progress.json`, and exactly one terminal
-  `DONE.json` or `FAILED.json` per attempt. Never overwrite an attempt.
+- Publish logs plus atomic `status.json` and `progress.json`. Atomically finalize an
+  immutable attempt-local `manifest.json` with the run-contract checksum, every
+  source/configuration/evidence/environment binding, output inventory/checksum, and
+  failure classification before publishing exactly one terminal `DONE.json` or
+  `FAILED.json` that binds the manifest checksum. Never overwrite an attempt.
 - Permit a later attempt only for an identical source/configuration binding and an
-  explicit authorization record supplied by `main`. Preserve failed attempts.
+  immutable retry-authorization record supplied by `main` that binds the failed
+  manifest and unchanged run contract. Preserve failed attempts.
 - Make `aggregate` require exactly one declared successful attempt for all eighteen
-  registered shards, reject extras/missing/failures and any binding mismatch, and
-  reconstruct all aggregate results from shard raw records.
+  registered shards, permit retained registered failed histories, reject unregistered
+  shards, missing or multiple successes and any binding/checksum mismatch, and
+  reconstruct all aggregate results from selected shard raw records. Write the full
+  attempt/selection history to `shards_manifest.json` before the final manifest.
 - Inventory every output with role, byte size, and SHA-256 while excluding only the
   self-hashing manifest. Bind corpora, split/evaluation packs, weights, generations,
   matrices, trees, results, and logs as required by the master protocol.
@@ -57,9 +71,10 @@ defects to `main`.
 
 Use test-local temporary roots and stubbed training callables; tests must not launch
 formal training. Add master Section 13 item 23 coverage for clean-tree gating,
-overwrite refusal, atomic transitions, interruption/failure, explicit retry
-authorization, all eighteen IDs, shared-A accounting, mixed bindings, inventory, and
-aggregation completeness.
+overwrite refusal, run-contract contents, attempt-manifest-before-terminal ordering,
+interruption/failure, explicit retry authorization, retained failed attempts, all
+eighteen IDs, shared-A accounting, selected-success uniqueness, mixed bindings,
+inventory/checksums, resource enforcement, and aggregation completeness.
 
 Run:
 

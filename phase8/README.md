@@ -26,7 +26,13 @@ working tree are not valid bindings.
 
 ```text
 010A -> 010B -> 010C -> 010D -> 010E -> 010F -> 010G -> 010H
+     -> final-source feasibility selection -> resource benchmark/authorization
+     -> formal shards
 ```
+
+The post-010C feasibility decision is an early engineering gate. Because later tasks
+complete the shared formal paths, the run selected by formal `prepare` must be rerun
+from the exact final accepted implementation commit before the resource benchmark.
 
 Only one executor may hold the writer lease. At each boundary:
 
