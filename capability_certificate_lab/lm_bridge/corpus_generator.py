@@ -359,30 +359,54 @@ def render_prompt(task_id: str, context: Mapping[str, Any], template_id: str, st
     if task_id == "MEMORY":
         key = context["key"]
         value = context["memory"][key]
-        prompt = (
-            f"In the table, {key} maps to {value}. Return the stored value for {key} as compact JSON.",
-            f"Given entry {key}:{value}, write the value paired with {key} as compact JSON.",
-            f"The lookup table contains {key} = {value}. Answer with the value for {key} in compact JSON.",
-            f"Use the entry {key} paired with {value}; return only the value for {key} as compact JSON.",
-        )[variant]
+        if style == "train":
+            prompt = (
+                f"A table entry says {key} has stored value {value}. Write the value for {key} in compact JSON.",
+                f"Entry {key}:{value} is available. Return compact JSON containing the value paired with {key}.",
+                f"For key {key}, the table gives {value}. Output the associated value as compact JSON.",
+                f"Use pair {key}:{value}; answer with the paired value for {key} in compact JSON.",
+            )[variant]
+        else:
+            prompt = (
+                f"In the table, {key} maps to {value}. Return the stored value for {key} as compact JSON.",
+                f"Given entry {key}:{value}, write the value paired with {key} as compact JSON.",
+                f"The lookup table contains {key} = {value}. Answer with the value for {key} in compact JSON.",
+                f"Use the entry {key} paired with {value}; return only the value for {key} as compact JSON.",
+            )[variant]
     elif task_id == "SEARCH":
         items = _items_text(context["items"])
         target = context["target"]
-        prompt = (
-            f"Decide whether {target} appears in this list: {items}. Return compact JSON true or false.",
-            f"Check if {target} is one of these entries: {items}. Return compact JSON true or false.",
-            f"For entries {items}, answer whether {target} is included using compact JSON true or false.",
-            f"Look through {items}; return compact JSON true or false for the presence of {target}.",
-        )[variant]
+        if style == "train":
+            prompt = (
+                f"Given entries {items}, write compact JSON true or false for whether {target} is present.",
+                f"Return whether {target} occurs in this entry list as compact JSON true or false: {items}.",
+                f"Use compact JSON true or false to answer if {items} contains {target}.",
+                f"Check the list {items} for {target} and output the Boolean in compact JSON.",
+            )[variant]
+        else:
+            prompt = (
+                f"Decide whether {target} appears in this list: {items}. Return compact JSON true or false.",
+                f"Check if {target} is one of these entries: {items}. Return compact JSON true or false.",
+                f"For entries {items}, answer whether {target} is included using compact JSON true or false.",
+                f"Look through {items}; return compact JSON true or false for the presence of {target}.",
+            )[variant]
     elif task_id == "FILTER":
         items = _items_text(context["items"])
         target = context["target"]
-        prompt = (
-            f"From this list, keep only entries equal to {target}: {items}. Return the compact JSON list.",
-            f"For entries {items}, output the entries matching {target} as a compact JSON list.",
-            f"Select every item equal to {target} from {items}; return compact JSON.",
-            f"Return a compact JSON list containing only members of {items} that equal {target}.",
-        )[variant]
+        if style == "train":
+            prompt = (
+                f"Given entries {items}, write a compact JSON list containing only values equal to {target}.",
+                f"Output entries from {items} that match {target}, using a compact JSON list.",
+                f"Keep the members of {items} equal to {target} and return them in compact JSON.",
+                f"Use {target} as the match value for {items}; answer with the matching entries as compact JSON.",
+            )[variant]
+        else:
+            prompt = (
+                f"From this list, keep only entries equal to {target}: {items}. Return the compact JSON list.",
+                f"For entries {items}, output the entries matching {target} as a compact JSON list.",
+                f"Select every item equal to {target} from {items}; return compact JSON.",
+                f"Return a compact JSON list containing only members of {items} that equal {target}.",
+            )[variant]
     elif task_id == "CONDITION":
         word = "true" if context["condition"] else "false"
         if style == "train":
@@ -536,6 +560,8 @@ def _record(split: str, task_id: str, record_index: int) -> SplitRecord:
 def build_split_records(split: str, task_id: str, count: int) -> tuple[SplitRecord, ...]:
     if count < 0:
         raise ValueError("count must be non-negative.")
+    if split == _TRAINING_SPLIT and task_id == "MEMORY_SEARCH":
+        raise ValueError("MEMORY_SEARCH is the held-out composition and cannot appear in training.")
     records = tuple(_record(split, task_id, idx) for idx in range(count))
     _reject_internal_collisions(records)
     return records

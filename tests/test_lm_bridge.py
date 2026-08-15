@@ -96,6 +96,31 @@ def test_split_disjointness_and_condition_exception() -> None:
     assert {record.normalized_payload for record in evaluation} == {(False,), (True,)}
 
 
+def test_memory_search_is_held_out_from_training() -> None:
+    with pytest.raises(ValueError, match="held-out composition"):
+        cg.build_split_records("training", "MEMORY_SEARCH", 1)
+    evaluation = cg.build_split_records("evaluation", "MEMORY_SEARCH", 1)
+    assert len(evaluation) == 1
+
+
+@pytest.mark.parametrize("task_id", ("MEMORY", "SEARCH", "FILTER", "CONDITION"))
+def test_primitive_train_and_evaluation_templates_use_distinct_phrasings(task_id: str) -> None:
+    context = cg.context_for_payload(task_id, "evaluation", 0)
+    train_prompt = cg.render_prompt(
+        task_id,
+        context,
+        f"{task_id.lower()}__train_a",
+        "train",
+    )
+    eval_prompt = cg.render_prompt(
+        task_id,
+        context,
+        "neutral_eval__neutral_a",
+        "neutral",
+    )
+    assert train_prompt != eval_prompt
+
+
 def test_split_disjointness_rejects_duplicate_canonical_context() -> None:
     train = cg.build_split_records("training", "MEMORY", 2)
     evaluation = list(cg.build_split_records("evaluation", "MEMORY", 2))
