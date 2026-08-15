@@ -161,6 +161,61 @@ def test_evaluation_pack_identity_balance_styles_and_checksum() -> None:
         assert len({probe.answer for probe in by_task[task_id]}) == 64
 
 
+def test_evaluation_pack_rejects_answer_tampering_preserving_boolean_balance() -> None:
+    pack = list(cg.build_evaluation_probe_pack())
+    search_indices = [idx for idx, probe in enumerate(pack) if probe.task_id == "SEARCH"]
+    true_index = next(idx for idx in search_indices if pack[idx].answer == "true")
+    false_index = next(idx for idx in search_indices if pack[idx].answer == "false")
+    pack[true_index] = replace(pack[true_index], answer="false")
+    pack[false_index] = replace(pack[false_index], answer="true")
+
+    assert [probe.answer for probe in pack if probe.task_id == "SEARCH"].count("true") == 32
+    assert [probe.answer for probe in pack if probe.task_id == "SEARCH"].count("false") == 32
+    with pytest.raises(ValueError, match="canonical full-capability execution"):
+        cg.validate_evaluation_pack(tuple(pack))
+
+
+def test_evaluation_pack_rejects_wrong_or_transparent_probe_key() -> None:
+    pack = list(cg.build_evaluation_probe_pack())
+    pack[0] = replace(pack[0], probe_key="phase8-probe|0|0")
+
+    with pytest.raises(ValueError, match="probe_key"):
+        cg.validate_evaluation_pack(tuple(pack))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    (
+        ("template_id", "neutral_eval__tampered_a"),
+        ("payload_id", "evaluation-payload-00-999"),
+        ("program_dict", {"type": "primitive", "op": {"op_id": "SEARCH"}, "args": ()}),
+        ("canonical_context", '{"key":"tampered","memory":{"tampered":"0000000000000000"}}'),
+        ("normalized_payload", ("tampered", "0000000000000000")),
+        ("prompt", "In the table, 0000000000000000 maps to 1111111111111111. Return compact JSON."),
+    ),
+)
+def test_evaluation_pack_rejects_checksum_identity_mismatch(
+    field_name: str,
+    field_value: object,
+) -> None:
+    pack = list(cg.build_evaluation_probe_pack())
+    pack[0] = replace(pack[0], **{field_name: field_value})
+    tampered_pack = tuple(pack)
+
+    assert cg.evaluation_pack_checksum(tampered_pack) != cg.EVALUATION_PACK_CHECKSUM
+    with pytest.raises(ValueError):
+        cg.validate_evaluation_pack(tampered_pack)
+
+
+def test_evaluation_pack_program_dict_is_deeply_immutable() -> None:
+    probe = cg.build_evaluation_probe_pack()[4 * 64]
+
+    with pytest.raises(TypeError):
+        probe.program_dict["type"] = "primitive"
+    with pytest.raises(TypeError):
+        probe.program_dict["steps"][0]["type"] = "tampered"
+
+
 def test_no_raw_seed_ids_or_metadata_leak_in_generated_prompts() -> None:
     for probe in cg.build_evaluation_probe_pack():
         assert "300000" not in probe.prompt

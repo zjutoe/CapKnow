@@ -106,6 +106,10 @@ class SplitRecord:
     probe_key: str | None = None
     style: str | None = None
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "program_dict", _deep_freeze_json(self.program_dict))
+        object.__setattr__(self, "normalized_payload", _deep_freeze_json(self.normalized_payload))
+
 
 @dataclass(frozen=True)
 class EvaluationProbe:
@@ -122,9 +126,29 @@ class EvaluationProbe:
     answer: str
     style: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "program_dict", _deep_freeze_json(self.program_dict))
+        object.__setattr__(self, "normalized_payload", _deep_freeze_json(self.normalized_payload))
+
 
 def _canonical_json(value: object) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return json.dumps(_json_ready(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _deep_freeze_json(value: Any) -> Any:
+    if isinstance(value, MappingProxyType | Mapping):
+        return MappingProxyType({key: _deep_freeze_json(nested) for key, nested in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(_deep_freeze_json(nested) for nested in value)
+    return value
+
+
+def _json_ready(value: object) -> object:
+    if isinstance(value, MappingProxyType | Mapping):
+        return {key: _json_ready(nested) for key, nested in value.items()}
+    if isinstance(value, list | tuple):
+        return [_json_ready(nested) for nested in value]
+    return value
 
 
 def _programs() -> dict[str, Program]:
@@ -150,7 +174,7 @@ def program_for_task(task_id: str) -> Program:
 
 
 def program_dict(task_id: str) -> Mapping[str, Any]:
-    return program_for_task(task_id).to_dict()
+    return _deep_freeze_json(program_for_task(task_id).to_dict())
 
 
 def _validate_task_id(task_id: str) -> None:
@@ -625,29 +649,35 @@ def _reject_overlap(task_id: str, label: str, left: Iterable[Any], right: Iterab
         raise ValueError(f"{task_id} split overlap for {label}: {sorted(map(repr, overlap))[:3]}")
 
 
-def build_evaluation_probe_pack() -> tuple[EvaluationProbe, ...]:
+def _expected_probe(task_index: int, task_id: str, record_index: int) -> EvaluationProbe:
+    record = _record(_EVALUATION_SPLIT, task_id, record_index)
+    probe_key = sha256(f"phase8-probe|{task_index}|{record_index}".encode("ascii")).hexdigest()[:24]
+    return EvaluationProbe(
+        probe_key=probe_key,
+        task_id=record.task_id,
+        task_index=record.task_index,
+        record_index=record.record_index,
+        template_id=record.template_id,
+        payload_id=record.payload_id,
+        program_dict=record.program_dict,
+        canonical_context=record.canonical_context,
+        normalized_payload=record.normalized_payload,
+        prompt=record.prompt,
+        answer=record.answer,
+        style=record.style or "neutral",
+    )
+
+
+def _build_evaluation_probe_pack_unvalidated() -> tuple[EvaluationProbe, ...]:
     probes: list[EvaluationProbe] = []
     for task_index, task_id in enumerate(TASK_ORDER):
         for record_index in range(64):
-            record = _record(_EVALUATION_SPLIT, task_id, record_index)
-            probe_key = sha256(f"phase8-probe|{task_index}|{record_index}".encode("ascii")).hexdigest()[:24]
-            probes.append(
-                EvaluationProbe(
-                    probe_key=probe_key,
-                    task_id=record.task_id,
-                    task_index=record.task_index,
-                    record_index=record.record_index,
-                    template_id=record.template_id,
-                    payload_id=record.payload_id,
-                    program_dict=record.program_dict,
-                    canonical_context=record.canonical_context,
-                    normalized_payload=record.normalized_payload,
-                    prompt=record.prompt,
-                    answer=record.answer,
-                    style=record.style or "neutral",
-                )
-            )
-    pack = tuple(probes)
+            probes.append(_expected_probe(task_index, task_id, record_index))
+    return tuple(probes)
+
+
+def build_evaluation_probe_pack() -> tuple[EvaluationProbe, ...]:
+    pack = _build_evaluation_probe_pack_unvalidated()
     validate_evaluation_pack(pack)
     return pack
 
@@ -657,10 +687,13 @@ def evaluation_pack_checksum(pack: Sequence[EvaluationProbe]) -> str:
         {
             "probe_key": p.probe_key,
             "task_id": p.task_id,
+            "task_index": p.task_index,
             "record_index": p.record_index,
             "template_id": p.template_id,
             "payload_id": p.payload_id,
+            "program_dict": p.program_dict,
             "context": p.canonical_context,
+            "normalized_payload": p.normalized_payload,
             "prompt": p.prompt,
             "answer": p.answer,
             "style": p.style,
@@ -675,12 +708,41 @@ def validate_evaluation_pack(pack: Sequence[EvaluationProbe]) -> None:
         raise ValueError("Evaluation pack must contain exactly 512 probes.")
     if len({probe.probe_key for probe in pack}) != len(pack):
         raise ValueError("Evaluation probe keys must be unique.")
-    if tuple((probe.task_id, probe.record_index) for probe in pack) != tuple(
-        (task_id, idx) for task_id in TASK_ORDER for idx in range(64)
-    ):
-        raise ValueError("Evaluation pack order must be frozen task-major 8 x 64.")
-    for probe in pack:
+    for position, probe in enumerate(pack):
+        task_index = position // 64
+        record_index = position % 64
+        task_id = TASK_ORDER[task_index]
+        expected_probe_key = sha256(f"phase8-probe|{task_index}|{record_index}".encode("ascii")).hexdigest()[:24]
+        if probe.task_index != task_index or probe.record_index != record_index:
+            raise ValueError("Evaluation pack indices must match frozen task-major position.")
+        if probe.task_id != task_id:
+            raise ValueError("Evaluation pack task_id must match frozen task-major order.")
+        if probe.probe_key != expected_probe_key:
+            raise ValueError("Evaluation probe_key must be the frozen opaque key for its position.")
         leak_check_model_text(probe.prompt)
+        leak_check_model_text(probe.answer)
+        context = _parse_canonical_context(probe.canonical_context)
+        if probe.answer != canonical_answer(task_id, context):
+            raise ValueError("Evaluation answer must match canonical full-capability execution.")
+        expected = _expected_probe(task_index, task_id, record_index)
+        for field_name in (
+            "template_id",
+            "payload_id",
+            "program_dict",
+            "canonical_context",
+            "normalized_payload",
+            "prompt",
+            "answer",
+            "style",
+        ):
+            if getattr(probe, field_name) != getattr(expected, field_name):
+                raise ValueError(f"Evaluation probe {field_name} does not match the canonical generated record.")
+    checksum = evaluation_pack_checksum(pack)
+    if checksum != EVALUATION_PACK_CHECKSUM:
+        raise ValueError(
+            "Evaluation pack checksum does not match the frozen checksum: "
+            f"{checksum} != {EVALUATION_PACK_CHECKSUM}"
+        )
     by_task = {task_id: [probe for probe in pack if probe.task_id == task_id] for task_id in TASK_ORDER}
     bool_tasks = {"SEARCH", "CONDITION", "FILTER_CONDITION", "SEARCH_CONDITION", "MEMORY_SEARCH"}
     for task_id, probes in by_task.items():
@@ -704,6 +766,15 @@ def validate_evaluation_pack(pack: Sequence[EvaluationProbe]) -> None:
             elif task_id == "MEMORY_FILTER":
                 if len({probe.answer for probe in probes[:32]}) != 32 or len({probe.answer for probe in probes[32:]}) != 32:
                     raise ValueError("MEMORY_FILTER must have 32 distinct answers per style block.")
+
+
+def _parse_canonical_context(canonical_context: str) -> Mapping[str, Any]:
+    context = json.loads(canonical_context)
+    if not isinstance(context, Mapping):
+        raise ValueError("canonical_context must encode a JSON object.")
+    if _canonical_json(context) != canonical_context:
+        raise ValueError("canonical_context must use canonical compact JSON serialization.")
+    return context
 
 
 def _representative_context(task_id: str) -> Mapping[str, Any]:
@@ -824,4 +895,4 @@ def validate_memory_dependency(task_id: str, context: Mapping[str, Any]) -> tupl
     return present_answer, absent_answer
 
 
-EVALUATION_PACK_CHECKSUM = evaluation_pack_checksum(build_evaluation_probe_pack())
+EVALUATION_PACK_CHECKSUM = evaluation_pack_checksum(_build_evaluation_probe_pack_unvalidated())
