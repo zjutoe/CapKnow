@@ -618,6 +618,8 @@ def validate_split_disjointness(
 ) -> None:
     by_task: dict[str, dict[str, list[SplitRecord]]] = defaultdict(lambda: {"training": [], "evaluation": []})
     for record in training_records:
+        if record.task_id == "MEMORY_SEARCH":
+            raise ValueError("MEMORY_SEARCH is the held-out composition and cannot appear in training.")
         by_task[record.task_id]["training"].append(record)
     for record in evaluation_records:
         by_task[record.task_id]["evaluation"].append(record)
