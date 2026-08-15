@@ -825,12 +825,11 @@ phase8/Task_010G_Sharded_Runner_and_Provenance.md
 phase8/Task_010H_Resource_Benchmark_and_Formal_Authorization.md
 ```
 
-Every subtask uses a fresh-context Spark execution role with model override
-`gpt-5.5` and `fork_turns=none`. The local routing contract names the available model
-identifier exactly; do not invent a separate `gpt-5.5-spark` model slug. Before each
-launch, `main` supplies the accepted prerequisite commit, working directory, allowed
-paths, acceptance criteria, verification commands, and return format from the
-corresponding handoff.
+Every subtask uses a fresh-context execution subagent with model override `gpt-5.5`
+and `fork_turns=none`. The model identifier is exactly `gpt-5.5`; do not infer or
+append a role or model suffix. Before each launch, `main` supplies the accepted
+prerequisite commit, working directory, allowed paths, acceptance criteria,
+verification commands, and return format from the corresponding handoff.
 
 Only one delegated writer may hold the mutation lease. A delegate must stop at its
 handoff boundary, must not implement a later subtask, and must return protocol

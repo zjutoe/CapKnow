@@ -1,4 +1,4 @@
-# Phase 8 Spark Execution Handoffs
+# Phase 8 GPT-5.5 Execution Handoffs
 
 This directory contains the bounded implementation handoffs for
 `Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md`.
@@ -10,17 +10,17 @@ implementation and evidence-preparation work.
 Every task `010A` through `010H` must be launched as:
 
 ```text
-role: Spark executor
+executor: fresh-context Codex subagent
 model override: gpt-5.5
 context: fresh
 fork_turns: none
 working directory: /home/mye/src/llm/CapKnow
 ```
 
-The available model identifier is `gpt-5.5`; `Spark` is the execution role. Do not
-substitute an invented `gpt-5.5-spark` identifier. `main` must give the executor the
-exact accepted prerequisite commit and the relevant handoff paths in its launch
-packet. Branch names and an uncommitted working tree are not valid bindings.
+The required model identifier is exactly `gpt-5.5`; do not infer or append a role or
+model suffix. `main` must give the executor the exact accepted prerequisite commit
+and the relevant handoff paths in its launch packet. Branch names and an uncommitted
+working tree are not valid bindings.
 
 ## Sequence and mutation lease
 

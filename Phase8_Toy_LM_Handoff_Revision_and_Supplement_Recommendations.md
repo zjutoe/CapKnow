@@ -13,7 +13,7 @@ Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md
 
 - 为 `main`、Codex 执行器和独立科学 reviewer 提供明确的修订清单；
 - 区分必须先解决的阻断项与非阻断补充项；
-- 将 master scientific protocol 拆解为 Spark/较弱执行模型可以逐步实现、测试和交付的工程阶段；
+- 将 master scientific protocol 拆解为 `gpt-5.5` 执行模型可以逐步实现、测试和交付的工程阶段；
 - 防止再次出现“正式协议先于计算可行性和最小实现验证”的问题。
 
 本文件不是新的科学 authority，也不自动修改 master handoff。Codex 不得自行把建议静默合入正式协议。正确流程是：
@@ -44,7 +44,7 @@ Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md
 
 因此，master handoff 可以保留为 Phase 8 的总科学协议。
 
-但当前版本仍不适合直接作为一个单体任务交给 Codex/Spark 完整实现和运行。正式实施前应解决下列 P0 问题。
+但当前版本仍不适合直接作为一个单体任务交给单一 Codex 执行器完整实现和运行。正式实施前应解决下列 P0 问题。
 
 ---
 
@@ -70,7 +70,7 @@ Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md
 - checksums/manifests；
 - 288 次正式训练。
 
-即使条款清楚，单次交给 Spark 仍容易：
+即使条款清楚，单次交给一个执行模型仍容易：
 
 - 遗漏少数 invariant；
 - 只实现 happy path；
@@ -828,7 +828,7 @@ Work explicitly not attempted:
 PASS WITH CONDITIONS
 ```
 
-## 作为立即交给 Spark 的单体 implementation task
+## 作为立即交给单一执行模型的 implementation task
 
 ```text
 REJECT

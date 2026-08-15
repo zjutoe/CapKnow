@@ -3,7 +3,7 @@
 ## Launch contract
 
 ```text
-executor role: Spark
+executor: fresh-context Codex subagent
 model override: gpt-5.5
 fork_turns: none
 working directory: /home/mye/src/llm/CapKnow
