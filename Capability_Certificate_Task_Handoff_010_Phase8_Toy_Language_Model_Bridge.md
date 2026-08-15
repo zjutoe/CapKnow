@@ -630,7 +630,8 @@ artifacts/phase8_toy_lm_bridge/feasibility_selection_001.json
 It binds the selected root and manifest SHA-256, exact source commit and configuration,
 all per-family/model/seed counts, pass decision, independent-review verdict, and the
 paths, terminal states, and manifest checksums of every predecessor feasibility root.
-A new selection requires the next numbered selection record. The feasibility run
+It also transitively binds every predecessor selection-record path and SHA-256. A new
+selection requires the next numbered selection record. The feasibility run
 selected for formal execution must come from the exact final implementation commit
 used by formal `prepare`; an earlier post-010C feasibility decision may allow
 engineering to continue, but it is not sufficient after later source changes and
@@ -656,34 +657,58 @@ length differences without using scientific inputs, every dummy training sequenc
 has encoded length `256` including special tokens, and every encoded evaluation
 prefix has length `192` including special tokens before the allowed 64-token
 generation. Both use batch size `64`, 1500 optimizer steps per model, five 512-prompt
-evaluation points, the accepted checkpoint/status/raw-generation/manifest paths, and
-no Phase 8 scientific task, template, operand, payload, state, or outcome.
+evaluation points, and no Phase 8 scientific task, template, operand, payload, state,
+or outcome.
 
-Record training and evaluation wall seconds, total shard wall seconds, CPU seconds,
-GPU-device seconds, peak RSS bytes, peak VRAM bytes on `cuda:0`, checkpoint bytes,
-raw-generation bytes, peak artifact bytes during the shard, final artifact bytes,
-and per-stage breakdown. For every resource component let `M(component)` be the
-larger of the two fixture measurements; no interpolation or cell-specific model is
-allowed for the unmeasured cells.
+Each fixture must exercise role-for-role dummy equivalents through the exact accepted
+writer paths for every formal artifact class: corpora and split packs; the shared
+evaluation pack; checkpoints; logs, status, progress, and terminal records; all raw
+generations; primary and sensitivity matrices; collision/certificate/adaptive-tree
+results; per-checkpoint and shard summaries; and the attempt manifest. It must also
+exercise the exact root-level writers for `concurrency.lock`, `run_contract.json`, an
+eighteen-entry `shards_manifest.json`, aggregate summaries/results, and the final
+top-level manifest using dummy shard metadata. An artifact class omitted from the
+benchmark is a gate failure; no unmeasured formal artifact may be assigned zero bytes.
+Dummy writer inputs use exact formal cardinalities and the maximum protocol-permitted
+serialized lengths. Every formal writer, including logging, must have a
+source-controlled maximum record count and record length; an unbounded artifact role
+blocks authorization.
 
-Let `N=18`, let authorized shard concurrency `c` be an integer in `1..18`, let `f`
-be the explicitly authorized decimal safety factor with `f >= 1`, let
-`F=M(final_artifact_bytes)`, and let
-`W=max(F,M(peak_artifact_bytes))`. Freeze the whole-grid projection as:
+Record training and evaluation wall seconds; total shard wall, CPU, and GPU-device
+seconds; root-overhead wall, CPU, and GPU-device seconds; peak RSS bytes; peak VRAM
+bytes on `cuda:0`; checkpoint bytes; raw-generation bytes; peak/final shard artifact
+bytes; peak/final root-overhead bytes; and per-stage breakdown. Root overhead excludes
+shard directories and includes prepare/aggregate plus every top-level artifact class.
+For every resource component let `M(component)` be the larger of the two fixture
+measurements; no interpolation or cell-specific model is allowed for the unmeasured
+cells.
+
+Formal shard concurrency is frozen to exactly `c=1` on `cuda:0`; parallel formal
+shards are forbidden. Run the two benchmark fixtures sequentially under the same
+single-process device policy and record other-process/device-utilization checks in
+their manifests. Let `N=18`, let `f` be the explicitly authorized decimal safety
+factor with `f >= 1`, let `S=M(final_shard_artifact_bytes)`, let
+`W=max(S,M(peak_shard_artifact_bytes))`, let
+`R=M(final_root_overhead_bytes)`, and let
+`T=max(R,M(peak_root_overhead_bytes))`. Freeze the whole-grid projection as:
 
 ```text
-waves                         = ceil(N / c)
-projected_training_wall_seconds = ceil(f * waves * M(training_wall_seconds))
-projected_evaluation_wall_seconds = ceil(f * waves * M(evaluation_wall_seconds))
-projected_wall_seconds        = ceil(f * waves * M(total_shard_wall_seconds))
-projected_cpu_hours           = f * N * M(cpu_seconds) / 3600
-projected_gpu_hours           = f * N * M(gpu_device_seconds) / 3600
-projected_peak_rss_bytes      = ceil(f * c * M(peak_rss_bytes))
-projected_peak_vram_bytes     = ceil(f * c * M(peak_vram_bytes_on_cuda0))
+concurrency                   = 1
+waves                         = N
+projected_training_wall_seconds = ceil(f * N * M(training_wall_seconds))
+projected_evaluation_wall_seconds = ceil(f * N * M(evaluation_wall_seconds))
+projected_active_wall_seconds = ceil(f * (N * M(total_shard_wall_seconds)
+                                          + M(root_overhead_wall_seconds)))
+projected_cpu_hours           = f * (N * M(shard_cpu_seconds)
+                                     + M(root_overhead_cpu_seconds)) / 3600
+projected_gpu_hours           = f * (N * M(shard_gpu_device_seconds)
+                                     + M(root_overhead_gpu_device_seconds)) / 3600
+projected_peak_rss_bytes      = ceil(f * M(peak_rss_bytes))
+projected_peak_vram_bytes     = ceil(f * M(peak_vram_bytes_on_cuda0))
 projected_checkpoint_bytes    = ceil(f * N * M(checkpoint_bytes))
 projected_raw_generation_bytes = ceil(f * N * M(raw_generation_bytes))
-projected_final_disk_bytes    = ceil(f * N * F)
-projected_temporary_disk_bytes = ceil(f * ((N-c) * F + c * W))
+projected_final_disk_bytes    = ceil(f * (N * S + R))
+projected_temporary_disk_bytes = ceil(f * ((N-1) * S + W + T))
 ```
 
 Parse `f` from a canonical decimal string with `decimal.Decimal`, never binary
@@ -696,25 +721,29 @@ benchmark root exactly once after benchmark review; the benchmark launcher reser
 that absent path, the write is atomic, and neither it nor any prior file may later be
 overwritten. It must bind the benchmark root and manifest/summary
 SHA-256 values, exact source commit, both fixture configurations and measurements,
-the formula version above, exact 18-shard registry checksum, `c`, `f`, every projected
-value, and numeric ceilings with these exact units and scopes:
+the formula version above, exact 18-shard registry checksum, fixed `c=1`, `f`, every
+projected value, and numeric ceilings with these exact units and scopes:
 
 ```text
-wall_time_ceiling_seconds                 whole formal root
+active_wall_time_ceiling_seconds          sum of prepare/shard/aggregate process wall times
 gpu_hour_ceiling                          all 18 shards on cuda:0
-peak_vram_ceiling_bytes_on_cuda0          concurrent shard processes combined
-peak_rss_ceiling_bytes_total              concurrent shard processes combined
+peak_vram_ceiling_bytes_on_cuda0          one active shard process
+peak_rss_ceiling_bytes_total              one active shard process
 temporary_disk_ceiling_bytes_for_root     formal root during execution
 final_disk_ceiling_bytes_for_root         completed formal root
 ```
 
-It also binds the selected feasibility record path and SHA-256. All projected values
-must be within their ceilings. `prepare` rejects a missing or mismatched binding;
-`run-shard` enforces cumulative time/GPU/disk budgets and monitored RSS/VRAM/disk
-ceilings before and during each attempt; `aggregate` enforces final disk and complete
-resource accounting. A breach publishes failure evidence and is an operational
-failure, not a scientific outcome. The accepted benchmark must use the exact final
-implementation commit intended for formal execution. The initial benchmark root is:
+It also binds the selected feasibility record path and SHA-256 and its complete
+transitive predecessor-root and predecessor-selection-record lineage. All projected
+values must be within their ceilings. `prepare` rejects a missing or mismatched
+binding. Every `run-shard` must acquire the single non-blocking exclusive formal-run
+lock before creating an attempt and hold it through terminal publication; failure to
+acquire refuses the launch without creating an attempt. It enforces cumulative
+time/GPU/disk budgets and monitored RSS/VRAM/disk ceilings before and during the
+attempt. `aggregate` enforces final disk and complete resource accounting. A breach
+publishes failure evidence and is an operational failure, not a scientific outcome.
+The accepted benchmark must use the exact final implementation commit intended for
+formal execution. The initial benchmark root is:
 
 ```text
 artifacts/phase8_toy_lm_bridge/benchmark_001
@@ -723,10 +752,11 @@ artifacts/phase8_toy_lm_bridge/benchmark_001
 The benchmark root must not exist before launch and must preserve terminal status,
 raw measurements, summary, and a checksum-bound manifest. Its source-cleanliness
 check permits no tracked/staged change and may exclude only exact finalized
-feasibility evidence supplied as inputs; it may not exclude an artifact directory
-broadly. A failed or superseded benchmark is preserved and the next attempt uses a
-new numbered root. The accepted benchmark manifest and authorization must bind the
-paths, terminal states, and manifest checksums of every predecessor benchmark root.
+feasibility evidence and exact finalized predecessor benchmark roots supplied as
+manifest/checksum-bound inputs; it may not exclude an artifact directory broadly. A
+failed or superseded benchmark is preserved and the next attempt uses a new numbered
+root. The accepted benchmark manifest and authorization must bind the paths, terminal
+states, and manifest checksums of every predecessor benchmark root.
 
 ## 10. Behavioral Certificate Analysis
 
@@ -993,10 +1023,12 @@ Targeted tests must cover at least:
     response-matrix sensitivity reconstruction;
 23. fixed shard registry, per-attempt atomic status transitions, retry selection,
     attempt-local manifest/terminal ordering, binding consistency, retained-failure
-    handling, and refusal to aggregate missing, multiply successful, mixed-source, or
+    handling, exclusive serial lock enforcement, retry resource reauthorization, and
+    refusal to aggregate missing, multiply successful, mixed-source, or
     mixed-configuration shards;
 24. benchmark resource accounting, whole-grid projection, and rejection of missing
-    evidence bindings, invalid units/scopes, or exceeded authorization ceilings.
+    artifact-role coverage, evidence bindings, fixed serial concurrency, invalid
+    units/scopes, or exceeded authorization ceilings.
 
 Run targeted tests first, then:
 
@@ -1035,6 +1067,7 @@ not be retrained in the scale study. The fixed layout is:
 
 ```text
 formal_001/
+  concurrency.lock
   run_contract.json
   manifest.json
   shards_manifest.json
@@ -1050,10 +1083,13 @@ CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_toy_lm_bridge
 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_toy_lm_bridge.py aggregate --output-root artifacts/phase8_toy_lm_bridge/formal_001
 ```
 
-The paths shown are the initial authorized versions. After preserved failure or
-reviewed repair, `main` substitutes only the exact next versioned formal root,
-feasibility-selection record, and benchmark authorization; the command surface and
-all other arguments remain unchanged.
+The paths shown are the initial authorized versions. A failed or repaired
+non-scientific evidence root may require the next exact feasibility-selection or
+benchmark-authorization path. A new formal root is required only after a source,
+configuration, data, evaluation, or semantic defect invalidates the old root. A
+transient shard infrastructure failure keeps the same formal root, feasibility
+selection, resource authorization, and run contract and uses only the next attempt
+number. The command surface and all other arguments remain unchanged.
 
 `prepare` is permitted only after the software smoke control and all feasibility
 cells pass, the resource benchmark and explicit authorization are accepted, the
@@ -1061,20 +1097,32 @@ implementation and tests are committed, an independent strict read-only review
 accepts that exact commit, and the source-cleanliness check confirms no tracked or
 staged change and no untracked file outside the exact selected feasibility root,
 selection record, accepted benchmark root, and finalized predecessor evidence roots
-enumerated and checksum-bound by the two supplied inputs. No broad artifact-directory
-exclusion is allowed. The fixed output root must not exist and `prepare` must refuse
-overwrite.
+and selection records enumerated and checksum-bound by the two supplied inputs. No
+broad artifact-directory exclusion is allowed. The fixed output root must not exist
+and `prepare` must refuse overwrite.
 It verifies that the selected feasibility run and resource benchmark both bind the
 exact current source commit and that the resource authorization binds the same
-feasibility-selection checksum. It then atomically writes immutable
-`run_contract.json`, locking the source commit, configuration, evaluation-pack
-checksum, eighteen-shard registry, feasibility selection and selected manifest,
-resource benchmark manifest/summary and authorization checksums, device,
-concurrency/ceilings/projection parameters, and output root before any shard trains.
+feasibility-selection checksum. It creates the persistent `concurrency.lock` file and
+then atomically publishes immutable `run_contract.json` as the final preparation step;
+`run-shard` refuses until that contract exists. The contract locks the source commit,
+configuration, evaluation-pack checksum, eighteen-shard registry, feasibility
+selection and selected manifest, their complete transitive selection/evidence
+lineage, resource benchmark manifest/summary and authorization checksums, device,
+fixed serial concurrency, ceilings/projection parameters, lock-file checksum, and
+output root before any shard trains.
 
 After `prepare`, the source-cleanliness check may additionally exclude exactly the
 new fixed formal root. Every allowed evidence path must remain manifest/checksum
 bound; no other exclusion is permitted.
+
+Before creating an attempt directory, `run-shard` must acquire a non-blocking
+exclusive `fcntl.flock` on `concurrency.lock` and retain it until the attempt manifest
+and terminal marker are published. A second process that cannot acquire the lock
+must refuse without allocating an attempt number or writing shard evidence. OS lock
+release after process death prevents a stale lease. Only an attempt with a finalized
+`FAILED.json` and bound manifest is retry-eligible; an incomplete attempt after an
+uncaught process/host failure blocks that formal root and returns to `main` rather
+than receiving a manufactured terminal record.
 
 Every shard attempt must write long-running output to job logs and atomically
 maintain small `status.json` and `progress.json` files. Before publishing a terminal
@@ -1092,7 +1140,25 @@ A transient infrastructure failure may be retried only with the identical accept
 source and locked configuration, after explicit `main` authorization, in the next
 attempt directory such as `attempt002`. The immutable retry-authorization record must
 bind the failed attempt manifest, failure classification, requested next attempt, and
-the unchanged run-contract checksum. Retain the failed attempt and declare the
+the unchanged run-contract checksum. It must also bind cumulative observed wall/GPU
+usage, retained failed-attempt bytes, remaining shards, and a recomputed projection
+under the accepted formula and safety factor. If `n_remaining` includes the requested
+retry and every shard without a selected success, and `D_failed` is the exact retained
+failed-attempt byte total, recompute at least:
+
+```text
+retry_active_wall_seconds = observed_active_wall_seconds
+                            + ceil(f * (n_remaining * M(total_shard_wall_seconds)
+                                        + M(root_overhead_wall_seconds)))
+retry_gpu_hours = observed_gpu_hours
+                  + f * (n_remaining * M(shard_gpu_device_seconds)
+                         + M(root_overhead_gpu_device_seconds)) / 3600
+retry_final_disk_bytes = D_failed + ceil(f * (N * S + R))
+retry_temporary_disk_bytes = D_failed + ceil(f * ((N-1) * S + W + T))
+```
+
+Peak RSS/VRAM remain bounded by one active shard. Every original ceiling must still
+hold; otherwise retry is forbidden. Retain the failed attempt and declare the
 selected successful attempt in `shards_manifest.json`. A source, configuration, data,
 evaluation, or semantic defect invalidates the root for final scientific aggregation.
 Preserve it as rejected evidence, repair and review a new source-controlled commit,
@@ -1153,9 +1219,9 @@ The following are implementation/protocol gates and block acceptance on mismatch
 - tokenizer, causal model, training, save/load, evaluator, and threshold tests;
 - the software smoke control, every frozen feasibility family/model/seed cell, and
   an immutable selection that binds a passing run from the exact formal source;
-- accepted resource benchmark evidence and explicit concurrency, time, memory, and
-  disk ceilings, bound to the exact formal source and feasibility selection before
-  `prepare`;
+- accepted resource benchmark evidence, fixed serial concurrency, and explicit time,
+  memory, and disk ceilings bound to the exact formal source and feasibility
+  selection before `prepare`;
 - complete raw output for all 288 unique runs and all frozen evaluation steps, unless
   a preserved failed run stops the milestone for an explicit decision;
 - exactly eighteen registered, binding-consistent successful shards and one accepted
@@ -1199,19 +1265,21 @@ phase8_report.md
 Capability_Certificate_Research_Progress_Summary.md
 ```
 
-The paths above show the initial numbering. If preserved failure or reviewed repair
-requires later roots or selection records, the accepted deliverables use those exact
-versioned paths and bind them from the formal run contract and manifest; earlier
-evidence remains preserved.
+The paths above show the initial numbering. Failed or repaired non-scientific
+evidence uses later evidence roots or selection records; a source/configuration/data/
+evaluation/semantic formal invalidation uses a later formal root. A transient formal
+shard failure uses a later attempt in the same root. Accepted deliverables bind the
+applicable exact versioned paths from the formal run contract and manifest, and all
+earlier evidence remains preserved.
 
 Phase 8 is complete only when:
 
 1. The software smoke control and every held-out sequence-transduction feasibility
    cell pass from accepted, clean, committed source, and the immutable selected run
    binds the exact formal source commit.
-2. A resource benchmark is complete and `main` has frozen explicit concurrency,
-   safety factor, time, memory, and disk ceilings against the exact benchmark and
-   feasibility evidence.
+2. A resource benchmark is complete and `main` has frozen serial concurrency, safety
+   factor, time, memory, and disk ceilings against the exact benchmark and feasibility
+   evidence.
 3. DSL programs deterministically generate leak-checked A/B/C training corpora and a
    held-out probe pack.
 4. Toy causal models train and evaluate reproducibly under the frozen configuration.
@@ -1304,9 +1372,10 @@ The reviewer must audit:
   sensitivity matrices, interpretation hierarchy, and query-unit metrics;
 - seed, state, probe, checkpoint, and scale denominators;
 - whether any empirical hypothesis has leaked into an acceptance gate;
-- eighteen-shard completeness, attempt-local manifests, retry versus invalidation
-  semantics, benchmark projection arithmetic, resource-authorization units and
-  evidence bindings, artifact sufficiency, and Git/checksum provenance;
+- eighteen-shard completeness, attempt-local manifests, exclusive serial execution,
+  retry versus invalidation and retry-resource semantics, benchmark artifact-role
+  coverage and projection arithmetic, resource-authorization units and evidence
+  bindings, artifact sufficiency, and Git/checksum provenance;
 - the forced ground-truth-certificate scope and absence of composition-compression
   overclaiming;
 - scope discipline and scientific overclaiming.

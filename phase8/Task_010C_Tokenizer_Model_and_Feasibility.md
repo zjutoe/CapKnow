@@ -52,7 +52,8 @@ Do not modify corpus semantics or any other file.
 - Preserve failed roots and require the next numbered root for every retry or repair.
   Provide pure validation for a separate immutable selection record binding a passing
   root/manifest, exact source/configuration, per-cell counts, review verdict, and the
-  terminal/manifest checksums of every predecessor root.
+  terminal/manifest checksums of every predecessor root plus the transitive path and
+  SHA-256 lineage of every predecessor selection record.
 
 ## Acceptance checks
 
