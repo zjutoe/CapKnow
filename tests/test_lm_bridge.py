@@ -284,3 +284,152 @@ def test_condition_prompts_keep_metadata_out_while_allowing_semantic_overlap() -
         assert record.template_id not in record.prompt
         assert record.task_id not in record.prompt
         cg.leak_check_model_text(record.prompt)
+
+
+@pytest.mark.parametrize("condition", cg.CONDITIONS)
+@pytest.mark.parametrize("corpus_size, records_per_family", (("base", 128), ("large", 512)))
+def test_training_corpus_counts_and_held_out_exclusion(
+    condition: str,
+    corpus_size: str,
+    records_per_family: int,
+) -> None:
+    corpus = cg.build_training_corpus(condition, seed=0, state_mask=15, corpus_size=corpus_size)
+
+    assert len(corpus) == 7 * records_per_family
+    assert [record.task_id for record in corpus[:records_per_family]] == ["MEMORY"] * records_per_family
+    assert {record.task_id for record in corpus} == set(cg.TRAINING_TASK_ORDER)
+    assert "MEMORY_SEARCH" not in {record.task_id for record in corpus}
+    assert not any(record.program_dict == cg.program_dict("MEMORY_SEARCH") for record in corpus)
+    assert not any(record.template_id.startswith("memory_search__") for record in corpus)
+    cg.validate_training_corpus(corpus, condition, seed=0, state_mask=15, corpus_size=corpus_size)
+
+
+def test_training_corpus_base_payload_prefix_of_large_for_structured_conditions() -> None:
+    base_a = cg.build_training_corpus("A", seed=1, state_mask=7, corpus_size="base")
+    large_a = cg.build_training_corpus("A", seed=1, state_mask=7, corpus_size="large")
+    base_b = cg.build_training_corpus("B", seed=1, state_mask=7, corpus_size="base")
+    large_b = cg.build_training_corpus("B", seed=1, state_mask=7, corpus_size="large")
+
+    for task_id in cg.TRAINING_TASK_ORDER:
+        base_task_a = [record for record in base_a if record.task_id == task_id]
+        large_task_a = [record for record in large_a if record.task_id == task_id]
+        base_task_b = [record for record in base_b if record.task_id == task_id]
+        large_task_b = [record for record in large_b if record.task_id == task_id]
+        assert base_task_a == large_task_a[:128]
+        assert base_task_b == large_task_b[:128]
+
+
+def test_record_order_indices_are_deterministic_and_condition_independent() -> None:
+    corpus_a = cg.build_training_corpus("A", seed=2, state_mask=3)
+    corpus_b = cg.build_training_corpus("B", seed=2, state_mask=3)
+    order = cg.record_order_indices(seed=2, state_mask=3, record_count=len(corpus_a))
+
+    assert order == cg.record_order_indices(seed=2, state_mask=3, record_count=len(corpus_a))
+    assert set(order) == set(range(len(corpus_a)))
+    assert order != tuple(range(len(corpus_a)))
+    assert [corpus_a[index].record_index for index in order] == [corpus_a[index].record_index for index in order]
+    assert [corpus_a[index].task_id for index in order] == [corpus_b[index].task_id for index in order]
+
+
+def test_a_b_outcome_agreement_and_primitive_record_identity() -> None:
+    cg.validate_a_b_agreement(seed=0, state_mask=11, corpus_size="base")
+    corpus_a = cg.build_training_corpus("A", seed=0, state_mask=11)
+    corpus_b = cg.build_training_corpus("B", seed=0, state_mask=11)
+
+    for record_a, record_b in zip(corpus_a, corpus_b):
+        assert record_a.answer == record_b.answer
+        if record_a.task_id in cg.PRIMITIVE_ORDER:
+            assert record_a == record_b
+        else:
+            assert record_a.prompt != record_b.prompt
+            assert record_a.template_id != record_b.template_id
+
+
+def test_c_randomized_control_gates_degrees_histograms_changes_and_determinism() -> None:
+    audit = cg.validate_randomized_control(seed=0, corpus_size="base")
+    corpora_a = cg.build_training_corpora("A", seed=0, corpus_size="base")
+    corpora_c = cg.build_training_corpora("C", seed=0, corpus_size="base")
+
+    assert audit["changed_fraction"] >= 0.15
+    assert all(audit["changed_by_family"][task_id] >= 1 for task_id in cg.SEEN_COMPOSITION_TASKS)
+    assert cg.aggregate_utf8_byte_histogram(corpora_a) == cg.aggregate_utf8_byte_histogram(corpora_c)
+    assert cg.aggregate_token_histogram(corpora_a) == cg.aggregate_token_histogram(corpora_c)
+    for state_mask in cg.STATE_MASKS:
+        records_a = corpora_a[state_mask]
+        records_c = corpora_c[state_mask]
+        for record_a, record_c in zip(records_a, records_c):
+            assert record_a.prompt == record_c.prompt
+            if record_a.task_id in cg.PRIMITIVE_ORDER:
+                assert record_a == record_c
+        a_positive = sum(record.answer != cg.UNABLE_RESPONSE for record in records_a if record.task_id in cg.SEEN_COMPOSITION_TASKS)
+        c_positive = sum(record.answer != cg.UNABLE_RESPONSE for record in records_c if record.task_id in cg.SEEN_COMPOSITION_TASKS)
+        assert a_positive == c_positive
+
+
+def test_randomized_control_rejects_malformed_label_and_histogram_changes() -> None:
+    corpora_a = cg.build_training_corpora("A", seed=0, corpus_size="base")
+    corpora_c = dict(cg.build_training_corpora("C", seed=0, corpus_size="base"))
+    state_records = list(corpora_c[0])
+    target_index = next(index for index, record in enumerate(state_records) if record.task_id in cg.SEEN_COMPOSITION_TASKS)
+    state_records[target_index] = replace(state_records[target_index], answer='"tampered"')
+    corpora_c[0] = tuple(state_records)
+
+    with pytest.raises(
+        ValueError,
+        match="response target|deterministic switch randomization|UTF-8 byte histogram|tokenizer-token histogram",
+    ):
+        cg.validate_randomized_control(
+            seed=0,
+            corpus_size="base",
+            corpus_a_by_state=corpora_a,
+            corpus_c_by_state=corpora_c,
+        )
+
+
+def test_randomized_control_rejects_insufficient_randomization() -> None:
+    corpora_a = cg.build_training_corpora("A", seed=0, corpus_size="base")
+
+    with pytest.raises(ValueError, match="deterministic switch randomization|changed-label fraction|at least one label"):
+        cg.validate_randomized_control(
+            seed=0,
+            corpus_size="base",
+            corpus_a_by_state=corpora_a,
+            corpus_c_by_state=corpora_a,
+        )
+
+
+def test_training_split_rejects_prompt_id_context_and_payload_collisions() -> None:
+    train = list(cg.build_training_corpus("A", seed=0, state_mask=15))
+    evaluation = cg.build_evaluation_probe_pack()
+
+    for field_name, match in (
+        ("prompt", "prompt"),
+        ("template_id", "template_id"),
+        ("payload_id", "payload_id"),
+        ("canonical_context", "canonical_context"),
+        ("normalized_payload", "normalized_payload"),
+    ):
+        tampered = list(train)
+        source_probe = next(probe for probe in evaluation if probe.task_id == "MEMORY")
+        target_index = next(index for index, record in enumerate(tampered) if record.task_id == "MEMORY")
+        tampered[target_index] = replace(tampered[target_index], **{field_name: getattr(source_probe, field_name)})
+        with pytest.raises(ValueError, match=match):
+            cg.validate_split_disjointness(tuple(tampered), evaluation)
+
+
+def test_response_target_length_diagnostics_and_paired_differences_are_deterministic() -> None:
+    corpora_a = cg.build_training_corpora("A", seed=0, corpus_size="base")
+    corpora_c = cg.build_training_corpora("C", seed=0, corpus_size="base")
+    diagnostics_a = cg.response_target_length_diagnostics(corpora_a)
+    diagnostics_c = cg.response_target_length_diagnostics(corpora_c)
+    differences = cg.paired_target_length_diagnostic_differences(corpora_a, corpora_c)
+
+    assert diagnostics_a == cg.response_target_length_diagnostics(corpora_a)
+    assert set(diagnostics_a) == set(diagnostics_c) == set(differences)
+    assert diagnostics_a[(0, "MEMORY")]["literal_unable_target_ratio"] == 1.0
+    assert diagnostics_a[(15, "MEMORY")]["literal_unable_target_ratio"] == 0.0
+    assert any(
+        differences[(state_mask, task_id)]["literal_unable_target_ratio"] != 0
+        for state_mask in cg.STATE_MASKS
+        for task_id in cg.SEEN_COMPOSITION_TASKS
+    )

@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from itertools import combinations
 import json
+import random
 import re
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Callable
 
 from capability_certificate_lab.certificate import solve_exact_certificate, validate_certificate
 from capability_certificate_lab.dsl.executor import (
@@ -35,6 +36,18 @@ TASK_ORDER: tuple[str, ...] = (
     "SEARCH_CONDITION",
     "MEMORY_SEARCH",
 )
+TRAINING_TASK_ORDER: tuple[str, ...] = TASK_ORDER[:7]
+SEEN_COMPOSITION_TASKS: tuple[str, ...] = (
+    "MEMORY_FILTER",
+    "FILTER_CONDITION",
+    "SEARCH_CONDITION",
+)
+CONDITIONS: tuple[str, ...] = ("A", "B", "C")
+CORPUS_RECORDS_PER_FAMILY: Mapping[str, int] = MappingProxyType({"base": 128, "large": 512})
+BOS_TOKEN = "<BOS>"
+SEP_TOKEN = "<SEP>"
+EOS_TOKEN = "<EOS>"
+UNABLE_RESPONSE = "unable"
 
 _TASK_REQUIRED: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
@@ -452,7 +465,21 @@ def render_prompt(task_id: str, context: Mapping[str, Any], template_id: str, st
         key = context["key"]
         value = context["memory"][key]
         items = _items_text(context["items"])
-        if style == "explicit":
+        if style == "train_explicit":
+            prompt = (
+                f"Read pair {key}:{value} first. Afterwards keep entries equal to that read value from {items}. Return compact JSON.",
+                f"Begin with table pair {key}:{value}; then keep only list entries equal to the read value from {items}. Return compact JSON.",
+                f"Use key {key} to read {value}. After that, select entries equal to {value} from {items}. Return compact JSON.",
+                f"Initial lookup gives {value} for {key}. Next keep matching entries from {items}. Return compact JSON.",
+            )[variant]
+        elif style == "train_indirect":
+            prompt = (
+                f"Using pair {key}:{value} with entries {items}, return the compact JSON list matching the pair value.",
+                f"From {key}:{value} and entries {items}, output compact JSON entries equal to the paired value.",
+                f"Return entries in {items} equal to the value paired with {key}, namely {value}, as compact JSON.",
+                f"With pair {key}:{value} and list {items}, output the entries equal to the paired value as compact JSON.",
+            )[variant]
+        elif style == "explicit":
             prompt = (
                 f"First read that {key} maps to {value}. Then keep list entries equal to that read value from {items}. Return compact JSON.",
                 f"Read the table pair {key}:{value}; next, from {items}, keep entries equal to the read value. Return compact JSON.",
@@ -476,7 +503,21 @@ def render_prompt(task_id: str, context: Mapping[str, Any], template_id: str, st
     elif task_id == "FILTER_CONDITION":
         items = _items_text(context["items"])
         target = context["target"]
-        if style == "explicit":
+        if style == "train_explicit":
+            prompt = (
+                f"Keep entries equal to {target} from {items} first. Afterwards report whether the kept list has anything as compact JSON true or false.",
+                f"Begin by selecting matches for {target} in {items}; then return whether that selection is non-empty as compact JSON.",
+                f"First retain only {target} from {items}. After that answer compact JSON true or false for whether any entry remains.",
+                f"Initial work keeps matches for {target} in {items}. Next return whether the kept entries are non-empty as compact JSON.",
+            )[variant]
+        elif style == "train_indirect":
+            prompt = (
+                f"Return compact JSON true or false for whether any entry in {items} equals {target}.",
+                f"For list {items}, answer in compact JSON whether at least one entry matches {target}.",
+                f"Does {items} contain an entry equal to {target}? Return compact JSON true or false.",
+                f"Using entries {items}, output whether a member equals {target} as compact JSON true or false.",
+            )[variant]
+        elif style == "explicit":
             prompt = (
                 f"First keep entries equal to {target} from {items}. Then report whether anything remains as compact JSON true or false.",
                 f"Select entries matching {target} in {items}; after that, return whether the selected list is non-empty as compact JSON.",
@@ -500,7 +541,21 @@ def render_prompt(task_id: str, context: Mapping[str, Any], template_id: str, st
     elif task_id == "SEARCH_CONDITION":
         items = _items_text(context["items"])
         target = context["target"]
-        if style == "explicit":
+        if style == "train_explicit":
+            prompt = (
+                f"Decide whether {target} is in {items} first. Afterwards return that decision as compact JSON true or false.",
+                f"Begin by checking membership of {target} in {items}; then output the same Boolean as compact JSON.",
+                f"First determine if {target} appears in {items}. After that return the resulting truth value as compact JSON.",
+                f"Initial check asks whether {target} is present in {items}. Next return that answer as compact JSON.",
+            )[variant]
+        elif style == "train_indirect":
+            prompt = (
+                f"Return compact JSON true or false for whether {target} is included among {items}.",
+                f"For entries {items}, answer in compact JSON whether {target} occurs.",
+                f"Among entries {items}, does {target} appear? Return compact JSON true or false.",
+                f"Using list {items}, output whether {target} is included as compact JSON true or false.",
+            )[variant]
+        elif style == "explicit":
             prompt = (
                 f"First decide whether {target} is in {items}. Then return that decision as compact JSON true or false.",
                 f"Check membership of {target} in {items}; after deciding, output the same Boolean as compact JSON.",
@@ -590,6 +645,504 @@ def build_split_records(split: str, task_id: str, count: int) -> tuple[SplitReco
     records = tuple(_record(split, task_id, idx) for idx in range(count))
     _reject_internal_collisions(records)
     return records
+
+
+def build_training_corpus(
+    condition: str,
+    seed: int,
+    state_mask: int,
+    corpus_size: str = "base",
+) -> tuple[SplitRecord, ...]:
+    _validate_condition(condition)
+    state_from_mask(state_mask)
+    count = _records_per_family(corpus_size)
+    if condition == "C":
+        control_labels = _randomized_control_labels(seed, count)
+    else:
+        control_labels = None
+    records: list[SplitRecord] = []
+    for task_id in TRAINING_TASK_ORDER:
+        for record_index in range(count):
+            label = None
+            if control_labels is not None and task_id in SEEN_COMPOSITION_TASKS:
+                label = control_labels[(state_mask, task_id, record_index)]
+            records.append(_training_record(condition, state_mask, task_id, record_index, label))
+    corpus = tuple(records)
+    validate_training_corpus(corpus, condition, seed, state_mask, corpus_size)
+    return corpus
+
+
+def build_training_corpora(
+    condition: str,
+    seed: int,
+    corpus_size: str = "base",
+) -> Mapping[int, tuple[SplitRecord, ...]]:
+    _validate_condition(condition)
+    count = _records_per_family(corpus_size)
+    control_labels = _randomized_control_labels(seed, count) if condition == "C" else None
+    return MappingProxyType(
+        {
+            state_mask: _build_training_corpus_with_labels(
+                condition,
+                seed,
+                state_mask,
+                corpus_size,
+                control_labels,
+            )
+            for state_mask in STATE_MASKS
+        }
+    )
+
+
+def _build_training_corpus_with_labels(
+    condition: str,
+    seed: int,
+    state_mask: int,
+    corpus_size: str,
+    control_labels: Mapping[tuple[int, str, int], int] | None,
+) -> tuple[SplitRecord, ...]:
+    count = _records_per_family(corpus_size)
+    records: list[SplitRecord] = []
+    for task_id in TRAINING_TASK_ORDER:
+        for record_index in range(count):
+            label = None
+            if control_labels is not None and task_id in SEEN_COMPOSITION_TASKS:
+                label = control_labels[(state_mask, task_id, record_index)]
+            records.append(_training_record(condition, state_mask, task_id, record_index, label))
+    corpus = tuple(records)
+    validate_training_corpus(corpus, condition, seed, state_mask, corpus_size)
+    return corpus
+
+
+def record_order_indices(seed: int, state_mask: int, record_count: int) -> tuple[int, ...]:
+    state_from_mask(state_mask)
+    if record_count < 0:
+        raise ValueError("record_count must be non-negative.")
+    indices = list(range(record_count))
+    random.Random(800000 + 100 * seed + state_mask).shuffle(indices)
+    return tuple(indices)
+
+
+def ordered_training_corpus(
+    condition: str,
+    seed: int,
+    state_mask: int,
+    corpus_size: str = "base",
+) -> tuple[SplitRecord, ...]:
+    corpus = build_training_corpus(condition, seed, state_mask, corpus_size)
+    order = record_order_indices(seed, state_mask, len(corpus))
+    return tuple(corpus[index] for index in order)
+
+
+def validate_training_corpus(
+    records: Sequence[SplitRecord],
+    condition: str,
+    seed: int,
+    state_mask: int,
+    corpus_size: str = "base",
+) -> None:
+    _validate_condition(condition)
+    state_from_mask(state_mask)
+    count = _records_per_family(corpus_size)
+    if len(records) != len(TRAINING_TASK_ORDER) * count:
+        raise ValueError(f"{condition} corpus must contain exactly {len(TRAINING_TASK_ORDER) * count} records.")
+    validate_split_disjointness(records, _FROZEN_EVALUATION_PROBE_PACK)
+    expected_positions = tuple(
+        (task_id, record_index)
+        for task_id in TRAINING_TASK_ORDER
+        for record_index in range(count)
+    )
+    actual_positions = tuple((record.task_id, record.record_index) for record in records)
+    if actual_positions != expected_positions:
+        raise ValueError("Training corpus must use frozen task-stratified record order before shuffling.")
+    for record in records:
+        _validate_training_record(record, condition, state_mask)
+
+
+def validate_a_b_agreement(seed: int, state_mask: int, corpus_size: str = "base") -> None:
+    corpus_a = build_training_corpus("A", seed, state_mask, corpus_size)
+    corpus_b = build_training_corpus("B", seed, state_mask, corpus_size)
+    for record_a, record_b in zip(corpus_a, corpus_b, strict=True):
+        if record_a.task_id in PRIMITIVE_ORDER:
+            if _record_bytes(record_a) != _record_bytes(record_b):
+                raise ValueError("Condition A/B primitive records must be byte-identical.")
+        if record_a.answer != record_b.answer:
+            raise ValueError("Condition A/B outcomes must agree for every shared oracle record.")
+        if record_a.task_id in SEEN_COMPOSITION_TASKS and record_a.prompt == record_b.prompt:
+            raise ValueError("Condition A/B composition prompts must differ.")
+
+
+def validate_randomized_control(
+    seed: int,
+    corpus_size: str = "base",
+    *,
+    corpus_a_by_state: Mapping[int, Sequence[SplitRecord]] | None = None,
+    corpus_c_by_state: Mapping[int, Sequence[SplitRecord]] | None = None,
+    token_encoder: Callable[[str], Sequence[int]] | None = None,
+) -> Mapping[str, Any]:
+    count = _records_per_family(corpus_size)
+    if corpus_a_by_state is None:
+        corpus_a_by_state = build_training_corpora("A", seed, corpus_size)
+    if corpus_c_by_state is None:
+        corpus_c_by_state = build_training_corpora("C", seed, corpus_size)
+    labels_once = _randomized_control_labels(seed, count)
+    labels_twice = _randomized_control_labels(seed, count)
+    if labels_once != labels_twice:
+        raise ValueError("Condition C randomization must be deterministic for its control seed.")
+
+    changed_by_family = {task_id: 0 for task_id in SEEN_COMPOSITION_TASKS}
+    changed_total = 0
+    total_cells = len(STATE_MASKS) * len(SEEN_COMPOSITION_TASKS) * count
+    a_record_degrees: Counter[tuple[str, int]] = Counter()
+    c_record_degrees: Counter[tuple[str, int]] = Counter()
+    for state_mask in STATE_MASKS:
+        corpus_a = tuple(corpus_a_by_state[state_mask])
+        corpus_c = tuple(corpus_c_by_state[state_mask])
+        validate_training_corpus(corpus_a, "A", seed, state_mask, corpus_size)
+        validate_training_corpus(corpus_c, "C", seed, state_mask, corpus_size)
+        if len(corpus_a) != len(corpus_c):
+            raise ValueError("Condition C record counts must match Condition A.")
+        a_positive = 0
+        c_positive = 0
+        for record_a, record_c in zip(corpus_a, corpus_c, strict=True):
+            if record_a.task_id != record_c.task_id or record_a.record_index != record_c.record_index:
+                raise ValueError("Condition C records must align with Condition A prompts.")
+            if record_a.task_id in PRIMITIVE_ORDER and _record_bytes(record_a) != _record_bytes(record_c):
+                raise ValueError("Condition C primitive records must be byte-identical to Condition A.")
+            if record_a.prompt.encode("utf-8") != record_c.prompt.encode("utf-8"):
+                raise ValueError("Condition C prompt bytes must be identical to Condition A.")
+            if record_a.task_id in SEEN_COMPOSITION_TASKS:
+                a_bit = int(record_a.answer != UNABLE_RESPONSE)
+                c_bit = int(record_c.answer != UNABLE_RESPONSE)
+                expected_c_bit = labels_once[(state_mask, record_c.task_id, record_c.record_index)]
+                if c_bit != expected_c_bit:
+                    raise ValueError("Condition C label does not match deterministic switch randomization.")
+                a_positive += a_bit
+                c_positive += c_bit
+                a_record_degrees[(record_a.task_id, record_a.record_index)] += a_bit
+                c_record_degrees[(record_c.task_id, record_c.record_index)] += c_bit
+                if a_bit != c_bit:
+                    changed_total += 1
+                    changed_by_family[record_a.task_id] += 1
+        if a_positive != c_positive:
+            raise ValueError("Condition C must preserve each state's positive composite record degree.")
+
+    for task_id in SEEN_COMPOSITION_TASKS:
+        if changed_by_family[task_id] < 1:
+            raise ValueError(f"Condition C must change at least one label for {task_id}.")
+    changed_fraction = changed_total / total_cells
+    if changed_fraction < 0.15:
+        raise ValueError(f"Condition C changed-label fraction below 15%: {changed_fraction:.6f}.")
+
+    for task_id in SEEN_COMPOSITION_TASKS:
+        for record_index in range(count):
+            if a_record_degrees[(task_id, record_index)] != c_record_degrees[(task_id, record_index)]:
+                raise ValueError("Condition C must preserve each composite record's positive state degree.")
+
+    byte_hist_a = aggregate_utf8_byte_histogram(corpus_a_by_state)
+    byte_hist_c = aggregate_utf8_byte_histogram(corpus_c_by_state)
+    if byte_hist_a != byte_hist_c:
+        raise ValueError("Condition C aggregate UTF-8 byte histogram must equal Condition A.")
+    token_hist_a = aggregate_token_histogram(corpus_a_by_state, token_encoder)
+    token_hist_c = aggregate_token_histogram(corpus_c_by_state, token_encoder)
+    if token_hist_a != token_hist_c:
+        raise ValueError("Condition C aggregate tokenizer-token histogram must equal Condition A.")
+    return MappingProxyType(
+        {
+            "changed_total": changed_total,
+            "total_cells": total_cells,
+            "changed_fraction": changed_fraction,
+            "changed_by_family": MappingProxyType(changed_by_family),
+        }
+    )
+
+
+def aggregate_utf8_byte_histogram(corpora_by_state: Mapping[int, Sequence[SplitRecord]]) -> Mapping[int, int]:
+    histogram: Counter[int] = Counter()
+    for records in corpora_by_state.values():
+        for record in records:
+            histogram.update(render_training_sequence(record).encode("utf-8"))
+    return MappingProxyType(dict(sorted(histogram.items())))
+
+
+def aggregate_token_histogram(
+    corpora_by_state: Mapping[int, Sequence[SplitRecord]],
+    token_encoder: Callable[[str], Sequence[int]] | None = None,
+) -> Mapping[int, int]:
+    encoder = token_encoder or _utf8_byte_token_encoder
+    histogram: Counter[int] = Counter()
+    for records in corpora_by_state.values():
+        for record in records:
+            histogram.update(encoder(render_training_sequence(record)))
+    return MappingProxyType(dict(sorted(histogram.items())))
+
+
+def render_training_sequence(record: SplitRecord) -> str:
+    leak_check_model_text(record.prompt)
+    leak_check_model_text(record.answer)
+    return f"{BOS_TOKEN}{record.prompt}{SEP_TOKEN}{record.answer}{EOS_TOKEN}"
+
+
+def response_target_length_diagnostics(
+    corpora_by_state: Mapping[int, Sequence[SplitRecord]],
+    token_encoder: Callable[[str], Sequence[int]] | None = None,
+) -> Mapping[tuple[int, str], Mapping[str, Any]]:
+    encoder = token_encoder or _utf8_byte_token_encoder
+    diagnostics: dict[tuple[int, str], Mapping[str, Any]] = {}
+    unable_bytes = len(UNABLE_RESPONSE.encode("utf-8"))
+    unable_tokens = len(encoder(UNABLE_RESPONSE))
+    for state_mask, records in corpora_by_state.items():
+        by_task: dict[str, list[SplitRecord]] = defaultdict(list)
+        for record in records:
+            by_task[record.task_id].append(record)
+        for task_id, task_records in by_task.items():
+            targets = [record.answer for record in task_records]
+            literal = [target for target in targets if target != UNABLE_RESPONSE]
+            byte_lengths = [len(target.encode("utf-8")) for target in targets]
+            token_lengths = [len(encoder(target)) for target in targets]
+            literal_byte_lengths = [len(target.encode("utf-8")) for target in literal]
+            literal_token_lengths = [len(encoder(target)) for target in literal]
+            diagnostics[(state_mask, task_id)] = MappingProxyType(
+                {
+                    "total_utf8_bytes": sum(byte_lengths),
+                    "total_token_count": sum(token_lengths),
+                    "utf8_bytes": _length_summary(byte_lengths),
+                    "token_count": _length_summary(token_lengths),
+                    "literal_utf8_bytes": _length_summary(literal_byte_lengths),
+                    "literal_token_count": _length_summary(literal_token_lengths),
+                    "unable_utf8_bytes": unable_bytes,
+                    "unable_token_count": unable_tokens,
+                    "literal_unable_target_ratio": targets.count(UNABLE_RESPONSE) / len(targets),
+                }
+            )
+    return MappingProxyType(diagnostics)
+
+
+def paired_target_length_diagnostic_differences(
+    corpus_a_by_state: Mapping[int, Sequence[SplitRecord]],
+    corpus_c_by_state: Mapping[int, Sequence[SplitRecord]],
+    token_encoder: Callable[[str], Sequence[int]] | None = None,
+) -> Mapping[tuple[int, str], Mapping[str, Any]]:
+    diag_a = response_target_length_diagnostics(corpus_a_by_state, token_encoder)
+    diag_c = response_target_length_diagnostics(corpus_c_by_state, token_encoder)
+    if set(diag_a) != set(diag_c):
+        raise ValueError("A/C diagnostics must cover identical state and task-family keys.")
+    return MappingProxyType({key: _subtract_diagnostics(diag_a[key], diag_c[key]) for key in diag_a})
+
+
+def _training_record(
+    condition: str,
+    state_mask: int,
+    task_id: str,
+    record_index: int,
+    control_label: int | None,
+) -> SplitRecord:
+    if task_id == "MEMORY_SEARCH":
+        raise ValueError("MEMORY_SEARCH is the held-out composition and cannot appear in training.")
+    task_index = TASK_ORDER.index(task_id)
+    context = context_for_payload(task_id, _TRAINING_SPLIT, record_index)
+    template_id, style = _training_template_id(condition, task_id, record_index)
+    answer = _state_training_answer(task_id, context, state_mask)
+    if control_label is not None:
+        answer = canonical_answer(task_id, context) if control_label else UNABLE_RESPONSE
+    prompt = render_prompt(task_id, context, template_id, style)
+    leak_check_model_text(answer)
+    return SplitRecord(
+        split=_TRAINING_SPLIT,
+        task_id=task_id,
+        task_index=task_index,
+        record_index=record_index,
+        template_id=template_id,
+        payload_id=f"training-payload-{task_index:02d}-{record_index:03d}",
+        program_dict=program_dict(task_id),
+        canonical_context=canonical_context_bytes(context).decode("utf-8"),
+        normalized_payload=normalized_payload_tuple(task_id, context),
+        prompt=prompt,
+        answer=answer,
+        style=style,
+    )
+
+
+def _training_template_id(condition: str, task_id: str, record_index: int) -> tuple[str, str]:
+    variant = _TRAIN_TEMPLATES[record_index % len(_TRAIN_TEMPLATES)]
+    if task_id in PRIMITIVE_ORDER:
+        return f"{task_id.lower()}__{variant}", "train"
+    if task_id in SEEN_COMPOSITION_TASKS:
+        if condition in {"A", "C"}:
+            return f"{task_id.lower()}__train_explicit_{variant[-1]}", "train_explicit"
+        if condition == "B":
+            return f"{task_id.lower()}__train_indirect_{variant[-1]}", "train_indirect"
+    raise ValueError(f"Task {task_id!r} is not a trained Phase 8 family.")
+
+
+def _state_training_answer(task_id: str, context: Mapping[str, Any], state_mask: int) -> str:
+    try:
+        value = execute_task(task_id, context, state_from_mask(state_mask))
+    except MissingCapabilityError:
+        return UNABLE_RESPONSE
+    return _canonical_json(value)
+
+
+def _validate_training_record(record: SplitRecord, condition: str, state_mask: int) -> None:
+    if record.split != _TRAINING_SPLIT:
+        raise ValueError("Training corpus records must have training split metadata.")
+    _reject_memory_search_training_record(record)
+    expected = _training_record(
+        "A" if condition == "C" else condition,
+        state_mask,
+        record.task_id,
+        record.record_index,
+        None,
+    )
+    for field_name in (
+        "task_index",
+        "template_id",
+        "payload_id",
+        "program_dict",
+        "canonical_context",
+        "normalized_payload",
+        "prompt",
+        "style",
+    ):
+        if getattr(record, field_name) != getattr(expected, field_name):
+            raise ValueError(f"Training record {field_name} does not match the canonical generated record.")
+    context = _parse_canonical_context(record.canonical_context)
+    if condition in {"A", "B"}:
+        expected_answer = _state_training_answer(record.task_id, context, state_mask)
+    elif record.task_id in PRIMITIVE_ORDER:
+        expected_answer = _state_training_answer(record.task_id, context, state_mask)
+    else:
+        expected_answer = canonical_answer(record.task_id, context) if record.answer != UNABLE_RESPONSE else UNABLE_RESPONSE
+    if record.answer != expected_answer:
+        raise ValueError("Training record response target does not match the declared corpus condition.")
+    leak_check_model_text(record.prompt)
+    leak_check_model_text(record.answer)
+
+
+def _randomized_control_labels(seed: int, count: int) -> Mapping[tuple[int, str, int], int]:
+    columns = tuple(
+        (task_id, record_index)
+        for task_id in SEEN_COMPOSITION_TASKS
+        for record_index in range(count)
+    )
+    column_masks = [
+        sum(
+            int(_can_execute_task(state_mask, task_id)) << state_offset
+            for state_offset, state_mask in enumerate(STATE_MASKS)
+        )
+        for task_id, _ in columns
+    ]
+    cell_count = len(STATE_MASKS) * len(columns)
+    accepted_target = 10 * cell_count
+    proposal_limit = 1000 * cell_count
+    rng = random.Random(700000 + seed)
+    accepted = 0
+    proposals = 0
+    while accepted < accepted_target and proposals < proposal_limit:
+        proposals += 1
+        row_a = rng.randrange(len(STATE_MASKS))
+        row_b = rng.randrange(len(STATE_MASKS) - 1)
+        if row_b >= row_a:
+            row_b += 1
+        col_a = rng.randrange(len(columns))
+        col_b = rng.randrange(len(columns) - 1)
+        if col_b >= col_a:
+            col_b += 1
+        bit_aa = (column_masks[col_a] >> row_a) & 1
+        bit_ab = (column_masks[col_b] >> row_a) & 1
+        bit_ba = (column_masks[col_a] >> row_b) & 1
+        bit_bb = (column_masks[col_b] >> row_b) & 1
+        diagonal = bit_aa == bit_bb
+        off_diagonal = bit_ab == bit_ba
+        if not (diagonal and off_diagonal and bit_aa != bit_ab):
+            continue
+        row_a_bit = 1 << row_a
+        row_b_bit = 1 << row_b
+        column_masks[col_a] ^= row_a_bit | row_b_bit
+        column_masks[col_b] ^= row_a_bit | row_b_bit
+        accepted += 1
+    if accepted != accepted_target:
+        raise ValueError(
+            "Condition C randomized control failed to reach accepted-switch target: "
+            f"{accepted} accepted within {proposals} proposals; target {accepted_target}, limit {proposal_limit}."
+        )
+    return MappingProxyType(
+        {
+            (state_mask, task_id, record_index): (column_masks[column_offset] >> state_offset) & 1
+            for state_offset, state_mask in enumerate(STATE_MASKS)
+            for column_offset, (task_id, record_index) in enumerate(columns)
+        }
+    )
+
+
+def _can_execute_task(state_mask: int, task_id: str) -> bool:
+    state = state_from_mask(state_mask)
+    return all(state[primitive] for primitive in required_primitives(task_id))
+
+
+def _records_per_family(corpus_size: str) -> int:
+    if corpus_size not in CORPUS_RECORDS_PER_FAMILY:
+        raise ValueError(f"Unknown corpus size {corpus_size!r}; expected base or large.")
+    return CORPUS_RECORDS_PER_FAMILY[corpus_size]
+
+
+def _validate_condition(condition: str) -> None:
+    if condition not in CONDITIONS:
+        raise ValueError(f"Unknown corpus condition {condition!r}; expected A, B, or C.")
+
+
+def _record_bytes(record: SplitRecord) -> bytes:
+    payload = {
+        "split": record.split,
+        "task_id": record.task_id,
+        "task_index": record.task_index,
+        "record_index": record.record_index,
+        "template_id": record.template_id,
+        "payload_id": record.payload_id,
+        "program_dict": record.program_dict,
+        "canonical_context": record.canonical_context,
+        "normalized_payload": record.normalized_payload,
+        "prompt": record.prompt,
+        "answer": record.answer,
+        "style": record.style,
+    }
+    return _canonical_json(payload).encode("utf-8")
+
+
+def _utf8_byte_token_encoder(text: str) -> tuple[int, ...]:
+    return tuple(text.encode("utf-8"))
+
+
+def _length_summary(values: Sequence[int]) -> Mapping[str, float | int | None]:
+    if not values:
+        return MappingProxyType({"min": None, "median": None, "mean": None, "max": None})
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        median = ordered[midpoint]
+    else:
+        median = (ordered[midpoint - 1] + ordered[midpoint]) / 2
+    return MappingProxyType(
+        {
+            "min": ordered[0],
+            "median": median,
+            "mean": sum(ordered) / len(ordered),
+            "max": ordered[-1],
+        }
+    )
+
+
+def _subtract_diagnostics(left: Mapping[str, Any], right: Mapping[str, Any]) -> Mapping[str, Any]:
+    diff: dict[str, Any] = {}
+    for key, left_value in left.items():
+        right_value = right[key]
+        if isinstance(left_value, Mapping):
+            diff[key] = _subtract_diagnostics(left_value, right_value)
+        elif left_value is None or right_value is None:
+            diff[key] = None
+        else:
+            diff[key] = left_value - right_value
+    return MappingProxyType(diff)
 
 
 def _reject_internal_collisions(records: Sequence[SplitRecord]) -> None:
@@ -689,9 +1242,7 @@ def _build_evaluation_probe_pack_unvalidated() -> tuple[EvaluationProbe, ...]:
 
 
 def build_evaluation_probe_pack() -> tuple[EvaluationProbe, ...]:
-    pack = _build_evaluation_probe_pack_unvalidated()
-    validate_evaluation_pack(pack)
-    return pack
+    return _FROZEN_EVALUATION_PROBE_PACK
 
 
 def evaluation_pack_checksum(pack: Sequence[EvaluationProbe]) -> str:
@@ -907,4 +1458,5 @@ def validate_memory_dependency(task_id: str, context: Mapping[str, Any]) -> tupl
     return present_answer, absent_answer
 
 
-EVALUATION_PACK_CHECKSUM = evaluation_pack_checksum(_build_evaluation_probe_pack_unvalidated())
+_FROZEN_EVALUATION_PROBE_PACK = _build_evaluation_probe_pack_unvalidated()
+EVALUATION_PACK_CHECKSUM = evaluation_pack_checksum(_FROZEN_EVALUATION_PROBE_PACK)
