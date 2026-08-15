@@ -46,8 +46,8 @@ The milestone separates four questions:
    the required primitive capabilities?
 3. Does the binary behavioral response matrix remain identifiable, and if so how do
    its fixed and adaptive certificates compare with the ground-truth certificate?
-4. Does coherent composition supervision outperform a token-matched randomized
-   composition control?
+4. Does coherent composition supervision outperform an aggregate-token-histogram-
+   matched randomized composition control?
 
 The unit being certified is a separately trained checkpoint. A contextual agent
 ID or state token is forbidden: a single model conditioned on multiple personas
@@ -553,10 +553,14 @@ state:       all 16 states
 The small/base cell is shared with the core comparison and must not be retrained.
 The full milestone therefore contains `288` unique training runs, not `336`.
 
-The grid is frozen before model outcomes are observed. It is a bounded descriptive
-scale study, not architecture search and not a scaling-law experiment.
+The grid is frozen before Phase 8 scientific outcomes are observed. It is a bounded
+descriptive scale study, not architecture search and not a scaling-law experiment.
+Because both corpus sizes use the same `1500` steps and batch size `64`, the
+base-versus-large comparison is a fixed-compute corpus-diversity comparison: the
+large cell exposes more unique records but fewer average repetitions per record. Do
+not describe it as a data-scaling or increased-training-token result.
 
-### 9.3 Capacity smoke control
+### 9.3 Software overfit smoke control
 
 Before the formal grid, run one source-controlled, non-evidence correctness test that
 checks batch construction and shifted response-only labels. A test-local model must
@@ -567,6 +571,78 @@ scientific artifact.
 
 Failure of this test blocks formal execution. Passing it does not guarantee that the
 formal models will learn primitives or compositions.
+
+### 9.4 Held-out sequence-transduction feasibility control
+
+Before any Phase 8 scientific checkpoint is trained, run a separate non-scientific
+feasibility suite that contains no Phase 8 task ID, DSL program, template, operand,
+payload, or state. It uses the Phase 8 byte tokenizer, small/medium model
+implementations, optimizer family, response-only loss, checkpoint path, and greedy
+generation path.
+
+Use exactly four feasibility families:
+
+1. copy one held-out 16-hex string from a natural-language prompt;
+2. extract one named value from held-out key/value fields and emit its compact JSON
+   string;
+3. map a held-out Boolean statement to canonical JSON `true` or `false`;
+4. emit a compact JSON array from held-out random string operands.
+
+For each family use `512` training records and `64` evaluation records with disjoint
+source-controlled templates and operands. Train both the small and medium
+configurations for exactly `1500` steps with batch size `64` under seeds `0,1,2`.
+Each configuration/seed/family must reach at least `52/64` held-out exact matches.
+Retain per-record generations and counts; aggregate success cannot hide a failing
+family or seed.
+
+The suite is feasibility evidence, not Phase 8 scientific evidence. A failure blocks
+formal training and returns to `main`. Architecture, training budget, tokenizer, or
+generation changes are allowed only in a new source-controlled protocol commit based
+solely on feasibility evidence, followed by fresh-context review; no Phase 8
+scientific corpus or checkpoint may be generated first. Passing the suite establishes
+only basic sequence-transduction capacity and does not guarantee primitive,
+composition, identifiability, or certificate outcomes.
+
+The initial fixed feasibility root is:
+
+```text
+artifacts/phase8_toy_lm_bridge/feasibility_001
+```
+
+It must be generated from clean, committed, independently reviewed source, refuse
+overwrite, and bind its exact configuration, software/hardware environment, raw
+results, retained checkpoints, file inventory, and checksums.
+
+### 9.5 Non-scientific resource benchmark and authorization
+
+After the complete training/evaluation/shard implementation is accepted but before
+formal execution, run two source-controlled dummy-data benchmark fixtures:
+
+```text
+benchmark_small_base
+benchmark_medium_large
+```
+
+Each fixture must exercise the same 16-checkpoint population shape, batch size,
+sequence-length distribution, 1500 optimizer steps per checkpoint, five 512-prompt
+evaluation points, checkpoint publication, status files, raw-generation writing, and
+manifest path as its representative formal shard. Dummy inputs must not reuse or
+reveal Phase 8 scientific outcomes.
+
+Record training and evaluation wall time, CPU time, peak RSS, peak VRAM, checkpoint
+bytes, raw-generation bytes, final artifact bytes, and per-stage breakdown. Report
+measured shard cost and an explicitly parameterized whole-grid projection. A
+proposed safety factor such as `1.25` is not authoritative until `main` freezes it in
+the resource authorization.
+
+Before formal execution, `main` must explicitly bind concurrency and ceilings for
+wall time, GPU-hours, peak VRAM, peak RSS, temporary disk, and final disk in the
+benchmark authorization artifact. A ceiling breach is an operational failure, not a
+scientific outcome. The initial benchmark root is:
+
+```text
+artifacts/phase8_toy_lm_bridge/benchmark_001
+```
 
 ## 10. Behavioral Certificate Analysis
 
@@ -655,6 +731,58 @@ State-identification and full-signature matching must be recomputed independentl
 from raw matrix rows. Behavioral-certificate self-identification is tautological and
 must not be reported as evidence of ground-truth recovery.
 
+For Conditions A and C, record response-target length diagnostics by state and task
+family: total UTF-8 bytes and tokenizer tokens; UTF-8 byte and tokenizer-token
+minimum, median, arithmetic mean, and maximum over all targets; the same statistics
+over positive-answer targets; the canonical `unable` length; and the
+unavailable-record ratio. Also record paired A-minus-C differences for every
+diagnostic. These values diagnose a known unmatched per-state nuisance; they are not
+acceptance gates or permission for post-hoc reweighting or corpus repair.
+
+In addition to the primary `52/64` matrix, reconstruct fixed sensitivity matrices at
+thresholds `32/64`, `48/64`, and `64/64`. For every sensitivity matrix report its
+Hamming distance from the primary matrix, row-collision groups, identifiability,
+fixed-certificate existence or `null` reason, minimum fixed-certificate size, all
+minimum fixed certificates, canonical-set Jaccard overlap with the primary matrix's
+canonical minimum certificate, and minimum/mean/maximum Jaccard over the Cartesian
+product of both all-minimum-certificate families when both are defined. Sensitivity
+thresholds may diagnose fragility but may not replace the primary threshold or be
+selected by outcome.
+
+### 10.4 Predeclared interpretation hierarchy
+
+Interpret results in the following order. These are reporting constraints, not
+acceptance gates:
+
+1. **Primitive readiness.** Always report primitive mastery, primitive false-positive
+   answer rate, and primitive correct-refusal rate, including separate `MEMORY` and
+   `SEARCH` cells. For a held-out-positive state `K`, define
+   `parent_ready(K)` to mean that the primary matrix has both
+   `y_lm(K,MEMORY)=1` and `y_lm(K,SEARCH)=1`. Report held-out-composition outcomes
+   separately for parent-ready and non-parent-ready states. If any held-out-positive
+   state is not parent-ready, a full-population held-out failure is not clean evidence
+   of compositional failure.
+2. **Seen composition.** Always report the exact twelve positive seen-composition
+   cell bits and the declared family metrics. Any broad claim that learned
+   composition was established must be supported by those cells rather than inferred
+   from a pooled score.
+3. **Held-out composition.** Report `MEMORY_SEARCH` only alongside primitive and seen
+   composition results, split by parent readiness and by explicit versus indirect
+   evaluation style. No single held-out score is sufficient on its own.
+4. **Identifiability.** A row collision means only that this frozen probe family does
+   not uniquely identify all sixteen assigned states at that checkpoint. It does not
+   establish absence of latent or alternative structure.
+5. **Certificate comparison.** Compare behavioral and ground-truth certificates only
+   for identifiable matrices. A mismatch is a difference under the frozen task,
+   prompt, threshold, and state population, not evidence about general language-model
+   capability structure.
+
+The unique size-four ground-truth certificate is forced by the full four-primitive
+powerset and the inclusion of primitive probes: each primitive coordinate must be
+distinguished directly. It is a structure-preservation baseline, not a certificate
+compression created by composition and not evidence that composition queries reduce
+the ground-truth certificate.
+
 ## 11. Statistical Semantics
 
 - One complete 16-checkpoint `(condition, scale cell, seed, step)` population is the
@@ -681,7 +809,37 @@ must not be reported as evidence of ground-truth recovery.
 
 ## 12. Required Implementation
 
-Expected package paths:
+### 12.1 Mandatory engineering decomposition
+
+This protocol must not be implemented as one monolithic executor task. The frozen
+subtask handoffs are stored under `phase8/`:
+
+```text
+phase8/Task_010A_DSL_Oracle_and_Probe_Pack.md
+phase8/Task_010B_Corpus_and_Control.md
+phase8/Task_010C_Tokenizer_Model_and_Feasibility.md
+phase8/Task_010D_Training_Checkpoint_and_Evaluator.md
+phase8/Task_010E_Behavioral_Certificate_Integration.md
+phase8/Task_010F_Metrics_and_Aggregation.md
+phase8/Task_010G_Sharded_Runner_and_Provenance.md
+phase8/Task_010H_Resource_Benchmark_and_Formal_Authorization.md
+```
+
+Every subtask uses a fresh-context Spark execution role with model override
+`gpt-5.5` and `fork_turns=none`. The local routing contract names the available model
+identifier exactly; do not invent a separate `gpt-5.5-spark` model slug. Before each
+launch, `main` supplies the accepted prerequisite commit, working directory, allowed
+paths, acceptance criteria, verification commands, and return format from the
+corresponding handoff.
+
+Only one delegated writer may hold the mutation lease. A delegate must stop at its
+handoff boundary, must not implement a later subtask, and must return protocol
+ambiguities rather than making scientific choices. `main` freezes and commits each
+stage, resolves review findings, controls authorization, and launches the next stage
+only from accepted prerequisites. Independent review is required in proportion to
+risk and is never replaced by executor self-review.
+
+### 12.2 Expected implementation paths
 
 ```text
 capability_certificate_lab/lm_bridge/__init__.py
@@ -691,6 +849,8 @@ capability_certificate_lab/lm_bridge/model.py
 capability_certificate_lab/lm_bridge/train.py
 capability_certificate_lab/lm_bridge/evaluator.py
 capability_certificate_lab/lm_bridge/certificate_eval.py
+scripts/phase8_sequence_feasibility.py
+scripts/phase8_resource_benchmark.py
 scripts/phase8_toy_lm_bridge.py
 tests/test_lm_bridge.py
 ```
@@ -739,7 +899,17 @@ Targeted tests must cover at least:
 18. behavioral identifiability, collision, non-ground-truth signature, and
     no-certificate paths;
 19. all-minimum-certificate enumeration and overlap statistics;
-20. independent adaptive-tree reconstruction agreement.
+20. independent adaptive-tree reconstruction agreement;
+21. feasibility-family train/evaluation disjointness, exact per-cell pass/fail
+    handling, retained raw generations, and rejection of every Phase 8 scientific
+    task, template, operand, payload, or state marker;
+22. target-length diagnostics and exact `32/64`, `48/64`, `52/64`, and `64/64`
+    response-matrix sensitivity reconstruction;
+23. fixed shard registry, per-attempt atomic status transitions, retry selection,
+    binding consistency, and refusal to aggregate missing, failed, mixed-source, or
+    mixed-configuration shards;
+24. benchmark resource accounting, whole-grid projection, and rejection of missing
+    or exceeded authorization ceilings.
 
 Run targeted tests first, then:
 
@@ -760,24 +930,71 @@ The initial fixed output root is:
 artifacts/phase8_toy_lm_bridge/formal_001
 ```
 
-The only formal command is:
+The formal root contains exactly eighteen registered shards:
 
 ```text
-CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_toy_lm_bridge.py --device cuda:0 --output-root artifacts/phase8_toy_lm_bridge/formal_001
+core_A_small_base_seed0   core_B_small_base_seed0   core_C_small_base_seed0
+core_A_small_base_seed1   core_B_small_base_seed1   core_C_small_base_seed1
+core_A_small_base_seed2   core_B_small_base_seed2   core_C_small_base_seed2
+scale_A_medium_base_seed0   scale_A_medium_large_seed0   scale_A_small_large_seed0
+scale_A_medium_base_seed1   scale_A_medium_large_seed1   scale_A_small_large_seed1
+scale_A_medium_base_seed2   scale_A_medium_large_seed2   scale_A_small_large_seed2
 ```
 
-Formal execution is permitted only after implementation and tests are committed, an
-independent strict read-only implementation review accepts that exact commit, and an
-unexcluded `git status --short` confirms a clean worktree. The fixed output root must
-not exist and the launcher must refuse overwrite.
+Each shard contains all sixteen states and every one of the five evaluation
+checkpoints for its declared condition, model size, corpus size, and seed. The
+`core_A_small_base_seed*` shard is the shared small/base Condition A cell; it must
+not be retrained in the scale study. The fixed layout is:
+
+```text
+formal_001/
+  manifest.json
+  shards_manifest.json
+  shards/<shard-id>/attempt001/
+  aggregate/
+```
+
+Use only the following parameterized command surface:
+
+```text
+CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_toy_lm_bridge.py prepare --device cuda:0 --output-root artifacts/phase8_toy_lm_bridge/formal_001
+CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_toy_lm_bridge.py run-shard --device cuda:0 --output-root artifacts/phase8_toy_lm_bridge/formal_001 --shard-id <registered-id> --attempt 001
+CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_toy_lm_bridge.py aggregate --output-root artifacts/phase8_toy_lm_bridge/formal_001
+```
+
+`prepare` is permitted only after the software smoke control and all feasibility
+cells pass, the resource benchmark and explicit authorization are accepted, the
+implementation and tests are committed, an independent strict read-only review
+accepts that exact commit, and an unexcluded `git status --short` confirms a clean
+worktree. The fixed output root must not exist and `prepare` must refuse overwrite.
+It atomically locks the source commit, configuration, evaluation-pack checksum,
+eighteen-shard registry, resource authorization, and output root before any shard
+trains.
 
 After generation, the source-cleanliness check may exclude exactly the newly created
 fixed output root and nothing else. No pre-run cleanliness check may use an
 exclusion.
 
-The launcher must write long-running output to job logs and atomically maintain small
-`status.json` and `progress.json` files. It must end with exactly one of `DONE.json`
-or `FAILED.json`. Do not rely on continuous stdout inspection.
+Every shard attempt must write long-running output to job logs and atomically
+maintain small `status.json` and `progress.json` files. It must end with exactly one
+of `DONE.json` or `FAILED.json`. Attempt publication is atomic, existing attempts are
+never overwritten, and monitoring must use the small status files rather than
+continuous stdout inspection.
+
+A transient infrastructure failure may be retried only with the identical accepted
+source and locked configuration, after explicit `main` authorization, in the next
+attempt directory such as `attempt002`; retain the failed attempt and declare the
+selected successful attempt in `shards_manifest.json`. A source, configuration, data,
+evaluation, or semantic defect invalidates every affected formal result. Preserve the
+old root as rejected evidence, repair and review a new source-controlled commit, and
+start a new top-level root such as `formal_002`. Never combine attempts with different
+source commits or configurations.
+
+`aggregate` must accept exactly one declared `DONE` attempt for each of the eighteen
+registered shards and independently verify their source, configuration,
+evaluation-pack, and resource-authorization bindings. Missing, failed, extra,
+mixed-source, or mixed-configuration shards block final aggregation; completed
+shards remain preserved.
 
 The manifest must bind:
 
@@ -799,9 +1016,9 @@ external evidence and require path and SHA-256 binding in the committed manifest
 Checksums establish byte identity only; they do not replace tests or scientific
 review.
 
-If a formal run fails, preserve its root and `FAILED.json`. A rerun requires a new
-source-controlled output root such as `formal_002`; never overwrite, delete, or
-silently resume a failed or accepted run.
+The top-level manifest must bind the selected shard attempts and a complete output
+inventory, excluding only the manifest itself. Sharding is an execution boundary and
+does not change any scientific unit or create additional replicates.
 
 ## 15. Experiment and Acceptance Gates
 
@@ -816,8 +1033,13 @@ The following are implementation/protocol gates and block acceptance on mismatch
 - randomized-control degree, token-statistic, determinism, and changed-relation
   gates;
 - tokenizer, causal model, training, save/load, evaluator, and threshold tests;
+- the software smoke control and every frozen feasibility family/model/seed cell;
+- accepted resource benchmark evidence and explicit concurrency, time, memory, and
+  disk ceilings before `prepare`;
 - complete raw output for all 288 unique runs and all frozen evaluation steps, unless
   a preserved failed run stops the milestone for an explicit decision;
+- exactly eighteen registered, binding-consistent successful shards and one accepted
+  aggregate, with retry or invalidation semantics followed exactly;
 - response matrices reconstructed from raw generations;
 - exact/adaptive validator and independent reconstruction agreement;
 - correct seed/state/checkpoint denominators and undefined-metric handling;
@@ -842,7 +1064,13 @@ steps, model sizes, or claims after observing formal outcomes.
 Expected accepted evidence paths:
 
 ```text
-artifacts/phase8_toy_lm_bridge/formal_001/summary.json
+artifacts/phase8_toy_lm_bridge/feasibility_001/summary.json
+artifacts/phase8_toy_lm_bridge/feasibility_001/manifest.json
+artifacts/phase8_toy_lm_bridge/benchmark_001/summary.json
+artifacts/phase8_toy_lm_bridge/benchmark_001/manifest.json
+artifacts/phase8_toy_lm_bridge/benchmark_001/authorization.json
+artifacts/phase8_toy_lm_bridge/formal_001/shards_manifest.json
+artifacts/phase8_toy_lm_bridge/formal_001/aggregate/summary.json
 artifacts/phase8_toy_lm_bridge/formal_001/manifest.json
 phase8_report.md
 Capability_Certificate_Research_Progress_Summary.md
@@ -850,18 +1078,23 @@ Capability_Certificate_Research_Progress_Summary.md
 
 Phase 8 is complete only when:
 
-1. DSL programs deterministically generate leak-checked A/B/C training corpora and a
+1. The software smoke control and every held-out sequence-transduction feasibility
+   cell pass from accepted, clean, committed source.
+2. A resource benchmark is complete and `main` has frozen explicit concurrency,
+   time, memory, and disk ceilings.
+3. DSL programs deterministically generate leak-checked A/B/C training corpora and a
    held-out probe pack.
-2. Toy causal models train and evaluate reproducibly under the frozen configuration.
-3. Primitive, seen-composition, and held-out-composition probes retain raw outputs.
-4. Every valid behavioral matrix is analyzed with independent fixed/adaptive
+4. Toy causal models train and evaluate reproducibly under the frozen configuration.
+5. Primitive, seen-composition, and held-out-composition probes retain raw outputs.
+6. Every valid behavioral matrix is analyzed with independent fixed/adaptive
    certificate checks, while non-identifiable matrices are reported without a fake
    certificate.
-5. Structured versus randomized and scale-grid results are complete for all seeds or
-   the milestone stops with preserved failure evidence and an explicit decision.
-6. The report distinguishes protocol gates, empirical outcomes, unsupported
+7. All eighteen shards and the binding-consistent aggregate are complete for every
+   frozen condition and scale cell, or the milestone stops with preserved failure
+   evidence and an explicit decision.
+8. The report distinguishes protocol gates, empirical outcomes, unsupported
    hypotheses, and limitations.
-7. An independent fresh-context final scientific review finds no unresolved
+9. An independent fresh-context final scientific review finds no unresolved
    correctness, leakage, control-validity, provenance, statistical, or overclaiming
    finding.
 
@@ -887,12 +1120,26 @@ The report must state at least:
   explicit and indirect composition-template allocation;
 - the random control preserves declared aggregate statistics but does not identify a
   general causal effect of language structure;
+- Condition A versus C does not match response-target identities or lengths within
+  every state; the frozen target-length diagnostics expose rather than remove this
+  limitation;
+- the base-versus-large comparison holds optimizer steps and batch size fixed and is
+  a corpus-diversity comparison, not a data-scaling or increased-training-token
+  result;
+- the ground-truth size-four certificate is forced by the full primitive powerset
+  and primitive probes; it is not composition-induced certificate compression;
+- held-out composition is interpreted only after primitive readiness and seen
+  composition, with parent-ready and evaluation-style strata reported separately;
 - the primary response matrix depends on a predeclared mastery threshold;
+- sensitivity thresholds diagnose threshold fragility but never replace the primary
+  `52/64` result;
 - mastery and false-positive answer rates are stratified by `y_gt`; pooled all-state
   answer-success values reflect capability prevalence and are not called accuracy;
 - one certificate query is a 64-prompt task-family battery rather than one model
   generation;
 - three seeds and repeated probes do not justify population-level significance;
+- feasibility and resource benchmarks are non-scientific controls, and sharding does
+  not create scientific replicates;
 - a recovered certificate describes only this frozen probe family and state
   population;
 - success does not establish real-LLM capability structure, and failure does not show
@@ -919,12 +1166,17 @@ The reviewer must audit:
 - identity and explicit/indirect balance of the single evaluation probe pack across
   conditions, states, seeds, scale cells, and checkpoints;
 - feasibility and fairness of the degree-preserving random control;
-- tokenizer/model/training sufficiency without architecture search;
+- tokenizer/model/training sufficiency without architecture search, including the
+  held-out feasibility suite and its frozen repair boundary;
 - response threshold, stratified raw rates, error, regret, overlap,
-  state-identification, paired-null aggregation, and query-unit metrics;
+  state-identification, paired-null aggregation, target-length diagnostics,
+  sensitivity matrices, interpretation hierarchy, and query-unit metrics;
 - seed, state, probe, checkpoint, and scale denominators;
 - whether any empirical hypothesis has leaked into an acceptance gate;
-- artifact sufficiency and Git/checksum provenance;
+- eighteen-shard completeness, retry versus invalidation semantics, resource
+  authorization, artifact sufficiency, and Git/checksum provenance;
+- the forced ground-truth-certificate scope and absence of composition-compression
+  overclaiming;
 - scope discipline and scientific overclaiming.
 
 Verdict must be `ACCEPT` or `REJECT`. Resolve every confirmed finding in a new commit
@@ -935,15 +1187,28 @@ and re-review the repaired handoff before implementation begins.
 Return to `main` at each later gate:
 
 ```text
-Frozen commit or range:
+Scope completed:
+Prerequisite commit used:
 Changed paths:
+Scientific contract changes:
+Engineering-only changes:
+Tests run and exact results:
+New artifacts:
+Unresolved decisions:
 Protocol deviations:
-Tests and exact results:
-Formal command and source commit:
-Artifacts and provenance:
-Behavioral matrix status:
-Certificate outcomes:
-Hypotheses supported or unsupported:
-Independent review verdict and findings:
-Remaining limitations or blockers:
+Resource observations:
+Independent review required:
+Recommended next authorized step:
+```
+
+A blocked stage returns:
+
+```text
+Problem:
+Minimal reproduction:
+Evidence:
+Likely cause:
+Scientific or engineering classification:
+Decision required from main:
+Work explicitly not attempted:
 ```
