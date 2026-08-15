@@ -70,6 +70,7 @@ _COMPOSITION_INDIRECT_TEMPLATES: tuple[str, ...] = (
 _TRAIN_TEMPLATES: tuple[str, ...] = ("train_a", "train_b", "train_c", "train_d")
 _EVALUATION_SPLIT = "evaluation"
 _TRAINING_SPLIT = "training"
+_MEMORY_SEARCH_TEMPLATE_PREFIX = "memory_search__"
 
 _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
@@ -618,8 +619,7 @@ def validate_split_disjointness(
 ) -> None:
     by_task: dict[str, dict[str, list[SplitRecord]]] = defaultdict(lambda: {"training": [], "evaluation": []})
     for record in training_records:
-        if record.task_id == "MEMORY_SEARCH":
-            raise ValueError("MEMORY_SEARCH is the held-out composition and cannot appear in training.")
+        _reject_memory_search_training_record(record)
         by_task[record.task_id]["training"].append(record)
     for record in evaluation_records:
         by_task[record.task_id]["evaluation"].append(record)
@@ -643,6 +643,16 @@ def validate_split_disjointness(
             continue
         _reject_overlap(task_id, "canonical_context", (r.canonical_context for r in train), (r.canonical_context for r in evaluation))
         _reject_overlap(task_id, "normalized_payload", (r.normalized_payload for r in train), (r.normalized_payload for r in evaluation))
+
+
+def _reject_memory_search_training_record(record: SplitRecord) -> None:
+    error = "MEMORY_SEARCH is the held-out composition and cannot appear in training."
+    if record.task_id == "MEMORY_SEARCH":
+        raise ValueError(error)
+    if _canonical_json(record.program_dict) == _canonical_json(program_dict("MEMORY_SEARCH")):
+        raise ValueError(error)
+    if record.template_id.startswith(_MEMORY_SEARCH_TEMPLATE_PREFIX):
+        raise ValueError(error)
 
 
 def _reject_overlap(task_id: str, label: str, left: Iterable[Any], right: Iterable[Any]) -> None:

@@ -112,6 +112,24 @@ def test_split_disjointness_rejects_tampered_training_memory_search_record() -> 
         cg.validate_split_disjointness(tuple(train), evaluation)
 
 
+def test_split_disjointness_rejects_tampered_training_memory_search_program_dict() -> None:
+    train = list(cg.build_split_records("training", "MEMORY", 2))
+    train[0] = replace(train[0], program_dict=cg.program_dict("MEMORY_SEARCH"))
+    evaluation = cg.build_split_records("evaluation", "MEMORY", 2)
+
+    with pytest.raises(ValueError, match="held-out composition"):
+        cg.validate_split_disjointness(tuple(train), evaluation)
+
+
+def test_split_disjointness_rejects_tampered_training_memory_search_template_id() -> None:
+    train = list(cg.build_split_records("training", "MEMORY", 2))
+    train[0] = replace(train[0], template_id="memory_search__train_a")
+    evaluation = cg.build_split_records("evaluation", "MEMORY", 2)
+
+    with pytest.raises(ValueError, match="held-out composition"):
+        cg.validate_split_disjointness(tuple(train), evaluation)
+
+
 @pytest.mark.parametrize("task_id", ("MEMORY", "SEARCH", "FILTER", "CONDITION"))
 def test_primitive_train_and_evaluation_templates_use_distinct_phrasings(task_id: str) -> None:
     context = cg.context_for_payload(task_id, "evaluation", 0)
