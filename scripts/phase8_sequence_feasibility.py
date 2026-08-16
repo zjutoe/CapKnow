@@ -43,8 +43,18 @@ BATCH_SIZE = 64
 PASS_THRESHOLD = 52
 ROOT_RE = re.compile(r"^feasibility_(\d{3})$")
 SELECTION_RE = re.compile(r"^feasibility_selection_(\d{3})\.json$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+ARTIFACT_PARENT = REPO_ROOT / "artifacts" / "phase8_toy_lm_bridge"
 HEX_OPERAND_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9a-f]{16})(?![0-9A-Fa-f])", re.IGNORECASE)
-NAMED_VALUE_RE = re.compile(r"\b(?:red|blue|green|silver)-[te][0-9a-f]{8}\b", re.IGNORECASE)
+NAMED_VALUE_KEYS_BY_SPLIT = {
+    "train": ("red", "blue", "green", "silver"),
+    "eval": ("amber", "violet", "teal", "bronze"),
+}
+NAMED_VALUE_KEY_RE = re.compile(r"\b(?:red|blue|green|silver|amber|violet|teal|bronze)\b", re.IGNORECASE)
+NAMED_VALUE_RE = re.compile(
+    r"\b(?:red|blue|green|silver|amber|violet|teal|bronze)-[te][0-9a-f]{8}\b",
+    re.IGNORECASE,
+)
 ARRAY_ITEM_RE = re.compile(r"\bs[te][0-9a-f]{8}\b", re.IGNORECASE)
 ACCEPTED_INDEPENDENT_REVIEW_VERDICT = "ACCEPT"
 
@@ -63,6 +73,32 @@ SCIENTIFIC_MARKERS = (
     "SEARCH",
     "FILTER",
     "CONDITION",
+)
+SCIENTIFIC_PROMPT_SNIPPETS = (
+    "A recorded claim has value true. Write that Boolean in compact JSON.",
+    "A recorded claim has value false. Write that Boolean in compact JSON.",
+    "state 0101",
+    "graph A->B",
+    "seed 123",
+    "model id 7",
+    "prerequisite rule table",
+)
+SCIENTIFIC_LEAK_PATTERNS = (
+    re.compile(
+        r"\b(?:MEMORY|SEARCH|FILTER|CONDITION|MEMORY_FILTER|FILTER_CONDITION|SEARCH_CONDITION|MEMORY_SEARCH)\b"
+    ),
+    *(
+        re.compile(pattern, re.IGNORECASE)
+        for pattern in (
+            r"\b(?:primitive|capability|certificate|knowledge state|graph|prerequisite)\b",
+            r"\brule\s+tables?\b",
+            r"\b(?:state|model)\s*(?:id|ids|[0-9])\b",
+            r"\bseed\s+[0-9]+\b",
+            r"\bstate\s+[01]{4}\b",
+            r"[A-Z]\s*\+\s*[A-Z]\s*->\s*[A-Z]",
+            r"->",
+        )
+    ),
 )
 
 GENERIC_JSON_MARKERS = frozenset({"true", "false", "null", "unable", "[]", "{}"})
@@ -139,15 +175,33 @@ class FeasibilityRecord:
     semantic_values: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SourceSnapshot:
+    commit: str
+    status_lines: tuple[str, ...]
+    ignored_inputs: tuple[dict[str, object], ...]
+
+
+class SourceChangedError(RuntimeError):
+    pass
+
+
 def compact_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def reject_scientific_markers(text: str) -> None:
+    cg.leak_check_model_text(text)
+    for pattern in SCIENTIFIC_LEAK_PATTERNS:
+        if pattern.search(text):
+            raise ValueError(f"Feasibility text contains forbidden Phase 8 scientific metadata: {text!r}.")
     upper_text = text.upper()
     for marker in SCIENTIFIC_MARKERS:
         if marker.upper() in upper_text:
             raise ValueError(f"Feasibility text contains forbidden Phase 8 scientific marker: {marker!r}.")
+    for marker in SCIENTIFIC_PROMPT_SNIPPETS:
+        if marker in text:
+            raise ValueError(f"Feasibility text contains forbidden Phase 8 scientific prompt marker: {marker!r}.")
     for marker in phase8_scientific_identity_markers():
         if marker in text:
             raise ValueError(f"Feasibility text contains forbidden Phase 8 scientific identity marker: {marker!r}.")
@@ -204,6 +258,7 @@ def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
         if not isinstance(decoded, str):
             raise ValueError("named_value_json answers must be JSON strings.")
         values.add(decoded.casefold())
+        values.update(value.casefold() for value in NAMED_VALUE_KEY_RE.findall(record.prompt))
         values.update(value.casefold() for value in NAMED_VALUE_RE.findall(prompt_and_answer))
     elif record.family == "array_json":
         decoded = json.loads(record.answer)
@@ -311,7 +366,7 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
         answer = value
         semantic_values = (value,)
     elif family == "named_value_json":
-        keys = ("red", "blue", "green", "silver")
+        keys = NAMED_VALUE_KEYS_BY_SPLIT[split]
         target = keys[index % len(keys)]
         fields = {key: f"{key}-{split_code}{rng.getrandbits(32):08x}" for key in keys}
         field_text = "; ".join(f"{key}={fields[key]}" for key in keys)
@@ -319,7 +374,7 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
         answer = compact_json(fields[target])
         semantic_values = tuple(fields[key] for key in keys)
     elif family == "boolean_json":
-        split_offset = 0 if split == "train" else 1000
+        split_offset = 0 if split == "train" else 2000
         left = split_offset + rng.randrange(1, 200)
         right = split_offset + rng.randrange(1, 200)
         truth = left <= right if index % 2 == 0 else left > right
@@ -366,7 +421,12 @@ def evaluate_model(model, records: Sequence[FeasibilityRecord], tokenizer: ByteT
         prefix_tensor = torch.tensor([prefix], dtype=torch.long, device=device)
         generated = model.greedy_decode(prefix_tensor)
         full_ids = tuple(int(token) for token in generated[0].detach().cpu().tolist())
-        decoded = tokenizer.decode_generated_response(full_ids)
+        generation_error = None
+        try:
+            decoded: str | None = tokenizer.decode_generated_response(full_ids)
+        except (UnicodeDecodeError, ValueError) as exc:
+            decoded = None
+            generation_error = f"{type(exc).__name__}: {exc}"
         match = decoded == record.answer
         correct += int(match)
         rows.append(
@@ -378,6 +438,9 @@ def evaluate_model(model, records: Sequence[FeasibilityRecord], tokenizer: ByteT
                 "prompt": record.prompt,
                 "expected": record.answer,
                 "generated": decoded,
+                "raw_token_ids": list(full_ids),
+                "invalid_generation": generation_error is not None,
+                "generation_error": generation_error,
                 "exact_match": match,
             }
         )
@@ -406,9 +469,36 @@ def validate_cell_counts(cells: Sequence[dict[str, object]]) -> None:
             raise ValueError("Feasibility exact_matches must satisfy 0 <= exact_matches <= eval_count.")
         if exact_matches < PASS_THRESHOLD or passed_value is not True:
             raise ValueError("Every feasibility cell must pass the independent 52/64 requirement.")
+        parameter_count = require_exact_int(cell.get("parameter_count"), "parameter_count")
+        if parameter_count != expected_parameter_count(model_size):
+            raise ValueError("Feasibility cell parameter_count does not match the frozen model configuration.")
+        require_canonical_relative_path(cell.get("generations_path"), "generations_path")
+        require_canonical_relative_path(cell.get("checkpoint_path"), "checkpoint_path")
     missing = expected_keys - seen
     if missing:
         raise ValueError(f"Missing feasibility cells: {sorted(missing)!r}.")
+
+
+@lru_cache(maxsize=None)
+def expected_parameter_count(model_size: str) -> int:
+    if model_size not in MODEL_SIZES:
+        raise ValueError(f"Unknown model_size for parameter_count validation: {model_size!r}.")
+    return build_model(model_size).parameter_count
+
+
+def frozen_configuration() -> dict[str, object]:
+    return {
+        "families": list(FAMILIES),
+        "model_sizes": list(MODEL_SIZES),
+        "seeds": list(SEEDS),
+        "train_records_per_family": TRAIN_RECORDS_PER_FAMILY,
+        "eval_records_per_family": EVAL_RECORDS_PER_FAMILY,
+        "training_steps": TRAINING_STEPS,
+        "batch_size": BATCH_SIZE,
+        "pass_threshold": PASS_THRESHOLD,
+        "context_window_tokens": ByteTokenizer.max_sequence_length,
+        "generation_window_tokens": ByteTokenizer.max_generated_tokens,
+    }
 
 
 def require_exact_int(value: object, field_name: str) -> int:
@@ -431,7 +521,7 @@ def require_exact_str(value: object, field_name: str) -> str:
 
 def run_suite(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> None:
     validate_new_root(root, predecessor_roots, predecessor_selections)
-    validate_source_clean(root, predecessor_roots, predecessor_selections)
+    source_snapshot = capture_source_provenance(root, predecessor_roots, predecessor_selections)
     temp_root = root.with_name(root.name + ".tmp")
     if temp_root.exists():
         raise FileExistsError(f"Temporary feasibility root already exists: {temp_root}")
@@ -489,9 +579,13 @@ def run_suite(root: Path, predecessor_roots: Sequence[Path], predecessor_selecti
                     )
         validate_cell_counts(cells)
         terminal_status = "DONE" if all(cell["passed"] for cell in cells) else "FAILED"
-        write_terminal(temp_root, terminal_status, cells, predecessor_roots, predecessor_selections)
+        verify_source_unchanged(source_snapshot)
+        write_terminal(temp_root, terminal_status, cells, predecessor_roots, predecessor_selections, source_snapshot=source_snapshot)
         os.replace(temp_root, root)
+    except SourceChangedError:
+        raise
     except Exception as exc:
+        verify_source_unchanged(source_snapshot)
         write_terminal(
             temp_root,
             "FAILED",
@@ -499,6 +593,7 @@ def run_suite(root: Path, predecessor_roots: Sequence[Path], predecessor_selecti
             predecessor_roots,
             predecessor_selections,
             failure=repr(exc),
+            source_snapshot=source_snapshot,
         )
         os.replace(temp_root, root)
         raise
@@ -510,6 +605,7 @@ def validate_new_root(
     predecessor_selections: Sequence[Path] = (),
 ) -> None:
     require_canonical_path_string(str(root), "root", ROOT_RE)
+    require_artifact_location(root, "root", ROOT_RE)
     root_number = feasibility_root_number(root)
     previous_numbers = [feasibility_root_number(path) for path in predecessor_roots]
     for predecessor_root in predecessor_roots:
@@ -517,7 +613,13 @@ def validate_new_root(
     for selection in predecessor_selections:
         data = validate_selection_record(selection)
         previous_numbers.append(feasibility_root_number(Path(str(data["selected_root"]))))
-    expected_number = max(previous_numbers, default=0) + 1
+    expected_previous_numbers = list(range(1, root_number))
+    if sorted(previous_numbers) != expected_previous_numbers:
+        raise ValueError(
+            f"Feasibility predecessor roots must be complete and continuous before {root.name!r}; "
+            f"expected {expected_previous_numbers!r}, got {sorted(previous_numbers)!r}."
+        )
+    expected_number = len(expected_previous_numbers) + 1
     if root_number != expected_number:
         raise ValueError(
             f"Feasibility root must use the next numbered root feasibility_{expected_number:03d}; "
@@ -534,7 +636,37 @@ def feasibility_root_number(root: Path) -> int:
     return int(match.group(1))
 
 
-def validate_source_clean(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> None:
+def require_artifact_location(path: Path, field_name: str, basename_pattern: re.Pattern[str]) -> None:
+    require_canonical_path_string(str(path), field_name, basename_pattern)
+    parent_path = ARTIFACT_PARENT if ARTIFACT_PARENT.is_absolute() else REPO_ROOT / ARTIFACT_PARENT
+    artifact_path = path if path.is_absolute() else REPO_ROOT / path
+    reject_existing_symlink_component(parent_path, f"{field_name} artifact parent")
+    reject_existing_symlink_component(artifact_path, field_name)
+    parent = parent_path.resolve(strict=False)
+    resolved = artifact_path.resolve(strict=False)
+    if resolved.parent != parent:
+        raise ValueError(f"{field_name} must be located directly under {ARTIFACT_PARENT.as_posix()}.")
+
+
+def reject_existing_symlink_component(path: Path, field_name: str) -> None:
+    absolute = path if path.is_absolute() else REPO_ROOT / path
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current = current / part
+        if current.exists() and current.is_symlink():
+            raise ValueError(f"{field_name} must not contain symlink path components.")
+
+
+def validate_source_clean(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> SourceSnapshot:
+    return capture_source_provenance(root, predecessor_roots, predecessor_selections)
+
+
+def capture_source_provenance(
+    root: Path,
+    predecessor_roots: Sequence[Path],
+    predecessor_selections: Sequence[Path],
+) -> SourceSnapshot:
+    require_artifact_location(root, "root", ROOT_RE)
     allowed = source_clean_allowed_paths(predecessor_roots, predecessor_selections)
     status = subprocess.run(
         ["git", "status", "--porcelain=v1", "--untracked-files=all"],
@@ -550,6 +682,64 @@ def validate_source_clean(root: Path, predecessor_roots: Sequence[Path], predece
             raise RuntimeError(f"Tracked or staged source change blocks feasibility run: {line}")
         if candidate not in allowed:
             raise RuntimeError(f"Untracked file is not an exact supplied predecessor/root binding: {line}")
+    commit = git_output(["git", "rev-parse", "HEAD"])
+    validate_git_sha(commit, "source_commit")
+    ignored_inputs = ignored_source_inputs()
+    if ignored_inputs:
+        paths = ", ".join(str(row["path"]) for row in ignored_inputs[:5])
+        suffix = " ..." if len(ignored_inputs) > 5 else ""
+        raise RuntimeError(f"Ignored executable source input blocks feasibility run: {paths}{suffix}")
+    return SourceSnapshot(
+        commit=commit,
+        status_lines=tuple(status),
+        ignored_inputs=(),
+    )
+
+
+def verify_source_unchanged(snapshot: SourceSnapshot) -> None:
+    current = git_output(["git", "rev-parse", "HEAD"])
+    if current != snapshot.commit:
+        raise SourceChangedError("Source HEAD changed during feasibility run before terminal publication.")
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.splitlines()
+    if tuple(status) != snapshot.status_lines:
+        raise SourceChangedError("Source worktree status changed during feasibility run before terminal publication.")
+    if ignored_source_inputs() != snapshot.ignored_inputs:
+        raise SourceChangedError("Ignored executable source inputs changed during feasibility run before terminal publication.")
+
+
+def ignored_source_inputs() -> tuple[dict[str, object], ...]:
+    rows: list[dict[str, object]] = []
+    completed = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain=v1",
+            "--ignored",
+            "--untracked-files=all",
+            "capability_certificate_lab",
+            "scripts",
+        ],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    for line in completed.stdout.splitlines():
+        if not line.startswith("!! "):
+            continue
+        rel = line[3:]
+        path = Path(rel)
+        if "__pycache__" not in path.parts and path.suffix not in {".py", ".pyc", ".pyo", ".so"}:
+            continue
+        resolved = path.resolve()
+        if not resolved.is_file():
+            continue
+        rows.append({"path": path.as_posix(), "sha256": file_sha256(resolved), "bytes": resolved.stat().st_size})
+    return tuple(sorted(rows, key=lambda row: str(row["path"])))
 
 
 def source_clean_allowed_paths(predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> set[Path]:
@@ -563,6 +753,8 @@ def source_clean_allowed_paths(predecessor_roots: Sequence[Path], predecessor_se
 
 def inventory_bound_root_paths(root: Path) -> set[Path]:
     require_canonical_path_string(str(root), "predecessor_root.path", ROOT_RE)
+    require_artifact_location(root, "predecessor_root.path", ROOT_RE)
+    validate_feasibility_root_artifacts(root, require_passing=False)
     terminal, _terminal_data, manifest, _manifest_sha = load_terminal_binding(root)
     manifest_data = json.loads(manifest.read_text())
     file_inventory = manifest_data.get("file_inventory")
@@ -578,7 +770,10 @@ def inventory_bound_root_paths(root: Path) -> set[Path]:
         if rel_path in seen_paths:
             raise ValueError("Predecessor manifest file_inventory must not contain duplicate paths.")
         seen_paths.add(rel_path)
-        candidate = (root / rel_path).resolve()
+        raw_candidate = root / rel_path
+        if raw_candidate.is_symlink():
+            raise ValueError("Predecessor manifest file_inventory must not bind symlink files.")
+        candidate = raw_candidate.resolve()
         if root_resolved not in candidate.parents:
             raise ValueError("Predecessor manifest file_inventory path escapes its root.")
         if not candidate.is_file():
@@ -602,23 +797,20 @@ def build_manifest(
     predecessor_selections: Sequence[Path],
     terminal_status: str,
     failure: str | None = None,
+    source_snapshot: SourceSnapshot | None = None,
 ) -> dict[str, object]:
-    source_commit = git_output(["git", "rev-parse", "HEAD"])
+    source_snapshot = source_snapshot or unchecked_source_snapshot()
     return {
         "protocol": "phase8_sequence_feasibility",
         "terminal_status": terminal_status,
         "failure": failure,
-        "source_commit": source_commit,
-        "configuration": {
-            "families": FAMILIES,
-            "model_sizes": MODEL_SIZES,
-            "seeds": SEEDS,
-            "train_records_per_family": TRAIN_RECORDS_PER_FAMILY,
-            "eval_records_per_family": EVAL_RECORDS_PER_FAMILY,
-            "training_steps": TRAINING_STEPS,
-            "batch_size": BATCH_SIZE,
-            "pass_threshold": PASS_THRESHOLD,
+        "source_commit": source_snapshot.commit,
+        "source_provenance": {
+            "commit": source_snapshot.commit,
+            "status_lines": list(source_snapshot.status_lines),
+            "ignored_inputs": list(source_snapshot.ignored_inputs),
         },
+        "configuration": frozen_configuration(),
         "environment": {
             "python": sys.version,
             "platform": platform.platform(),
@@ -636,10 +828,19 @@ def build_manifest(
 
 
 def gpu_driver_version() -> str | None:
-    driver = getattr(torch.version, "driver", None)
-    if driver is None:
+    if not torch.cuda.is_available():
         return None
-    return str(driver)
+    completed = subprocess.run(
+        ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        return None
+    first_line = completed.stdout.strip().splitlines()
+    return first_line[0].strip() if first_line else None
 
 
 def build_summary(
@@ -649,27 +850,20 @@ def build_summary(
     terminal_status: str,
     *,
     failure: str | None = None,
+    source_snapshot: SourceSnapshot | None = None,
 ) -> dict[str, object]:
-    source_commit = git_output(["git", "rev-parse", "HEAD"])
+    source_snapshot = source_snapshot or unchecked_source_snapshot()
     passed_cells = sum(1 for cell in cells if cell.get("passed") is True)
     return {
         "protocol": "phase8_sequence_feasibility",
         "terminal_status": terminal_status,
         "failure": failure,
         "source": {
-            "commit": source_commit,
+            "commit": source_snapshot.commit,
             "script": "scripts/phase8_sequence_feasibility.py",
+            "ignored_inputs": list(source_snapshot.ignored_inputs),
         },
-        "configuration": {
-            "families": FAMILIES,
-            "model_sizes": MODEL_SIZES,
-            "seeds": SEEDS,
-            "train_records_per_family": TRAIN_RECORDS_PER_FAMILY,
-            "eval_records_per_family": EVAL_RECORDS_PER_FAMILY,
-            "training_steps": TRAINING_STEPS,
-            "batch_size": BATCH_SIZE,
-            "pass_threshold": PASS_THRESHOLD,
-        },
+        "configuration": frozen_configuration(),
         "cells": list(cells),
         "summary": {
             "total_cells": len(cells),
@@ -690,14 +884,30 @@ def write_terminal(
     predecessor_selections: Sequence[Path],
     *,
     failure: str | None = None,
+    source_snapshot: SourceSnapshot | None = None,
 ) -> None:
     if terminal_status not in {"DONE", "FAILED"}:
         raise ValueError(f"Unknown terminal status: {terminal_status!r}.")
     write_json(
         root / "summary.json",
-        build_summary(cells, predecessor_roots, predecessor_selections, terminal_status, failure=failure),
+        build_summary(
+            cells,
+            predecessor_roots,
+            predecessor_selections,
+            terminal_status,
+            failure=failure,
+            source_snapshot=source_snapshot,
+        ),
     )
-    manifest = build_manifest(root, cells, predecessor_roots, predecessor_selections, terminal_status, failure)
+    manifest = build_manifest(
+        root,
+        cells,
+        predecessor_roots,
+        predecessor_selections,
+        terminal_status,
+        failure,
+        source_snapshot=source_snapshot,
+    )
     manifest_path = root / "manifest.json"
     write_json(manifest_path, manifest)
     manifest_sha = file_sha256(manifest_path)
@@ -715,6 +925,8 @@ def write_terminal(
 
 def terminal_binding(root: Path) -> dict[str, object]:
     require_canonical_path_string(str(root), "predecessor_root.path", ROOT_RE)
+    require_artifact_location(root, "predecessor_root.path", ROOT_RE)
+    validate_feasibility_root_artifacts(root, require_passing=False)
     terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
     return {
         "path": str(root),
@@ -748,8 +960,122 @@ def load_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, st
     return terminal, terminal_data, manifest, manifest_sha
 
 
+def validate_feasibility_root_artifacts(root: Path, *, require_passing: bool) -> None:
+    require_artifact_location(root, "selected_root" if require_passing else "predecessor_root.path", ROOT_RE)
+    if not root.is_dir():
+        raise ValueError(f"Feasibility root is not a directory: {root}")
+    terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
+    manifest_data = json.loads(manifest.read_text())
+    summary = root / "summary.json"
+    if not summary.is_file():
+        raise ValueError("Feasibility root must contain summary.json.")
+    summary_data = json.loads(summary.read_text())
+
+    if require_passing and terminal.stem != "DONE":
+        raise ValueError("Selection record must bind a passing DONE root.")
+    if manifest_data.get("protocol") != "phase8_sequence_feasibility":
+        raise ValueError("Manifest protocol is not phase8_sequence_feasibility.")
+    if summary_data.get("protocol") != "phase8_sequence_feasibility":
+        raise ValueError("Summary protocol is not phase8_sequence_feasibility.")
+    source_commit = validate_git_sha(manifest_data.get("source_commit"), "source_commit")
+    validate_source_provenance(manifest_data.get("source_provenance"), source_commit)
+    if summary_data.get("source", {}).get("commit") != source_commit:
+        raise ValueError("Summary source commit does not match manifest source_commit.")
+    if summary_data.get("source", {}).get("ignored_inputs") != manifest_data["source_provenance"]["ignored_inputs"]:
+        raise ValueError("Summary source ignored_inputs do not match manifest source_provenance.")
+    if manifest_data.get("configuration") != frozen_configuration():
+        raise ValueError("Manifest configuration does not match the frozen feasibility schema.")
+    if summary_data.get("configuration") != frozen_configuration():
+        raise ValueError("Summary configuration does not match the frozen feasibility schema.")
+    if manifest_data.get("terminal_status") != terminal.stem:
+        raise ValueError("Manifest terminal_status does not match the terminal marker.")
+    if summary_data.get("terminal_status") != terminal.stem:
+        raise ValueError("Summary terminal_status does not match the terminal marker.")
+    cells = manifest_data.get("cells")
+    if not isinstance(cells, list):
+        raise ValueError("Manifest cells must be a JSON list.")
+    if terminal_data.get("cells") != cells:
+        raise ValueError("Terminal marker cells do not match manifest cells.")
+    if summary_data.get("cells") != cells:
+        raise ValueError("Summary cells do not match manifest cells.")
+    if require_passing:
+        validate_cell_counts(cells)
+    else:
+        validate_cell_artifact_schema(cells, require_pass=False)
+    inventory_paths = validate_root_file_inventory(root, manifest_data)
+    if "summary.json" not in inventory_paths:
+        raise ValueError("Manifest file_inventory must bind summary.json.")
+    for cell in cells:
+        generations_path = require_canonical_relative_path(cell["generations_path"], "generations_path")
+        checkpoint_path = require_canonical_relative_path(cell["checkpoint_path"], "checkpoint_path")
+        if generations_path not in inventory_paths:
+            raise ValueError("Manifest file_inventory must bind every generations artifact.")
+        if checkpoint_path not in inventory_paths:
+            raise ValueError("Manifest file_inventory must bind every checkpoint artifact.")
+        if not (root / generations_path).is_file():
+            raise ValueError("Feasibility cell generations artifact is missing.")
+        if not (root / checkpoint_path).is_file():
+            raise ValueError("Feasibility cell checkpoint artifact is missing.")
+
+
+def validate_cell_artifact_schema(cells: object, *, require_pass: bool) -> None:
+    if not isinstance(cells, list):
+        raise ValueError("Feasibility cells must be a JSON list.")
+    if require_pass:
+        validate_cell_counts(cells)
+        return
+    for index, cell in enumerate(cells):
+        if not isinstance(cell, dict):
+            raise ValueError("Feasibility cell entries must be JSON objects.")
+        require_exact_str(cell.get("family"), f"cells[{index}].family")
+        require_exact_str(cell.get("model_size"), f"cells[{index}].model_size")
+        require_exact_int(cell.get("seed"), f"cells[{index}].seed")
+        require_exact_int(cell.get("eval_count"), f"cells[{index}].eval_count")
+        require_exact_int(cell.get("exact_matches"), f"cells[{index}].exact_matches")
+        require_exact_bool(cell.get("passed"), f"cells[{index}].passed")
+        require_exact_int(cell.get("parameter_count"), f"cells[{index}].parameter_count")
+        require_canonical_relative_path(cell.get("generations_path"), f"cells[{index}].generations_path")
+        require_canonical_relative_path(cell.get("checkpoint_path"), f"cells[{index}].checkpoint_path")
+
+
+def validate_root_file_inventory(root: Path, manifest_data: dict[str, object]) -> set[str]:
+    file_inventory = manifest_data.get("file_inventory")
+    if not isinstance(file_inventory, list):
+        raise ValueError("Manifest must contain a file_inventory list.")
+    seen_paths: set[str] = set()
+    root_resolved = root.resolve()
+    for index, row in enumerate(file_inventory):
+        if not isinstance(row, dict):
+            raise ValueError("Manifest file_inventory entries must be JSON objects.")
+        rel_path = require_canonical_relative_path(row.get("path"), f"file_inventory[{index}].path")
+        if rel_path in seen_paths:
+            raise ValueError("Manifest file_inventory must not contain duplicate paths.")
+        seen_paths.add(rel_path)
+        raw_candidate = root / rel_path
+        if raw_candidate.is_symlink():
+            raise ValueError("Manifest file_inventory must not bind symlink files.")
+        candidate = raw_candidate.resolve()
+        if root_resolved not in candidate.parents:
+            raise ValueError("Manifest file_inventory path escapes its root.")
+        if not candidate.is_file():
+            raise ValueError("Manifest file_inventory path does not exist as a file.")
+        expected_sha = require_exact_str(row.get("sha256"), f"file_inventory[{index}].sha256")
+        expected_bytes = row.get("bytes")
+        if type(expected_bytes) is not int or expected_bytes < 0:
+            raise ValueError(f"file_inventory[{index}].bytes must be a non-negative integer.")
+        if candidate.stat().st_size != expected_bytes:
+            raise ValueError("Manifest file_inventory byte count mismatch.")
+        if file_sha256(candidate) != expected_sha:
+            raise ValueError("Manifest file_inventory checksum mismatch.")
+    actual_inventory = inventory(root)
+    if sorted(file_inventory, key=lambda row: row["path"]) != actual_inventory:
+        raise ValueError("Manifest file_inventory does not exactly match root files.")
+    return seen_paths
+
+
 def selection_binding(path: Path) -> dict[str, object]:
     require_canonical_path_string(str(path), "predecessor_selection.path", SELECTION_RE)
+    require_artifact_location(path, "predecessor_selection.path", SELECTION_RE)
     return {"path": str(path), "sha256": file_sha256(path)}
 
 
@@ -773,7 +1099,11 @@ def require_root_binding_map(bindings: object) -> tuple[dict[str, tuple[str, str
         if path_key in binding_map:
             raise ValueError("predecessor_roots must not contain duplicate root bindings.")
         predecessor_path = Path(require_canonical_path_string(binding.get("path"), "predecessor_root.path", ROOT_RE))
-        root_numbers.append(feasibility_root_number(predecessor_path))
+        require_artifact_location(predecessor_path, "predecessor_root.path", ROOT_RE)
+        root_number = feasibility_root_number(predecessor_path)
+        if root_numbers and root_number <= root_numbers[-1]:
+            raise ValueError("predecessor_roots must be in strictly ascending root-number order.")
+        root_numbers.append(root_number)
         if terminal_state not in {"DONE", "FAILED"}:
             raise ValueError("Predecessor terminal_state must be DONE or FAILED.")
         terminal_path, terminal_data, _manifest_path, actual_manifest_sha = load_terminal_binding(predecessor_path)
@@ -859,6 +1189,9 @@ def _validate_selection_record(
 ) -> tuple[dict[str, object], dict[str, tuple[str, str, str]]]:
     current_number = selection_record_number(path)
     require_canonical_path_string(str(path), "selection_record.path", SELECTION_RE)
+    require_artifact_location(path, "selection_record.path", SELECTION_RE)
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("Selection record must be a regular file in the canonical artifact parent.")
     resolved = path.resolve()
     if resolved in seen:
         raise ValueError(f"Selection-record lineage contains a cycle at {path}.")
@@ -879,9 +1212,11 @@ def _validate_selection_record(
     if missing:
         raise ValueError(f"Selection record is missing required fields: {sorted(missing)!r}.")
     selected_root = require_canonical_path_string(data["selected_root"], "selected_root", ROOT_RE)
+    require_artifact_location(Path(selected_root), "selected_root", ROOT_RE)
     selected_manifest_sha = require_exact_str(data["selected_manifest_sha256"], "selected_manifest_sha256")
-    source_commit = require_exact_str(data["source_commit"], "source_commit")
+    source_commit = validate_git_sha(data["source_commit"], "source_commit")
     root = Path(selected_root)
+    validate_feasibility_root_artifacts(root, require_passing=True)
     terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
     if manifest_sha != selected_manifest_sha:
         raise ValueError("Selection record manifest checksum does not match selected root.")
@@ -894,6 +1229,8 @@ def _validate_selection_record(
         raise ValueError("Selected terminal status must be DONE.")
     if manifest_data.get("source_commit") != source_commit:
         raise ValueError("Selection record source_commit does not match selected manifest.")
+    if data["configuration"] != frozen_configuration():
+        raise ValueError("Selection record configuration does not match the frozen feasibility schema.")
     if manifest_data.get("configuration") != data["configuration"]:
         raise ValueError("Selection record configuration does not match selected manifest.")
     cells = data["per_cell_counts"]
@@ -921,6 +1258,7 @@ def _validate_selection_record(
         if not isinstance(predecessor, dict):
             raise ValueError("Predecessor selection binding must be a JSON object.")
         predecessor_path = Path(require_canonical_path_string(predecessor.get("path"), "predecessor_selection.path", SELECTION_RE))
+        require_artifact_location(predecessor_path, "predecessor_selection.path", SELECTION_RE)
         predecessor_path_key = str(predecessor_path.resolve())
         if predecessor_path_key in predecessor_selection_path_keys:
             raise ValueError("predecessor_selections must not contain duplicate canonical paths.")
@@ -956,12 +1294,10 @@ def _validate_selection_record(
                 raise ValueError("Selection record must bind transitive predecessor selection lineage.")
     if predecessor_root_bindings != expected_root_bindings:
         raise ValueError("Selection record predecessor_roots must include the complete root lineage closure.")
-    expected_root_number = max(predecessor_root_numbers, default=0) + 1
     selected_root_number = feasibility_root_number(root)
-    if selected_root_number != expected_root_number:
+    if sorted(set(predecessor_root_numbers)) != list(range(1, selected_root_number)):
         raise ValueError(
-            f"Selection record selected_root must use next numbered root feasibility_{expected_root_number:03d}; "
-            f"got {root.name!r}."
+            "Selection record predecessor_roots must be complete and continuous before selected_root."
         )
     expected_selection_number = max(predecessor_selection_numbers, default=0) + 1
     if current_number != expected_selection_number:
@@ -1016,6 +1352,8 @@ def require_canonical_relative_path(value: object, field_name: str) -> str:
 def inventory(root: Path) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError("Feasibility file_inventory must not include symlink paths.")
         if path.is_file() and path.name not in {"manifest.json", "DONE.json", "FAILED.json"}:
             rows.append({"path": str(path.relative_to(root)), "sha256": file_sha256(path), "bytes": path.stat().st_size})
     return rows
@@ -1045,6 +1383,40 @@ def file_sha256(path: Path) -> str:
 
 def git_output(args: Sequence[str]) -> str:
     return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+
+
+def unchecked_source_snapshot() -> SourceSnapshot:
+    commit = git_output(["git", "rev-parse", "HEAD"])
+    validate_git_sha(commit, "source_commit")
+    return SourceSnapshot(commit=commit, status_lines=(), ignored_inputs=ignored_source_inputs())
+
+
+def validate_git_sha(value: object, field_name: str) -> str:
+    text = require_exact_str(value, field_name)
+    if GIT_SHA_RE.fullmatch(text) is None:
+        raise ValueError(f"{field_name} must be a full 40-character lowercase Git SHA.")
+    return text
+
+
+def validate_source_provenance(value: object, source_commit: str) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("Manifest source_provenance must be a JSON object.")
+    if value.get("commit") != source_commit:
+        raise ValueError("Manifest source_provenance commit does not match source_commit.")
+    status_lines = value.get("status_lines")
+    if not isinstance(status_lines, list) or not all(isinstance(line, str) for line in status_lines):
+        raise ValueError("Manifest source_provenance status_lines must be a JSON string list.")
+    ignored_inputs = value.get("ignored_inputs")
+    if not isinstance(ignored_inputs, list):
+        raise ValueError("Manifest source_provenance ignored_inputs must be a JSON list.")
+    for index, row in enumerate(ignored_inputs):
+        if not isinstance(row, dict):
+            raise ValueError("Manifest source_provenance ignored_inputs entries must be JSON objects.")
+        require_canonical_relative_path(row.get("path"), f"source_provenance.ignored_inputs[{index}].path")
+        require_exact_str(row.get("sha256"), f"source_provenance.ignored_inputs[{index}].sha256")
+        bytes_value = row.get("bytes")
+        if type(bytes_value) is not int or bytes_value < 0:
+            raise ValueError(f"source_provenance.ignored_inputs[{index}].bytes must be a non-negative integer.")
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:

@@ -159,7 +159,10 @@ def training_accuracy(
             prefix = tokenizer.encode_evaluation_prefix(record.prompt)
             prefix_tensor = torch.tensor([prefix], dtype=torch.long, device=device)
             generated = model.greedy_decode(prefix_tensor)
-            decoded = tokenizer.decode_generated_response(tuple(int(token) for token in generated[0].cpu().tolist()))
+            try:
+                decoded = tokenizer.decode_generated_response(tuple(int(token) for token in generated[0].cpu().tolist()))
+            except (UnicodeDecodeError, ValueError):
+                decoded = None
             if decoded == record.answer:
                 correct += 1
     if was_training:

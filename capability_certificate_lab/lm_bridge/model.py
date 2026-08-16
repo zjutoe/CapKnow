@@ -100,10 +100,14 @@ class ToyCausalTransformer(nn.Module):
         max_new_tokens: int = MAX_GENERATED_TOKENS,
         eos_id: int = EOS_ID,
     ) -> torch.Tensor:
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be non-negative.")
         if max_new_tokens > MAX_GENERATED_TOKENS:
             raise ValueError("Greedy decoding is capped at 64 generated tokens.")
         if prefix_ids.ndim != 2 or prefix_ids.shape[0] != 1:
             raise ValueError("greedy_decode expects a single prefix with shape [1, sequence].")
+        if prefix_ids.shape[1] + max_new_tokens > self.config.max_seq_len:
+            raise ValueError("Greedy decoding must fit inside the fixed 256-token context window.")
         was_training = self.training
         self.eval()
         generated = prefix_ids

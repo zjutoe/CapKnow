@@ -51,6 +51,7 @@ class ByteTokenizer:
         *,
         max_length: int = MAX_SEQUENCE_LENGTH,
     ) -> EncodedRecord:
+        self._validate_context_window(max_length)
         prompt_ids = self.encode_text(prompt)
         response_ids = self.encode_text(response)
         input_ids = (BOS_ID, *prompt_ids, SEP_ID, *response_ids, EOS_ID)
@@ -69,6 +70,9 @@ class ByteTokenizer:
         max_length: int = MAX_SEQUENCE_LENGTH,
         max_generated_tokens: int = MAX_GENERATED_TOKENS,
     ) -> tuple[int, ...]:
+        self._validate_context_window(max_length)
+        if max_generated_tokens < 0:
+            raise ValueError("max_generated_tokens must be non-negative.")
         if max_generated_tokens > MAX_GENERATED_TOKENS:
             raise ValueError("Greedy generation is capped at 64 generated tokens.")
         input_ids = (BOS_ID, *self.encode_text(prompt), SEP_ID)
@@ -88,6 +92,7 @@ class ByteTokenizer:
         *,
         mode: Literal["training", "evaluation_prefix"] = "training",
     ) -> tuple[int, ...]:
+        self._validate_context_window(length)
         if len(input_ids) > length:
             raise ValueError(f"Cannot pad sequence of length {len(input_ids)} to shorter length {length}.")
         self.validate_special_token_placement(input_ids, mode=mode)
@@ -103,8 +108,7 @@ class ByteTokenizer:
         if not records:
             raise ValueError("records must be non-empty.")
         target_length = length if length is not None else max(len(record) for record in records)
-        if target_length > MAX_SEQUENCE_LENGTH:
-            raise ValueError("Padded batch length exceeds the fixed 256-token context window.")
+        self._validate_context_window(target_length)
         return tuple(self.pad(record, target_length, mode=mode) for record in records)
 
     def decode_generated_response(self, full_sequence: Sequence[int]) -> str:
@@ -179,6 +183,14 @@ class ByteTokenizer:
     def _validate_token_id(self, token_id: int) -> None:
         if not isinstance(token_id, int) or not 0 <= token_id < VOCAB_SIZE:
             raise ValueError(f"Token id must be in 0..{VOCAB_SIZE - 1}, got {token_id!r}.")
+
+    def _validate_context_window(self, length: int) -> None:
+        if type(length) is not int:
+            raise ValueError("Sequence length limit must be an exact integer.")
+        if length < 0:
+            raise ValueError("Sequence length limit must be non-negative.")
+        if length > MAX_SEQUENCE_LENGTH:
+            raise ValueError("Token operations are capped at the fixed 256-token context window.")
 
 
 def utf8_byte_token_encoder(text: str) -> tuple[int, ...]:

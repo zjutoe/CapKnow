@@ -28,6 +28,7 @@ from capability_certificate_lab.lm_bridge.train import (
     run_byte_copy_overfit_control,
     save_checkpoint,
     set_deterministic_backend,
+    training_accuracy,
 )
 
 
@@ -504,6 +505,16 @@ def test_byte_tokenizer_round_trip_specials_padding_length_gates_and_response_ma
         tokenizer.encode_training_record("p" * 254, "r")
     with pytest.raises(ValueError, match="prefix length|truncation"):
         tokenizer.encode_evaluation_prefix("p" * 191)
+    with pytest.raises(ValueError, match="256-token"):
+        tokenizer.encode_training_record("xy", "ab", max_length=257)
+    with pytest.raises(ValueError, match="256-token"):
+        tokenizer.pad(record.input_ids, 257)
+    with pytest.raises(ValueError, match="256-token"):
+        tokenizer.batch_pad((record.input_ids,), length=257)
+    with pytest.raises(ValueError, match="exact integer"):
+        tokenizer.batch_pad((record.input_ids,), length=256.0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="non-negative"):
+        tokenizer.encode_evaluation_prefix("xy", max_generated_tokens=-1)
 
     input_ids = torch.tensor([padded], dtype=torch.long)
     labels = response_only_labels(input_ids)
@@ -572,6 +583,11 @@ def test_deterministic_initialization_optimizer_step_and_greedy_decode() -> None
     torch.testing.assert_close(model_a.greedy_decode(prefix), model_b.greedy_decode(prefix), atol=0, rtol=0)
     with pytest.raises(ValueError, match="64"):
         model_a.greedy_decode(prefix, max_new_tokens=65)
+    with pytest.raises(ValueError, match="non-negative"):
+        model_a.greedy_decode(prefix, max_new_tokens=-1)
+    long_prefix = torch.tensor([[BOS_ID, *([ord("p")] * 191), SEP_ID]], dtype=torch.long)
+    with pytest.raises(ValueError, match="256-token"):
+        model_a.greedy_decode(long_prefix, max_new_tokens=64)
 
 
 def test_model_save_load_round_trip_preserves_state_dict_and_logits(tmp_path: Path) -> None:
@@ -613,12 +629,78 @@ def _passing_feasibility_cells() -> list[dict[str, object]]:
             "passed": True,
             "generations_path": f"{family}__{model_size}__seed{seed}/generations.jsonl",
             "checkpoint_path": f"{family}__{model_size}__seed{seed}/checkpoint_step1500.pt",
-            "parameter_count": 123,
+            "parameter_count": sf.expected_parameter_count(model_size),
         }
         for family in sf.FAMILIES
         for model_size in sf.MODEL_SIZES
         for seed in sf.SEEDS
     ]
+
+
+def _source_snapshot() -> object:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    return sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=())
+
+
+def _write_feasibility_root(
+    root: Path,
+    status: str,
+    cells: list[dict[str, object]],
+    predecessor_roots: tuple[Path, ...] = (),
+    predecessor_selections: tuple[Path, ...] = (),
+) -> tuple[Path, Path]:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    root.mkdir(parents=True)
+    for cell in cells:
+        generations = root / str(cell["generations_path"])
+        checkpoint = root / str(cell["checkpoint_path"])
+        generations.parent.mkdir(parents=True, exist_ok=True)
+        generations.write_text(
+            "\n".join(
+                json.dumps({"index": index, "generated": "ok", "raw_token_ids": [1, 2], "exact_match": True})
+                for index in range(int(cell["eval_count"]))
+            )
+            + "\n"
+        )
+        checkpoint.write_bytes(b"checkpoint")
+    sf.write_terminal(
+        root,
+        status,
+        cells,
+        predecessor_roots,
+        predecessor_selections,
+        failure=None if status == "DONE" else "synthetic failure",
+        source_snapshot=_source_snapshot(),
+    )
+    return root / "manifest.json", root / f"{status}.json"
+
+
+def _write_selection(
+    path: Path,
+    root: Path,
+    manifest: Path,
+    predecessor_roots: list[dict[str, object]],
+    predecessor_selections: list[dict[str, object]],
+    *,
+    cells: list[dict[str, object]] | None = None,
+    overrides: dict[str, object] | None = None,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    data = {
+        "selected_root": str(root),
+        "selected_manifest_sha256": sf.file_sha256(manifest),
+        "source_commit": "a" * 40,
+        "configuration": sf.frozen_configuration(),
+        "per_cell_counts": _passing_feasibility_cells() if cells is None else cells,
+        "pass_decision": True,
+        "independent_review_verdict": "ACCEPT",
+        "predecessor_roots": predecessor_roots,
+        "predecessor_selections": predecessor_selections,
+    }
+    if overrides:
+        data.update(overrides)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, sort_keys=True) + "\n")
 
 
 def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_rejection(tmp_path: Path) -> None:
@@ -641,6 +723,9 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         assert train_templates.isdisjoint(eval_templates)
         assert train_prompts.isdisjoint(eval_prompts)
         assert train_semantic.isdisjoint(eval_semantic)
+        if family == "named_value_json":
+            assert {"red", "blue", "green", "silver"} <= train_semantic
+            assert {"amber", "violet", "teal", "bronze"} <= eval_semantic
         assert set(sf.PROMPT_SURFACES[family]["train"]).isdisjoint(sf.PROMPT_SURFACES[family]["eval"])
         for record in (*splits["train"], *splits["eval"]):
             sf.reject_scientific_markers(record.prompt)
@@ -696,6 +781,17 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     with pytest.raises(ValueError, match="forbidden Phase 8"):
         sf.validate_feasibility_records(tuple(bad))
 
+    for forbidden in (
+        "A recorded claim has value true. Write that Boolean in compact JSON.",
+        "state 0101",
+        "graph A->B",
+        "seed 123",
+        "model id 7",
+        "prerequisite rule table",
+    ):
+        with pytest.raises(ValueError, match="forbidden Phase 8"):
+            sf.reject_scientific_markers(forbidden)
+
 
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
@@ -716,6 +812,55 @@ def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -
 
     with pytest.raises(ValueError, match="semantic values"):
         sf.validate_feasibility_records(tuple(records))
+
+
+def test_evaluate_model_retains_malformed_generations_as_invalid_mismatches() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    tokenizer = ByteTokenizer()
+    record = sf.FeasibilityRecord(
+        family="hex_copy",
+        split="eval",
+        index=0,
+        template_id="eval-form",
+        operand_id="eval-operand",
+        prompt="copy abcdef0123456789",
+        answer="abcdef0123456789",
+    )
+
+    class BadModel:
+        def greedy_decode(self, prefix_tensor: torch.Tensor) -> torch.Tensor:
+            bad_utf8_byte = 255
+            return torch.tensor([[*prefix_tensor[0].tolist(), bad_utf8_byte, EOS_ID]], dtype=torch.long)
+
+    correct, rows = sf.evaluate_model(BadModel(), (record,), tokenizer, torch.device("cpu"))
+
+    assert correct == 0
+    assert rows[0]["exact_match"] is False
+    assert rows[0]["invalid_generation"] is True
+    assert rows[0]["generated"] is None
+    assert rows[0]["raw_token_ids"][-2:] == [255, EOS_ID]
+    assert "UnicodeDecodeError" in rows[0]["generation_error"]
+
+
+def test_training_accuracy_counts_malformed_generations_as_incorrect() -> None:
+    tokenizer = ByteTokenizer()
+    records = (TextRecord(prompt="copy abcdef0123456789", answer="abcdef0123456789"),)
+
+    class BadTrainingModel:
+        training = True
+
+        def eval(self) -> None:
+            self.training = False
+
+        def train(self) -> None:
+            self.training = True
+
+        def greedy_decode(self, prefix_tensor: torch.Tensor) -> torch.Tensor:
+            return torch.tensor([[*prefix_tensor[0].tolist(), 255, EOS_ID]], dtype=torch.long)
+
+    model = BadTrainingModel()
+    assert training_accuracy(model, records, tokenizer, device=torch.device("cpu")) == 0.0
+    assert model.training is True
 
 
 def test_feasibility_hex_semantic_overlap_is_case_insensitive() -> None:
@@ -862,29 +1007,33 @@ def test_feasibility_script_direct_cli_inspect_records() -> None:
     assert len(data["hex_copy"]) == 576
 
 
-def test_feasibility_root_numbering_refuses_overwrite_and_skips(tmp_path: Path) -> None:
+def test_feasibility_root_numbering_refuses_overwrite_and_skips(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    with pytest.raises(ValueError, match="next numbered root"):
-        sf.validate_new_root(tmp_path / "feasibility_002")
-    with pytest.raises(ValueError, match="canonical path spelling"):
-        sf.validate_new_root(tmp_path / "alias" / ".." / "feasibility_001")
-    with pytest.raises(ValueError, match="canonical path spelling"):
-        sf.main(["run", "--root", f"{tmp_path}//feasibility_001"])
+    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
+    artifact_parent.mkdir(parents=True)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
 
-    predecessor = tmp_path / "feasibility_001"
+    with pytest.raises(ValueError, match="complete and continuous"):
+        sf.validate_new_root(artifact_parent / "feasibility_002")
+    with pytest.raises(ValueError, match="canonical path spelling"):
+        sf.validate_new_root(artifact_parent / "alias" / ".." / "feasibility_001")
+    with pytest.raises(ValueError, match="canonical path spelling"):
+        sf.main(["run", "--root", f"{artifact_parent}//feasibility_001"])
+    with pytest.raises(ValueError, match="located directly"):
+        sf.validate_new_root(tmp_path / "feasibility_001")
+
+    predecessor = artifact_parent / "feasibility_001"
     predecessor.mkdir()
-    predecessor_manifest = predecessor / "manifest.json"
-    predecessor_manifest.write_text('{"old":true,"terminal_status":"FAILED"}\n')
-    predecessor_failed = predecessor / "FAILED.json"
-    predecessor_failed.write_text(
-        json.dumps({"status": "FAILED", "manifest_sha256": sf.file_sha256(predecessor_manifest)}) + "\n"
-    )
+    sf.write_terminal(predecessor, "FAILED", [], (), (), failure="synthetic predecessor failure")
 
-    sf.validate_new_root(tmp_path / "feasibility_002", (predecessor,), ())
-    with pytest.raises(ValueError, match="next numbered root"):
-        sf.validate_new_root(tmp_path / "feasibility_003", (predecessor,), ())
+    sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
+    with pytest.raises(ValueError, match="complete and continuous"):
+        sf.validate_new_root(artifact_parent / "feasibility_003", (predecessor,), ())
 
-    existing = tmp_path / "feasibility_002"
+    existing = artifact_parent / "feasibility_002"
     existing.mkdir()
     with pytest.raises(FileExistsError, match="overwrite"):
         sf.validate_new_root(existing, (predecessor,), ())
@@ -944,56 +1093,257 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    source_commit = "source-sha"
-    configuration = {"training_steps": 1500}
+    cells = _passing_feasibility_cells()
+    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
+    artifact_parent.mkdir(parents=True)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
+
+    selected_root = artifact_parent / "feasibility_001"
+    manifest, terminal = _write_feasibility_root(selected_root, "DONE", cells)
+    selection = artifact_parent / "feasibility_selection_001.json"
+    _write_selection(selection, selected_root, manifest, [], [], cells=cells)
+    inventory_files = [selected_root / row["path"] for row in json.loads(manifest.read_text())["file_inventory"]]
+    inventory_bytes = {path: path.read_bytes() for path in inventory_files}
+
+    def set_git_status(paths: list[Path], *, ignored_lines: tuple[str, ...] = ()) -> None:
+        def fake_run(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+            if args[:4] == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
+                return subprocess.CompletedProcess(args, 0, stdout="".join(f"?? {path}\n" for path in paths))
+            if args[:5] == ["git", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"]:
+                return subprocess.CompletedProcess(args, 0, stdout="".join(f"!! {line}\n" for line in ignored_lines))
+            if args == ["git", "rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
+            raise AssertionError(args)
+
+        monkeypatch.setattr(sf.subprocess, "run", fake_run)
+
+    allowed_paths = [selection, manifest, terminal, *inventory_files]
+    set_git_status(allowed_paths)
+    snapshot = sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
+    assert snapshot.commit == "a" * 40
+
+    extra = selected_root / "unbound_extra.txt"
+    extra.write_text("not bound\n")
+    set_git_status([*allowed_paths, extra])
+    with pytest.raises(ValueError, match="file_inventory|Expecting value"):
+        sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
+    extra.unlink()
+
+    inventory_files[-1].write_text("tampered after manifest\n")
+    set_git_status(allowed_paths)
+    with pytest.raises(ValueError, match="file_inventory|Expecting value"):
+        sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
+
+    inventory_files[-1].write_bytes(inventory_bytes[inventory_files[-1]])
+    set_git_status(allowed_paths, ignored_lines=("scripts/phase8_sequence_feasibility.py",))
+    with pytest.raises(RuntimeError, match="Ignored executable source input"):
+        sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
+
+
+def test_source_snapshot_rejects_head_or_status_change_before_terminal_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    snapshot = sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=())
+
+    def changed_head(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+        if args == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(args, 0, stdout="b" * 40 + "\n")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(sf.subprocess, "run", changed_head)
+    with pytest.raises(sf.SourceChangedError, match="HEAD changed"):
+        sf.verify_source_unchanged(snapshot)
+
+    def changed_status(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+        if args == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
+        if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
+            return subprocess.CompletedProcess(args, 0, stdout=" M scripts/phase8_sequence_feasibility.py\n")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(sf.subprocess, "run", changed_status)
+    with pytest.raises(sf.SourceChangedError, match="worktree status changed"):
+        sf.verify_source_unchanged(snapshot)
+
+    def changed_ignored(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+        if args == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
+        if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        if args[:5] == ["git", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"]:
+            return subprocess.CompletedProcess(args, 0, stdout="!! scripts/phase8_sequence_feasibility.py\n")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(sf.subprocess, "run", changed_ignored)
+    with pytest.raises(sf.SourceChangedError, match="Ignored executable"):
+        sf.verify_source_unchanged(snapshot)
+
+
+def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     cells = _passing_feasibility_cells()
 
-    def write_inventory_root(root: Path, status: str) -> tuple[Path, Path, list[Path]]:
-        root.mkdir(parents=True)
-        summary = root / "summary.json"
-        summary.write_text("{}\n")
-        cell_dir = root / "hex_copy__small__seed0"
-        cell_dir.mkdir()
-        generations = cell_dir / "generations.jsonl"
-        generations.write_text('{"generated":"abc","exact_match":true}\n')
-        file_inventory = [
-            {"path": "hex_copy__small__seed0/generations.jsonl", "sha256": sf.file_sha256(generations), "bytes": generations.stat().st_size},
-            {"path": "summary.json", "sha256": sf.file_sha256(summary), "bytes": summary.stat().st_size},
-        ]
-        root_cells = cells if status == "DONE" else []
-        manifest = root / "manifest.json"
-        manifest.write_text(
-            json.dumps(
-                {
-                    "terminal_status": status,
-                    "source_commit": source_commit,
-                    "configuration": configuration,
-                    "cells": root_cells,
-                    "predecessor_roots": [],
-                    "predecessor_selections": [],
-                    "file_inventory": file_inventory,
-                },
-                sort_keys=True,
-            )
-            + "\n"
-        )
-        terminal = root / f"{status}.json"
-        terminal.write_text(
-            json.dumps({"status": status, "manifest_sha256": sf.file_sha256(manifest), "cells": root_cells})
-            + "\n"
-        )
-        return manifest, terminal, [generations, summary]
+    def set_parent(name: str) -> Path:
+        parent = tmp_path / name / "artifacts" / "phase8_toy_lm_bridge"
+        parent.mkdir(parents=True)
+        monkeypatch.setattr(sf, "ARTIFACT_PARENT", parent)
+        return parent
 
-    selected_root = tmp_path / "feasibility_001"
-    manifest, terminal, inventory_files = write_inventory_root(selected_root, "DONE")
-    selection = tmp_path / "feasibility_selection_001.json"
-    selection.write_text(
+    parent = set_parent("valid")
+    predecessor = parent / "feasibility_001"
+    _write_feasibility_root(predecessor, "FAILED", [])
+    predecessor_roots = [sf.terminal_binding(predecessor)]
+    selected_root = parent / "feasibility_002"
+    selected_manifest, _selected_done = _write_feasibility_root(
+        selected_root,
+        "DONE",
+        cells,
+        predecessor_roots=(predecessor,),
+    )
+    selection = parent / "feasibility_selection_001.json"
+    _write_selection(selection, selected_root, selected_manifest, predecessor_roots, [], cells=cells)
+    assert sf.validate_selection_record(selection)["selected_root"] == str(selected_root)
+
+    parent = set_parent("valid_selection_lineage")
+    predecessor = parent / "feasibility_001"
+    _write_feasibility_root(predecessor, "FAILED", [])
+    predecessor_roots = [sf.terminal_binding(predecessor)]
+    first_root = parent / "feasibility_002"
+    first_manifest, _first_done = _write_feasibility_root(
+        first_root,
+        "DONE",
+        cells,
+        predecessor_roots=(predecessor,),
+    )
+    first_selection = parent / "feasibility_selection_001.json"
+    _write_selection(first_selection, first_root, first_manifest, predecessor_roots, [], cells=cells)
+    assert sf.validate_selection_record(first_selection)["selected_root"] == str(first_root)
+    second_root = parent / "feasibility_003"
+    second_manifest, _second_done = _write_feasibility_root(
+        second_root,
+        "DONE",
+        cells,
+        predecessor_roots=(predecessor,),
+        predecessor_selections=(first_selection,),
+    )
+    second_manifest_data = json.loads(second_manifest.read_text())
+    second_selection = parent / "feasibility_selection_002.json"
+    _write_selection(
+        second_selection,
+        second_root,
+        second_manifest,
+        second_manifest_data["predecessor_roots"],
+        second_manifest_data["predecessor_selections"],
+        cells=cells,
+    )
+    assert sf.validate_selection_record(second_selection)["selected_root"] == str(second_root)
+
+    outside_selection = tmp_path / "feasibility_selection_001.json"
+    outside_selection.write_text(selection.read_text())
+    with pytest.raises(ValueError, match="located directly"):
+        sf.validate_selection_record(outside_selection)
+
+    parent = set_parent("missing_checkpoint")
+    bad_root = parent / "feasibility_001"
+    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
+    (bad_root / str(cells[0]["checkpoint_path"])).unlink()
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="file_inventory|checkpoint"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("symlink_inventory")
+    bad_root = parent / "feasibility_001"
+    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
+    generation = bad_root / str(cells[0]["generations_path"])
+    external_generation = tmp_path / "external_generations.jsonl"
+    external_generation.write_bytes(generation.read_bytes())
+    generation.unlink()
+    generation.symlink_to(external_generation)
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="symlink"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("tampered_summary")
+    bad_root = parent / "feasibility_001"
+    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
+    (bad_root / "summary.json").write_text('{"tampered":true}\n')
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="Summary|file_inventory|checksum"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("bad_config")
+    bad_root = parent / "feasibility_001"
+    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
+    manifest_data = json.loads(bad_manifest.read_text())
+    manifest_data["configuration"] = {"training_steps": 1500}
+    bad_manifest.write_text(json.dumps(manifest_data, sort_keys=True) + "\n")
+    (bad_root / "DONE.json").write_text(
+        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(bad_manifest), "cells": cells}) + "\n"
+    )
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="frozen feasibility schema"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("bad_source_provenance")
+    bad_root = parent / "feasibility_001"
+    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
+    manifest_data = json.loads(bad_manifest.read_text())
+    manifest_data["source_provenance"]["commit"] = "b" * 40
+    bad_manifest.write_text(json.dumps(manifest_data, sort_keys=True) + "\n")
+    (bad_root / "DONE.json").write_text(
+        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(bad_manifest), "cells": cells}) + "\n"
+    )
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="source_provenance"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("bad_parameter_count")
+    bad_cells = [dict(cell) for cell in cells]
+    bad_cells[0]["parameter_count"] += 1
+    bad_root = parent / "feasibility_001"
+    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", bad_cells)
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=bad_cells)
+    with pytest.raises(ValueError, match="parameter_count"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("gapped_lineage")
+    predecessor = parent / "feasibility_001"
+    _write_feasibility_root(predecessor, "FAILED", [])
+    bad_root = parent / "feasibility_003"
+    bad_manifest, _bad_done = _write_feasibility_root(
+        bad_root,
+        "DONE",
+        cells,
+        predecessor_roots=(predecessor,),
+    )
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [sf.terminal_binding(predecessor)], [], cells=cells)
+    with pytest.raises(ValueError, match="complete and continuous"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("symlink_root")
+    target = tmp_path / "outside_target"
+    target.mkdir()
+    symlink_root = parent / "feasibility_001"
+    symlink_root.symlink_to(target, target_is_directory=True)
+    symlink_selection = parent / "feasibility_selection_001.json"
+    symlink_selection.write_text(
         json.dumps(
             {
-                "selected_root": str(selected_root),
-                "selected_manifest_sha256": sf.file_sha256(manifest),
-                "source_commit": source_commit,
-                "configuration": configuration,
+                "selected_root": str(symlink_root),
+                "selected_manifest_sha256": "0" * 64,
+                "source_commit": "a" * 40,
+                "configuration": sf.frozen_configuration(),
                 "per_cell_counts": cells,
                 "pass_decision": True,
                 "independent_review_verdict": "ACCEPT",
@@ -1004,407 +1354,5 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
         )
         + "\n"
     )
-
-    def set_git_status(paths: list[Path]) -> None:
-        def fake_run(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
-            assert args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]
-            assert check is True
-            assert text is True
-            return subprocess.CompletedProcess(args, 0, stdout="".join(f"?? {path}\n" for path in paths))
-
-        monkeypatch.setattr(sf.subprocess, "run", fake_run)
-
-    allowed_paths = [selection, manifest, terminal, *inventory_files]
-    set_git_status(allowed_paths)
-    sf.validate_source_clean(tmp_path / "feasibility_002", (), (selection,))
-
-    extra = selected_root / "unbound_extra.txt"
-    extra.write_text("not bound\n")
-    set_git_status([*allowed_paths, extra])
-    with pytest.raises(RuntimeError, match="Untracked file"):
-        sf.validate_source_clean(tmp_path / "feasibility_002", (), (selection,))
-
-    inventory_files[-1].write_text("tampered after manifest\n")
-    set_git_status(allowed_paths)
-    with pytest.raises(ValueError, match="file_inventory"):
-        sf.validate_source_clean(tmp_path / "feasibility_002", (), (selection,))
-
-
-def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_path: Path) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    source_commit = "source-sha"
-    configuration = {"training_steps": 1500}
-    cells = _passing_feasibility_cells()
-
-    def write_root(
-        root: Path,
-        status: str,
-        root_cells: list[dict[str, object]],
-        predecessor_roots: list[dict[str, object]],
-        predecessor_selections: list[dict[str, object]],
-    ) -> tuple[Path, Path]:
-        root.mkdir()
-        manifest = root / "manifest.json"
-        manifest.write_text(
-            json.dumps(
-                {
-                    "terminal_status": status,
-                    "source_commit": source_commit,
-                    "configuration": configuration,
-                    "cells": root_cells,
-                    "predecessor_roots": predecessor_roots,
-                    "predecessor_selections": predecessor_selections,
-                },
-                sort_keys=True,
-            )
-            + "\n"
-        )
-        terminal = root / f"{status}.json"
-        terminal.write_text(
-            json.dumps({"status": status, "manifest_sha256": sf.file_sha256(manifest), "cells": root_cells})
-            + "\n"
-        )
-        return manifest, terminal
-
-    def write_selection(
-        path: Path,
-        root: Path,
-        manifest: Path,
-        predecessor_roots: list[dict[str, object]],
-        predecessor_selections: list[dict[str, object]],
-        *,
-        selected_cells: list[dict[str, object]] | None = None,
-        overrides: dict[str, object] | None = None,
-    ) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        data = {
-            "selected_root": str(root),
-            "selected_manifest_sha256": sf.file_sha256(manifest),
-            "source_commit": source_commit,
-            "configuration": configuration,
-            "per_cell_counts": cells if selected_cells is None else selected_cells,
-            "pass_decision": True,
-            "independent_review_verdict": "ACCEPT",
-            "predecessor_roots": predecessor_roots,
-            "predecessor_selections": predecessor_selections,
-        }
-        if overrides:
-            data.update(overrides)
-        path.write_text(json.dumps(data, sort_keys=True) + "\n")
-
-    first_bad_root = tmp_path / "feasibility_999"
-    first_bad_manifest, _first_bad_done = write_root(first_bad_root, "DONE", cells, [], [])
-    first_bad_selection = tmp_path / "bad_first_selected_root" / "feasibility_selection_001.json"
-    write_selection(first_bad_selection, first_bad_root, first_bad_manifest, [], [])
-    with pytest.raises(ValueError, match="next numbered root"):
-        sf.validate_selection_record(first_bad_selection)
-
-    predecessor = tmp_path / "feasibility_001"
-    predecessor.mkdir()
-    predecessor_manifest = predecessor / "manifest.json"
-    predecessor_manifest.write_text('{"old":true,"terminal_status":"FAILED"}\n')
-    predecessor_done = predecessor / "FAILED.json"
-    predecessor_done.write_text(
-        json.dumps({"status": "FAILED", "manifest_sha256": sf.file_sha256(predecessor_manifest)}) + "\n"
-    )
-    predecessor_roots = [
-        {
-            "path": str(predecessor),
-            "terminal_state": "FAILED",
-            "terminal_sha256": sf.file_sha256(predecessor_done),
-            "manifest_sha256": sf.file_sha256(predecessor_manifest),
-        }
-    ]
-
-    gapped_dir = tmp_path / "gapped_selected_root"
-    gapped_dir.mkdir()
-    gapped_root = gapped_dir / "feasibility_003"
-    gapped_manifest, _gapped_done = write_root(gapped_root, "DONE", cells, predecessor_roots, [])
-    gapped_selection = gapped_dir / "feasibility_selection_001.json"
-    write_selection(gapped_selection, gapped_root, gapped_manifest, predecessor_roots, [])
-    with pytest.raises(ValueError, match="next numbered root"):
-        sf.validate_selection_record(gapped_selection)
-
-    lineage_root = tmp_path / "feasibility_002"
-    lineage_manifest, _lineage_done = write_root(lineage_root, "DONE", cells, predecessor_roots, [])
-    predecessor_selection = tmp_path / "feasibility_selection_001.json"
-    write_selection(predecessor_selection, lineage_root, lineage_manifest, predecessor_roots, [])
-    predecessor_selections = [
-        {"path": str(predecessor_selection), "sha256": sf.file_sha256(predecessor_selection)}
-    ]
-    full_predecessor_roots = [*predecessor_roots, sf.terminal_binding(lineage_root)]
-
-    root = tmp_path / "feasibility_003"
-    manifest, done = write_root(root, "DONE", cells, full_predecessor_roots, predecessor_selections)
-
-    selection = tmp_path / "feasibility_selection_002.json"
-    write_selection(selection, root, manifest, full_predecessor_roots, predecessor_selections)
-
-    assert sf.validate_selection_record(selection)["pass_decision"] is True
-
-    duplicate_predecessor_selections = [dict(predecessor_selections[0]), dict(predecessor_selections[0])]
-    duplicate_selection_root = tmp_path / "bad_duplicate_predecessor_selection_root" / "feasibility_003"
-    duplicate_selection_root.parent.mkdir()
-    duplicate_selection_manifest, _duplicate_selection_done = write_root(
-        duplicate_selection_root,
-        "DONE",
-        cells,
-        full_predecessor_roots,
-        duplicate_predecessor_selections,
-    )
-    duplicate_predecessor_selection = (
-        tmp_path / "bad_duplicate_predecessor_selection" / "feasibility_selection_002.json"
-    )
-    write_selection(
-        duplicate_predecessor_selection,
-        duplicate_selection_root,
-        duplicate_selection_manifest,
-        full_predecessor_roots,
-        duplicate_predecessor_selections,
-    )
-    with pytest.raises(ValueError, match="duplicate canonical paths"):
-        sf.validate_selection_record(duplicate_predecessor_selection)
-
-    descending_predecessor_selections = [
-        {"path": str(selection), "sha256": sf.file_sha256(selection)},
-        dict(predecessor_selections[0]),
-    ]
-    descending_predecessor_roots = [*full_predecessor_roots, sf.terminal_binding(root)]
-    descending_selection_root = tmp_path / "bad_descending_predecessor_selection_root" / "feasibility_004"
-    descending_selection_root.parent.mkdir()
-    descending_selection_manifest, _descending_selection_done = write_root(
-        descending_selection_root,
-        "DONE",
-        cells,
-        descending_predecessor_roots,
-        descending_predecessor_selections,
-    )
-    descending_predecessor_selection = (
-        tmp_path / "bad_descending_predecessor_selection" / "feasibility_selection_003.json"
-    )
-    write_selection(
-        descending_predecessor_selection,
-        descending_selection_root,
-        descending_selection_manifest,
-        descending_predecessor_roots,
-        descending_predecessor_selections,
-    )
-    with pytest.raises(ValueError, match="strictly ascending"):
-        sf.validate_selection_record(descending_predecessor_selection)
-
-    auto_manifest_root = tmp_path / "auto_manifest" / "feasibility_004"
-    auto_manifest_root.mkdir(parents=True)
-    assert sf.build_manifest(auto_manifest_root, cells, (predecessor,), (predecessor_selection,), "DONE")[
-        "predecessor_roots"
-    ] == full_predecessor_roots
-
-    omitted_transitive_root = tmp_path / "omitted_transitive_root" / "feasibility_003"
-    omitted_transitive_root.parent.mkdir()
-    omitted_transitive_roots = [sf.terminal_binding(lineage_root)]
-    omitted_transitive_manifest, _omitted_transitive_done = write_root(
-        omitted_transitive_root,
-        "DONE",
-        cells,
-        omitted_transitive_roots,
-        predecessor_selections,
-    )
-    omitted_transitive_selection = (
-        tmp_path / "bad_omitted_transitive_root" / "feasibility_selection_002.json"
-    )
-    write_selection(
-        omitted_transitive_selection,
-        omitted_transitive_root,
-        omitted_transitive_manifest,
-        omitted_transitive_roots,
-        predecessor_selections,
-    )
-    with pytest.raises(ValueError, match="complete root lineage closure"):
-        sf.validate_selection_record(omitted_transitive_selection)
-
-    for index, bad_value in enumerate(("REJECT", "accepted", "", 1)):
-        bad_selection = tmp_path / f"bad_verdict_{index}" / "feasibility_selection_002.json"
-        write_selection(
-            bad_selection,
-            root,
-            manifest,
-            full_predecessor_roots,
-            predecessor_selections,
-            overrides={"independent_review_verdict": bad_value},
-        )
-        with pytest.raises(ValueError, match="independent_review_verdict"):
-            sf.validate_selection_record(bad_selection)
-
-    duplicate_root = tmp_path / "duplicate_root_binding" / "feasibility_003"
-    duplicate_root.parent.mkdir()
-    duplicate_roots = [*full_predecessor_roots, dict(full_predecessor_roots[0])]
-    duplicate_manifest, _duplicate_done = write_root(
-        duplicate_root,
-        "DONE",
-        cells,
-        duplicate_roots,
-        predecessor_selections,
-    )
-    duplicate_selection = tmp_path / "bad_duplicate_root_binding" / "feasibility_selection_002.json"
-    write_selection(duplicate_selection, duplicate_root, duplicate_manifest, duplicate_roots, predecessor_selections)
-    with pytest.raises(ValueError, match="duplicate root bindings"):
-        sf.validate_selection_record(duplicate_selection)
-
-    bad_selection = tmp_path / "bad_selected_root" / "feasibility_selection_002.json"
-    write_selection(
-        bad_selection,
-        root,
-        manifest,
-        full_predecessor_roots,
-        predecessor_selections,
-        overrides={"selected_root": str(tmp_path / "selected_root")},
-    )
-    with pytest.raises(ValueError, match="feasibility_NNN"):
-        sf.validate_selection_record(bad_selection)
-
-    bad_selection = tmp_path / "bad_selected_root_type" / "feasibility_selection_002.json"
-    write_selection(
-        bad_selection,
-        root,
-        manifest,
-        full_predecessor_roots,
-        predecessor_selections,
-        overrides={"selected_root": 12},
-    )
-    with pytest.raises(ValueError, match="selected_root"):
-        sf.validate_selection_record(bad_selection)
-
-    bad_selection = tmp_path / "bad_selected_root_alias" / "feasibility_selection_002.json"
-    write_selection(
-        bad_selection,
-        root,
-        manifest,
-        full_predecessor_roots,
-        predecessor_selections,
-        overrides={"selected_root": str(root.parent / "alias" / ".." / root.name)},
-    )
-    with pytest.raises(ValueError, match="canonical path spelling"):
-        sf.validate_selection_record(bad_selection)
-
-    for spelling in (
-        f"./{root.name}",
-        f"{root}/",
-        f"{root.parent}//{root.name}",
-    ):
-        bad_selection = tmp_path / f"bad_selected_root_spelling_{len(spelling)}" / "feasibility_selection_002.json"
-        write_selection(
-            bad_selection,
-            root,
-            manifest,
-            full_predecessor_roots,
-            predecessor_selections,
-            overrides={"selected_root": spelling},
-        )
-        with pytest.raises(ValueError, match="canonical path spelling"):
-            sf.validate_selection_record(bad_selection)
-
-    bad_name_selection = tmp_path / "feasibility_selection_bad_name.json"
-    bad_name_selection.write_text(selection.read_text())
-    with pytest.raises(ValueError, match="feasibility_selection_NNN"):
-        sf.validate_selection_record(bad_name_selection)
-
-    skip_selection = tmp_path / "feasibility_selection_999.json"
-    skip_selection.write_text(selection.read_text())
-    with pytest.raises(ValueError, match="next numbered selection"):
-        sf.validate_selection_record(skip_selection)
-
-    bad_selection = tmp_path / "bad_source" / "feasibility_selection_002.json"
-    write_selection(
-        bad_selection,
-        root,
-        manifest,
-        full_predecessor_roots,
-        predecessor_selections,
-        overrides={"source_commit": "wrong-source"},
-    )
-    with pytest.raises(ValueError, match="source_commit"):
-        sf.validate_selection_record(bad_selection)
-
-    bad_counts = [dict(cell) for cell in cells]
-    bad_counts[0]["exact_matches"] = 53
-    bad_selection = tmp_path / "bad_counts" / "feasibility_selection_002.json"
-    write_selection(
-        bad_selection,
-        root,
-        manifest,
-        full_predecessor_roots,
-        predecessor_selections,
-        selected_cells=bad_counts,
-    )
-    with pytest.raises(ValueError, match="per_cell_counts"):
-        sf.validate_selection_record(bad_selection)
-
-    bad_selection = tmp_path / "bad_predecessor_roots" / "feasibility_selection_002.json"
-    write_selection(bad_selection, root, manifest, [], predecessor_selections)
-    with pytest.raises(ValueError, match="predecessor_roots"):
-        sf.validate_selection_record(bad_selection)
-
-    bad_selection = tmp_path / "bad_predecessor_selections" / "feasibility_selection_001.json"
-    write_selection(bad_selection, root, manifest, full_predecessor_roots, [])
-    with pytest.raises(ValueError, match="predecessor_selections"):
-        sf.validate_selection_record(bad_selection)
-
-    for bad_value in ("true", 1, False):
-        bad_selection = tmp_path / f"bad_pass_{bad_value!r}" / "feasibility_selection_002.json"
-        write_selection(
-            bad_selection,
-            root,
-            manifest,
-            full_predecessor_roots,
-            predecessor_selections,
-            overrides={"pass_decision": bad_value},
-        )
-        with pytest.raises(ValueError, match="pass_decision"):
-            sf.validate_selection_record(bad_selection)
-
-    bad_cells = [dict(cell) for cell in cells]
-    bad_cells[0]["exact_matches"] = 51
-    bad_cells[0]["passed"] = False
-    bad_root = tmp_path / "feasibility_004"
-    bad_manifest, _bad_done = write_root(bad_root, "DONE", bad_cells, full_predecessor_roots, predecessor_selections)
-    bad_selection = tmp_path / "bad_52_64" / "feasibility_selection_002.json"
-    write_selection(
-        bad_selection,
-        bad_root,
-        bad_manifest,
-        full_predecessor_roots,
-        predecessor_selections,
-        selected_cells=bad_cells,
-    )
-    with pytest.raises(ValueError, match="52/64"):
-        sf.validate_selection_record(bad_selection)
-
-    aliased_predecessor_roots = [dict(full_predecessor_roots[0]), *full_predecessor_roots[1:]]
-    aliased_predecessor_roots[0]["path"] = str(predecessor.parent / "alias" / ".." / predecessor.name)
-    alias_root = tmp_path / "feasibility_005"
-    alias_manifest, _alias_done = write_root(alias_root, "DONE", cells, aliased_predecessor_roots, predecessor_selections)
-    bad_selection = tmp_path / "bad_predecessor_root_alias" / "feasibility_selection_002.json"
-    write_selection(bad_selection, alias_root, alias_manifest, aliased_predecessor_roots, predecessor_selections)
-    with pytest.raises(ValueError, match="canonical path spelling"):
-        sf.validate_selection_record(bad_selection)
-
-    aliased_predecessor_selections = [dict(predecessor_selections[0])]
-    aliased_predecessor_selections[0]["path"] = str(predecessor_selection.parent / "alias" / ".." / predecessor_selection.name)
-    alias_root = tmp_path / "feasibility_006"
-    alias_manifest, _alias_done = write_root(alias_root, "DONE", cells, full_predecessor_roots, aliased_predecessor_selections)
-    bad_selection = tmp_path / "bad_predecessor_selection_alias" / "feasibility_selection_002.json"
-    write_selection(bad_selection, alias_root, alias_manifest, full_predecessor_roots, aliased_predecessor_selections)
-    with pytest.raises(ValueError, match="canonical path spelling"):
-        sf.validate_selection_record(bad_selection)
-
-    malformed_predecessor = tmp_path / "feasibility_007"
-    malformed_predecessor.mkdir()
-    malformed_manifest = malformed_predecessor / "manifest.json"
-    malformed_manifest.write_text('{"old":true,"terminal_status":"FAILED"}\n')
-    malformed_done = malformed_predecessor / "FAILED.json"
-    malformed_done.write_text('{"status":"FAILED"}\n')
-    with pytest.raises(ValueError, match="does not bind"):
-        sf.terminal_binding(malformed_predecessor)
-
-    predecessor_done.write_text('{"status":"DONE"}\n')
-    with pytest.raises(ValueError, match="status does not match"):
-        sf.validate_selection_record(selection)
+    with pytest.raises(ValueError, match="symlink|located directly"):
+        sf.validate_selection_record(symlink_selection)
