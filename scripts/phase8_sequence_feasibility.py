@@ -131,6 +131,7 @@ class FeasibilityRecord:
     operand_id: str
     prompt: str
     answer: str
+    semantic_values: tuple[str, ...] = ()
 
 
 def compact_json(value: object) -> str:
@@ -157,10 +158,50 @@ def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
         reject_scientific_markers(record.answer)
         reject_scientific_markers(record.template_id)
         reject_scientific_markers(record.operand_id)
+        for value in semantic_values_for_record(record):
+            reject_scientific_markers(value)
     train = {(r.template_id, r.operand_id, r.prompt, r.answer) for r in records if r.split == "train"}
     eval_ = {(r.template_id, r.operand_id, r.prompt, r.answer) for r in records if r.split == "eval"}
     if train & eval_:
         raise ValueError("Feasibility train/evaluation records must be disjoint.")
+    train_semantic = {
+        value
+        for record in records
+        if record.split == "train"
+        for value in semantic_values_for_record(record)
+    }
+    eval_semantic = {
+        value
+        for record in records
+        if record.split == "eval"
+        for value in semantic_values_for_record(record)
+    }
+    overlap = train_semantic & eval_semantic
+    if overlap:
+        raise ValueError(f"Feasibility train/evaluation semantic values must be disjoint: {sorted(overlap)!r}.")
+
+
+def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
+    values = set(record.semantic_values)
+    if record.family == "hex_copy":
+        values.add(record.answer)
+    elif record.family == "named_value_json":
+        decoded = json.loads(record.answer)
+        if not isinstance(decoded, str):
+            raise ValueError("named_value_json answers must be JSON strings.")
+        values.add(decoded)
+        values.update(value.strip() for value in re.findall(r"=([^;]+)", record.prompt))
+    elif record.family == "array_json":
+        decoded = json.loads(record.answer)
+        if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
+            raise ValueError("array_json answers must be JSON arrays of strings.")
+        values.update(decoded)
+        values.add(compact_json(decoded))
+    elif record.family == "boolean_json":
+        values.update(re.findall(r"\b\d+\b", record.prompt))
+    else:
+        raise ValueError(f"Unknown feasibility family: {record.family!r}.")
+    return frozenset(values)
 
 
 def validate_prompt_surface_contract(family: str) -> None:
@@ -243,31 +284,38 @@ def _family_split(family: str, split: str, count: int) -> tuple[FeasibilityRecor
 
 def _make_record(family: str, split: str, operand_number: int, index: int) -> FeasibilityRecord:
     rng = random.Random(730000 + 10000 * FAMILIES.index(family) + operand_number)
+    split_code = "t" if split == "train" else "e"
     template_id = f"seq_{family}_{split}_{index % 4}"
     operand_id = f"seq_operand_{family}_{operand_number:05d}"
     surface = PROMPT_SURFACES[family][split][index % 4]
     if family == "hex_copy":
-        value = f"{rng.getrandbits(64):016x}"
+        high_bit = 0 if split == "train" else 1 << 63
+        value = f"{high_bit | rng.getrandbits(63):016x}"
         prompt = surface.format(a=index % 17, b=value)
         answer = value
+        semantic_values = (value,)
     elif family == "named_value_json":
         keys = ("red", "blue", "green", "silver")
         target = keys[index % len(keys)]
-        fields = {key: f"{key}-{rng.randrange(1000, 9999)}" for key in keys}
+        fields = {key: f"{key}-{split_code}{rng.getrandbits(32):08x}" for key in keys}
         field_text = "; ".join(f"{key}={fields[key]}" for key in keys)
         prompt = surface.format(a=target, b=field_text)
         answer = compact_json(fields[target])
+        semantic_values = tuple(fields[key] for key in keys)
     elif family == "boolean_json":
-        left = rng.randrange(1, 200)
-        right = rng.randrange(1, 200)
+        split_offset = 0 if split == "train" else 1000
+        left = split_offset + rng.randrange(1, 200)
+        right = split_offset + rng.randrange(1, 200)
         truth = left <= right if index % 2 == 0 else left > right
         relation = "is at most" if index % 2 == 0 else "is greater than"
         prompt = surface.format(a=left, b=relation, c=right)
         answer = "true" if truth else "false"
+        semantic_values = (str(left), str(right))
     elif family == "array_json":
-        items = [f"s{rng.randrange(100, 999)}" for _ in range(1 + index % 4)]
+        items = [f"s{split_code}{rng.getrandbits(32):08x}" for _ in range(1 + index % 4)]
         prompt = surface.format(a=" | ".join(items))
         answer = compact_json(items)
+        semantic_values = (*items, answer)
     else:
         raise AssertionError("unreachable")
     return FeasibilityRecord(
@@ -278,6 +326,7 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
         operand_id=operand_id,
         prompt=prompt,
         answer=answer,
+        semantic_values=semantic_values,
     )
 
 
@@ -616,18 +665,24 @@ def terminal_binding(root: Path) -> dict[str, object]:
 
 
 def load_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, str]:
-    terminal = root / "DONE.json"
-    if not terminal.exists():
-        terminal = root / "FAILED.json"
-    if not terminal.exists():
+    done = root / "DONE.json"
+    failed = root / "FAILED.json"
+    existing_terminals = [path for path in (done, failed) if path.exists()]
+    if len(existing_terminals) > 1:
+        raise ValueError(f"Root has both DONE.json and FAILED.json terminal markers: {root}")
+    if not existing_terminals:
         raise ValueError(f"Root lacks DONE.json or FAILED.json: {root}")
+    terminal = existing_terminals[0]
     manifest = root / "manifest.json"
     if not manifest.exists():
         raise ValueError(f"Root lacks manifest.json: {root}")
     manifest_sha = file_sha256(manifest)
     terminal_data = json.loads(terminal.read_text())
+    manifest_data = json.loads(manifest.read_text())
     if terminal_data.get("status") != terminal.stem:
         raise ValueError("Terminal marker status does not match its filename.")
+    if manifest_data.get("terminal_status") != terminal.stem:
+        raise ValueError("Manifest terminal_status does not match the terminal marker.")
     if terminal_data.get("manifest_sha256") != manifest_sha:
         raise ValueError("Terminal marker does not bind the manifest checksum.")
     return terminal, terminal_data, manifest, manifest_sha
@@ -662,20 +717,22 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
     missing = required - set(data)
     if missing:
         raise ValueError(f"Selection record is missing required fields: {sorted(missing)!r}.")
-    root = Path(data["selected_root"])
-    manifest = root / "manifest.json"
-    if file_sha256(manifest) != data["selected_manifest_sha256"]:
+    selected_root = require_exact_str(data["selected_root"], "selected_root")
+    selected_manifest_sha = require_exact_str(data["selected_manifest_sha256"], "selected_manifest_sha256")
+    source_commit = require_exact_str(data["source_commit"], "source_commit")
+    root = Path(selected_root)
+    feasibility_root_number(root)
+    terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
+    if manifest_sha != selected_manifest_sha:
         raise ValueError("Selection record manifest checksum does not match selected root.")
-    terminal = root / "DONE.json"
-    if not terminal.exists():
+    if terminal.stem != "DONE":
         raise ValueError("Selection record must bind a passing DONE root.")
     manifest_data = json.loads(manifest.read_text())
-    terminal_data = json.loads(terminal.read_text())
-    if terminal_data.get("manifest_sha256") != data["selected_manifest_sha256"]:
+    if terminal_data.get("manifest_sha256") != selected_manifest_sha:
         raise ValueError("Selected DONE terminal does not bind the selected manifest checksum.")
     if terminal_data.get("status") != "DONE":
         raise ValueError("Selected terminal status must be DONE.")
-    if manifest_data.get("source_commit") != data["source_commit"]:
+    if manifest_data.get("source_commit") != source_commit:
         raise ValueError("Selection record source_commit does not match selected manifest.")
     if manifest_data.get("configuration") != data["configuration"]:
         raise ValueError("Selection record configuration does not match selected manifest.")
@@ -693,17 +750,20 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
     if type(pass_decision) is not bool or pass_decision is not True:
         raise ValueError("Selection record pass_decision must be true for a selected root.")
     for predecessor in data["predecessor_roots"]:
-        if predecessor["terminal_state"] not in {"DONE", "FAILED"}:
+        if not isinstance(predecessor, dict):
+            raise ValueError("Predecessor root binding must be a JSON object.")
+        predecessor_path = Path(require_exact_str(predecessor.get("path"), "predecessor_root.path"))
+        feasibility_root_number(predecessor_path)
+        predecessor_terminal_state = require_exact_str(predecessor.get("terminal_state"), "predecessor_root.terminal_state")
+        if predecessor_terminal_state not in {"DONE", "FAILED"}:
             raise ValueError("Predecessor terminal_state must be DONE or FAILED.")
-        terminal_path = Path(predecessor["path"]) / f"{predecessor['terminal_state']}.json"
-        manifest_path = Path(predecessor["path"]) / "manifest.json"
+        terminal_path, terminal_data, manifest_path, manifest_sha = load_terminal_binding(predecessor_path)
+        if terminal_path.stem != predecessor_terminal_state:
+            raise ValueError("Predecessor terminal status does not match its binding.")
         if file_sha256(terminal_path) != predecessor["terminal_sha256"]:
             raise ValueError("Predecessor terminal checksum mismatch.")
-        if file_sha256(manifest_path) != predecessor["manifest_sha256"]:
+        if manifest_sha != predecessor["manifest_sha256"]:
             raise ValueError("Predecessor manifest checksum mismatch.")
-        terminal_data = json.loads(terminal_path.read_text())
-        if terminal_data.get("status") != predecessor["terminal_state"]:
-            raise ValueError("Predecessor terminal status does not match its binding.")
         if terminal_data.get("manifest_sha256") != predecessor["manifest_sha256"]:
             raise ValueError("Predecessor terminal does not bind the predecessor manifest checksum.")
     lineage_bindings = {str(Path(predecessor["path"]).resolve()): predecessor["sha256"] for predecessor in data["predecessor_selections"]}

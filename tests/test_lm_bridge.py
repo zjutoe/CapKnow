@@ -631,9 +631,12 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         eval_templates = {record.template_id for record in splits["eval"]}
         train_prompts = {record.prompt for record in splits["train"]}
         eval_prompts = {record.prompt for record in splits["eval"]}
+        train_semantic = {value for record in splits["train"] for value in sf.semantic_values_for_record(record)}
+        eval_semantic = {value for record in splits["eval"] for value in sf.semantic_values_for_record(record)}
         assert train_operands.isdisjoint(eval_operands)
         assert train_templates.isdisjoint(eval_templates)
         assert train_prompts.isdisjoint(eval_prompts)
+        assert train_semantic.isdisjoint(eval_semantic)
         assert set(sf.PROMPT_SURFACES[family]["train"]).isdisjoint(sf.PROMPT_SURFACES[family]["eval"])
         for record in (*splits["train"], *splits["eval"]):
             sf.reject_scientific_markers(record.prompt)
@@ -686,6 +689,22 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         sf.validate_feasibility_records(tuple(bad))
 
 
+def test_feasibility_semantic_train_eval_overlap_is_rejected() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    records = list(sf.build_family_records("array_json"))
+    train_value = next(iter(sf.semantic_values_for_record(next(record for record in records if record.split == "train"))))
+    eval_index = next(index for index, record in enumerate(records) if record.split == "eval")
+    records[eval_index] = sf.FeasibilityRecord(
+        **{
+            **records[eval_index].__dict__,
+            "semantic_values": (train_value,),
+        }
+    )
+
+    with pytest.raises(ValueError, match="semantic values"):
+        sf.validate_feasibility_records(tuple(records))
+
+
 def test_feasibility_prompt_surface_overlap_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     surfaces = {
@@ -727,7 +746,7 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(tmp_path: Path) 
     predecessor = tmp_path / "feasibility_001"
     predecessor.mkdir()
     predecessor_manifest = predecessor / "manifest.json"
-    predecessor_manifest.write_text('{"old":true}\n')
+    predecessor_manifest.write_text('{"old":true,"terminal_status":"FAILED"}\n')
     predecessor_failed = predecessor / "FAILED.json"
     predecessor_failed.write_text(
         json.dumps({"status": "FAILED", "manifest_sha256": sf.file_sha256(predecessor_manifest)}) + "\n"
@@ -771,6 +790,27 @@ def test_feasibility_failed_terminal_binds_manifest(tmp_path: Path) -> None:
     ]
 
 
+def test_feasibility_root_rejects_dual_terminal_and_manifest_status_mismatch(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    root = tmp_path / "feasibility_001"
+    root.mkdir()
+    manifest = root / "manifest.json"
+    manifest.write_text('{"terminal_status":"DONE"}\n')
+    done = root / "DONE.json"
+    done.write_text(json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(manifest)}) + "\n")
+    failed = root / "FAILED.json"
+    failed.write_text(json.dumps({"status": "FAILED", "manifest_sha256": sf.file_sha256(manifest)}) + "\n")
+
+    with pytest.raises(ValueError, match="both DONE.json and FAILED.json"):
+        sf.load_terminal_binding(root)
+
+    failed.unlink()
+    manifest.write_text('{"terminal_status":"FAILED"}\n')
+    done.write_text(json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(manifest)}) + "\n")
+    with pytest.raises(ValueError, match="terminal_status"):
+        sf.load_terminal_binding(root)
+
+
 def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_path: Path) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     source_commit = "source-sha"
@@ -783,6 +823,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     lineage_manifest.write_text(
         json.dumps(
             {
+                "terminal_status": "DONE",
                 "source_commit": source_commit,
                 "configuration": configuration,
                 "cells": cells,
@@ -819,7 +860,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     predecessor = tmp_path / "feasibility_000"
     predecessor.mkdir()
     predecessor_manifest = predecessor / "manifest.json"
-    predecessor_manifest.write_text('{"old":true}\n')
+    predecessor_manifest.write_text('{"old":true,"terminal_status":"FAILED"}\n')
     predecessor_done = predecessor / "FAILED.json"
     predecessor_done.write_text(
         json.dumps({"status": "FAILED", "manifest_sha256": sf.file_sha256(predecessor_manifest)}) + "\n"
@@ -842,6 +883,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     manifest.write_text(
         json.dumps(
             {
+                "terminal_status": "DONE",
                 "source_commit": source_commit,
                 "configuration": configuration,
                 "cells": cells,
@@ -875,6 +917,20 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     )
 
     assert sf.validate_selection_record(selection)["pass_decision"] is True
+
+    bad_selection_data = json.loads(selection.read_text())
+    bad_selection_data["selected_root"] = str(tmp_path / "selected_root")
+    bad_selection = tmp_path / "feasibility_selection_011.json"
+    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="feasibility_NNN"):
+        sf.validate_selection_record(bad_selection)
+
+    bad_selection_data = json.loads(selection.read_text())
+    bad_selection_data["selected_root"] = 12
+    bad_selection = tmp_path / "feasibility_selection_012.json"
+    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="selected_root"):
+        sf.validate_selection_record(bad_selection)
 
     bad_name_selection = tmp_path / "feasibility_selection_bad_name.json"
     bad_name_selection.write_text(selection.read_text())
@@ -927,6 +983,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     bad_manifest.write_text(
         json.dumps(
             {
+                "terminal_status": "DONE",
                 "source_commit": source_commit,
                 "configuration": configuration,
                 "cells": bad_cells,
@@ -953,12 +1010,12 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     malformed_predecessor = tmp_path / "feasibility_bad_terminal"
     malformed_predecessor.mkdir()
     malformed_manifest = malformed_predecessor / "manifest.json"
-    malformed_manifest.write_text('{"old":true}\n')
+    malformed_manifest.write_text('{"old":true,"terminal_status":"FAILED"}\n')
     malformed_done = malformed_predecessor / "FAILED.json"
     malformed_done.write_text('{"status":"FAILED"}\n')
     with pytest.raises(ValueError, match="does not bind"):
         sf.terminal_binding(malformed_predecessor)
 
     predecessor_done.write_text('{"status":"DONE"}\n')
-    with pytest.raises(ValueError, match="checksum mismatch"):
+    with pytest.raises(ValueError, match="status does not match"):
         sf.validate_selection_record(selection)
