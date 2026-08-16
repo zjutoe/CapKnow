@@ -645,6 +645,10 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     tampered[0]["exact_matches"] = 51
     with pytest.raises(ValueError, match="52/64"):
         sf.validate_cell_counts(tampered)
+    tampered = [dict(cell) for cell in cells]
+    tampered[0]["exact_matches"] = 65
+    with pytest.raises(ValueError, match="exact_matches"):
+        sf.validate_cell_counts(tampered)
 
     cell_dir = tmp_path / "hex_copy__small__seed0"
     cell_dir.mkdir()
@@ -722,14 +726,20 @@ def test_feasibility_failed_terminal_binds_manifest(tmp_path: Path) -> None:
 
 def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_path: Path) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    source_commit = "source-sha"
+    configuration = {"training_steps": 1500}
+    cells = _passing_feasibility_cells()
 
     lineage_root = tmp_path / "feasibility_001"
     lineage_root.mkdir()
     lineage_manifest = lineage_root / "manifest.json"
-    lineage_manifest.write_text('{"lineage":true}\n')
+    lineage_manifest.write_text(
+        json.dumps({"source_commit": source_commit, "configuration": configuration, "cells": cells}, sort_keys=True)
+        + "\n"
+    )
     lineage_done = lineage_root / "DONE.json"
     lineage_done.write_text(
-        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(lineage_manifest)}) + "\n"
+        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(lineage_manifest), "cells": cells}) + "\n"
     )
     predecessor_selection = tmp_path / "feasibility_selection_001.json"
     predecessor_selection.write_text(
@@ -737,9 +747,9 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
             {
                 "selected_root": str(lineage_root),
                 "selected_manifest_sha256": sf.file_sha256(lineage_manifest),
-                "source_commit": "source-sha",
-                "configuration": {"training_steps": 1500},
-                "per_cell_counts": _passing_feasibility_cells(),
+                "source_commit": source_commit,
+                "configuration": configuration,
+                "per_cell_counts": cells,
                 "pass_decision": True,
                 "independent_review_verdict": "accepted",
                 "predecessor_roots": [],
@@ -753,15 +763,20 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     root = tmp_path / "feasibility_002"
     root.mkdir()
     manifest = root / "manifest.json"
-    manifest.write_text('{"ok":true}\n')
+    manifest.write_text(
+        json.dumps({"source_commit": source_commit, "configuration": configuration, "cells": cells}, sort_keys=True)
+        + "\n"
+    )
     done = root / "DONE.json"
-    done.write_text(json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(manifest)}) + "\n")
+    done.write_text(json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(manifest), "cells": cells}) + "\n")
     predecessor = tmp_path / "feasibility_000"
     predecessor.mkdir()
     predecessor_manifest = predecessor / "manifest.json"
     predecessor_manifest.write_text('{"old":true}\n')
     predecessor_done = predecessor / "FAILED.json"
-    predecessor_done.write_text('{"status":"FAILED"}\n')
+    predecessor_done.write_text(
+        json.dumps({"status": "FAILED", "manifest_sha256": sf.file_sha256(predecessor_manifest)}) + "\n"
+    )
 
     selection = tmp_path / "feasibility_selection_002.json"
     selection.write_text(
@@ -769,9 +784,9 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
             {
                 "selected_root": str(root),
                 "selected_manifest_sha256": sf.file_sha256(manifest),
-                "source_commit": "source-sha",
-                "configuration": {"training_steps": 1500},
-                "per_cell_counts": _passing_feasibility_cells(),
+                "source_commit": source_commit,
+                "configuration": configuration,
+                "per_cell_counts": cells,
                 "pass_decision": True,
                 "independent_review_verdict": "accepted",
                 "predecessor_roots": [
@@ -792,6 +807,30 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     )
 
     assert sf.validate_selection_record(selection)["pass_decision"] is True
+    bad_selection_data = json.loads(selection.read_text())
+    bad_selection_data["source_commit"] = "wrong-source"
+    bad_selection = tmp_path / "feasibility_selection_bad_source.json"
+    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="source_commit"):
+        sf.validate_selection_record(bad_selection)
+
+    bad_selection_data = json.loads(selection.read_text())
+    bad_selection_data["per_cell_counts"] = [dict(cell) for cell in cells]
+    bad_selection_data["per_cell_counts"][0]["exact_matches"] = 53
+    bad_selection = tmp_path / "feasibility_selection_bad_cells.json"
+    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="per_cell_counts"):
+        sf.validate_selection_record(bad_selection)
+
+    malformed_predecessor_done = predecessor / "FAILED.json"
+    malformed_predecessor_done.write_text('{"status":"FAILED"}\n')
+    bad_selection_data = json.loads(selection.read_text())
+    bad_selection_data["predecessor_roots"][0]["terminal_sha256"] = sf.file_sha256(malformed_predecessor_done)
+    bad_selection = tmp_path / "feasibility_selection_bad_predecessor_terminal.json"
+    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="does not bind"):
+        sf.validate_selection_record(bad_selection)
+
     predecessor_done.write_text('{"status":"DONE"}\n')
     with pytest.raises(ValueError, match="checksum mismatch"):
         sf.validate_selection_record(selection)

@@ -246,9 +246,13 @@ def validate_cell_counts(cells: Sequence[dict[str, object]]) -> None:
         if key in seen:
             raise ValueError(f"Duplicate feasibility cell: {key!r}.")
         seen.add(key)
-        if int(cell["eval_count"]) != EVAL_RECORDS_PER_FAMILY:
+        eval_count = int(cell["eval_count"])
+        exact_matches = int(cell["exact_matches"])
+        if eval_count != EVAL_RECORDS_PER_FAMILY:
             raise ValueError("Every feasibility cell must evaluate 64 records.")
-        passed = int(cell["exact_matches"]) >= PASS_THRESHOLD
+        if not 0 <= exact_matches <= eval_count:
+            raise ValueError("Feasibility exact_matches must satisfy 0 <= exact_matches <= eval_count.")
+        passed = exact_matches >= PASS_THRESHOLD
         if bool(cell["passed"]) != passed:
             raise ValueError("Feasibility cell pass/fail does not match the 52/64 requirement.")
     missing = expected_keys - seen
@@ -445,20 +449,31 @@ def write_terminal(
 
 
 def terminal_binding(root: Path) -> dict[str, object]:
-    terminal = root / "DONE.json"
-    if not terminal.exists():
-        terminal = root / "FAILED.json"
-    if not terminal.exists():
-        raise ValueError(f"Predecessor root lacks DONE.json or FAILED.json: {root}")
-    manifest = root / "manifest.json"
-    if not manifest.exists():
-        raise ValueError(f"Predecessor root lacks manifest.json: {root}")
+    terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
     return {
         "path": str(root),
         "terminal_state": terminal.stem,
         "terminal_sha256": file_sha256(terminal),
-        "manifest_sha256": file_sha256(manifest),
+        "manifest_sha256": manifest_sha,
     }
+
+
+def load_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, str]:
+    terminal = root / "DONE.json"
+    if not terminal.exists():
+        terminal = root / "FAILED.json"
+    if not terminal.exists():
+        raise ValueError(f"Root lacks DONE.json or FAILED.json: {root}")
+    manifest = root / "manifest.json"
+    if not manifest.exists():
+        raise ValueError(f"Root lacks manifest.json: {root}")
+    manifest_sha = file_sha256(manifest)
+    terminal_data = json.loads(terminal.read_text())
+    if terminal_data.get("status") != terminal.stem:
+        raise ValueError("Terminal marker status does not match its filename.")
+    if terminal_data.get("manifest_sha256") != manifest_sha:
+        raise ValueError("Terminal marker does not bind the manifest checksum.")
+    return terminal, terminal_data, manifest, manifest_sha
 
 
 def selection_binding(path: Path) -> dict[str, object]:
@@ -496,20 +511,38 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
     terminal = root / "DONE.json"
     if not terminal.exists():
         raise ValueError("Selection record must bind a passing DONE root.")
+    manifest_data = json.loads(manifest.read_text())
     terminal_data = json.loads(terminal.read_text())
     if terminal_data.get("manifest_sha256") != data["selected_manifest_sha256"]:
         raise ValueError("Selected DONE terminal does not bind the selected manifest checksum.")
+    if terminal_data.get("status") != "DONE":
+        raise ValueError("Selected terminal status must be DONE.")
+    if manifest_data.get("source_commit") != data["source_commit"]:
+        raise ValueError("Selection record source_commit does not match selected manifest.")
+    if manifest_data.get("configuration") != data["configuration"]:
+        raise ValueError("Selection record configuration does not match selected manifest.")
     cells = data["per_cell_counts"]
     validate_cell_counts(cells)
+    if manifest_data.get("cells") != cells:
+        raise ValueError("Selection record per_cell_counts do not match selected manifest cells.")
+    if terminal_data.get("cells") != cells:
+        raise ValueError("Selection record per_cell_counts do not match selected DONE cells.")
     if not bool(data["pass_decision"]):
         raise ValueError("Selection record pass_decision must be true for a selected root.")
     for predecessor in data["predecessor_roots"]:
+        if predecessor["terminal_state"] not in {"DONE", "FAILED"}:
+            raise ValueError("Predecessor terminal_state must be DONE or FAILED.")
         terminal_path = Path(predecessor["path"]) / f"{predecessor['terminal_state']}.json"
         manifest_path = Path(predecessor["path"]) / "manifest.json"
         if file_sha256(terminal_path) != predecessor["terminal_sha256"]:
             raise ValueError("Predecessor terminal checksum mismatch.")
         if file_sha256(manifest_path) != predecessor["manifest_sha256"]:
             raise ValueError("Predecessor manifest checksum mismatch.")
+        terminal_data = json.loads(terminal_path.read_text())
+        if terminal_data.get("status") != predecessor["terminal_state"]:
+            raise ValueError("Predecessor terminal status does not match its binding.")
+        if terminal_data.get("manifest_sha256") != predecessor["manifest_sha256"]:
+            raise ValueError("Predecessor terminal does not bind the predecessor manifest checksum.")
     lineage_bindings = {str(Path(predecessor["path"]).resolve()): predecessor["sha256"] for predecessor in data["predecessor_selections"]}
     for predecessor in data["predecessor_selections"]:
         predecessor_path = Path(predecessor["path"])
