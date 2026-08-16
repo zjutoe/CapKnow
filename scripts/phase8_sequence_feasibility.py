@@ -43,7 +43,7 @@ BATCH_SIZE = 64
 PASS_THRESHOLD = 52
 ROOT_RE = re.compile(r"^feasibility_(\d{3})$")
 SELECTION_RE = re.compile(r"^feasibility_selection_(\d{3})\.json$")
-HEX_OPERAND_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9a-f]{16})(?![0-9A-Fa-f])")
+HEX_OPERAND_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9a-f]{16})(?![0-9A-Fa-f])", re.IGNORECASE)
 NAMED_VALUE_RE = re.compile(r"\b(?:red|blue|green|silver)-[te][0-9a-f]{8}\b")
 ARRAY_ITEM_RE = re.compile(r"\bs[te][0-9a-f]{8}\b")
 
@@ -189,7 +189,7 @@ def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
     prompt_and_answer = f"{record.prompt}\n{record.answer}"
     values: set[str] = set()
     if record.family == "hex_copy":
-        values.update(HEX_OPERAND_RE.findall(prompt_and_answer))
+        values.update(value.lower() for value in HEX_OPERAND_RE.findall(prompt_and_answer))
     elif record.family == "named_value_json":
         decoded = json.loads(record.answer)
         if not isinstance(decoded, str):
@@ -499,6 +499,7 @@ def validate_new_root(
     predecessor_roots: Sequence[Path] = (),
     predecessor_selections: Sequence[Path] = (),
 ) -> None:
+    require_canonical_path_string(str(root), "root", ROOT_RE)
     root_number = feasibility_root_number(root)
     previous_numbers = [feasibility_root_number(path) for path in predecessor_roots]
     for predecessor_root in predecessor_roots:
@@ -757,11 +758,13 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
     pass_decision = data["pass_decision"]
     if type(pass_decision) is not bool or pass_decision is not True:
         raise ValueError("Selection record pass_decision must be true for a selected root.")
+    predecessor_root_numbers: list[int] = []
     predecessor_selection_numbers: list[int] = []
     for predecessor in data["predecessor_roots"]:
         if not isinstance(predecessor, dict):
             raise ValueError("Predecessor root binding must be a JSON object.")
         predecessor_path = Path(require_canonical_path_string(predecessor.get("path"), "predecessor_root.path", ROOT_RE))
+        predecessor_root_numbers.append(feasibility_root_number(predecessor_path))
         predecessor_terminal_state = require_exact_str(predecessor.get("terminal_state"), "predecessor_root.terminal_state")
         if predecessor_terminal_state not in {"DONE", "FAILED"}:
             raise ValueError("Predecessor terminal_state must be DONE or FAILED.")
@@ -787,10 +790,18 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
         if file_sha256(predecessor_path) != predecessor_sha:
             raise ValueError("Predecessor selection checksum mismatch.")
         predecessor_data = _validate_selection_record(predecessor_path, seen=seen)
+        predecessor_root_numbers.append(feasibility_root_number(Path(str(predecessor_data["selected_root"]))))
         for transitive in predecessor_data["predecessor_selections"]:
             transitive_path = str(Path(transitive["path"]).resolve())
             if lineage_bindings.get(transitive_path) != transitive["sha256"]:
                 raise ValueError("Selection record must bind transitive predecessor selection lineage.")
+    expected_root_number = max(predecessor_root_numbers, default=0) + 1
+    selected_root_number = feasibility_root_number(root)
+    if selected_root_number != expected_root_number:
+        raise ValueError(
+            f"Selection record selected_root must use next numbered root feasibility_{expected_root_number:03d}; "
+            f"got {root.name!r}."
+        )
     expected_selection_number = max(predecessor_selection_numbers, default=0) + 1
     if current_number != expected_selection_number:
         raise ValueError(
@@ -865,11 +876,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Phase 8 non-scientific sequence-transduction feasibility runner.")
     subparsers = parser.add_subparsers(dest="command", required=True)
     run = subparsers.add_parser("run")
-    run.add_argument("--root", required=True, type=Path)
-    run.add_argument("--predecessor-root", action="append", type=Path, default=[])
-    run.add_argument("--predecessor-selection", action="append", type=Path, default=[])
+    run.add_argument("--root", required=True)
+    run.add_argument("--predecessor-root", action="append", default=[])
+    run.add_argument("--predecessor-selection", action="append", default=[])
     validate = subparsers.add_parser("validate-selection")
-    validate.add_argument("path", type=Path)
+    validate.add_argument("path")
     inspect = subparsers.add_parser("inspect-records")
     inspect.add_argument("--family", choices=FAMILIES)
     return parser.parse_args(argv)
@@ -878,10 +889,19 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.command == "run":
-        run_suite(args.root, args.predecessor_root, args.predecessor_selection)
+        root = Path(require_canonical_path_string(args.root, "root", ROOT_RE))
+        predecessor_roots = tuple(
+            Path(require_canonical_path_string(path, "predecessor_root.path", ROOT_RE))
+            for path in args.predecessor_root
+        )
+        predecessor_selections = tuple(
+            Path(require_canonical_path_string(path, "predecessor_selection.path", SELECTION_RE))
+            for path in args.predecessor_selection
+        )
+        run_suite(root, predecessor_roots, predecessor_selections)
         return 0
     if args.command == "validate-selection":
-        validate_selection_record(args.path)
+        validate_selection_record(Path(require_canonical_path_string(args.path, "selection_record.path", SELECTION_RE)))
         return 0
     if args.command == "inspect-records":
         families = (args.family,) if args.family else FAMILIES

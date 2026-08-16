@@ -714,6 +714,34 @@ def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -
         sf.validate_feasibility_records(tuple(records))
 
 
+def test_feasibility_hex_semantic_overlap_is_case_insensitive() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    lower_hex = "abcdef0123456789"
+    upper_hex = lower_hex.upper()
+    train = sf.FeasibilityRecord(
+        family="hex_copy",
+        split="train",
+        index=0,
+        template_id="train-surface",
+        operand_id="train-value",
+        prompt=f"copy {lower_hex}",
+        answer=lower_hex,
+    )
+    eval_record = sf.FeasibilityRecord(
+        family="hex_copy",
+        split="eval",
+        index=0,
+        template_id="eval-surface",
+        operand_id="eval-value",
+        prompt=f"copy {upper_hex}",
+        answer=upper_hex,
+    )
+
+    assert sf.semantic_values_for_record(eval_record) == frozenset({lower_hex})
+    with pytest.raises(ValueError, match="semantic values"):
+        sf.validate_feasibility_records((train, eval_record))
+
+
 def test_feasibility_prompt_surface_overlap_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     surfaces = {
@@ -751,6 +779,10 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(tmp_path: Path) 
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     with pytest.raises(ValueError, match="next numbered root"):
         sf.validate_new_root(tmp_path / "feasibility_002")
+    with pytest.raises(ValueError, match="canonical path spelling"):
+        sf.validate_new_root(tmp_path / "alias" / ".." / "feasibility_001")
+    with pytest.raises(ValueError, match="canonical path spelling"):
+        sf.main(["run", "--root", f"{tmp_path}//feasibility_001"])
 
     predecessor = tmp_path / "feasibility_001"
     predecessor.mkdir()
@@ -882,6 +914,13 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
             data.update(overrides)
         path.write_text(json.dumps(data, sort_keys=True) + "\n")
 
+    first_bad_root = tmp_path / "feasibility_999"
+    first_bad_manifest, _first_bad_done = write_root(first_bad_root, "DONE", cells, [], [])
+    first_bad_selection = tmp_path / "bad_first_selected_root" / "feasibility_selection_001.json"
+    write_selection(first_bad_selection, first_bad_root, first_bad_manifest, [], [])
+    with pytest.raises(ValueError, match="next numbered root"):
+        sf.validate_selection_record(first_bad_selection)
+
     predecessor = tmp_path / "feasibility_001"
     predecessor.mkdir()
     predecessor_manifest = predecessor / "manifest.json"
@@ -898,6 +937,15 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
             "manifest_sha256": sf.file_sha256(predecessor_manifest),
         }
     ]
+
+    gapped_dir = tmp_path / "gapped_selected_root"
+    gapped_dir.mkdir()
+    gapped_root = gapped_dir / "feasibility_003"
+    gapped_manifest, _gapped_done = write_root(gapped_root, "DONE", cells, predecessor_roots, [])
+    gapped_selection = gapped_dir / "feasibility_selection_001.json"
+    write_selection(gapped_selection, gapped_root, gapped_manifest, predecessor_roots, [])
+    with pytest.raises(ValueError, match="next numbered root"):
+        sf.validate_selection_record(gapped_selection)
 
     lineage_root = tmp_path / "feasibility_002"
     lineage_manifest, _lineage_done = write_root(lineage_root, "DONE", cells, predecessor_roots, [])
