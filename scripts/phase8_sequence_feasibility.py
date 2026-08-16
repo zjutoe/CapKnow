@@ -62,6 +62,65 @@ SCIENTIFIC_MARKERS = (
 
 GENERIC_JSON_MARKERS = frozenset({"true", "false", "null", "unable", "[]", "{}"})
 
+PROMPT_SURFACES: dict[str, dict[str, tuple[str, ...]]] = {
+    "hex_copy": {
+        "train": (
+            "Repeat exactly these sixteen hex digits labeled batch {a}: {b}",
+            "Copy only this hex code from note {a}: {b}",
+            "Answer with the following hex string after cue {a}: {b}",
+            "Transcribe the sixteen-character hex token numbered {a}: {b}",
+        ),
+        "eval": (
+            "Produce the 16-digit hex code shown after sign {a}: {b}",
+            "Write just the hex sequence beside marker {a}: {b}",
+            "Return only the shown lowercase hex entry {a}: {b}",
+            "Give the exact hex characters listed at slot {a}: {b}",
+        ),
+    },
+    "named_value_json": {
+        "train": (
+            "Respond with compact JSON string for name {a}; entries are {b}",
+            "Using the listed pairs, emit compact JSON string for {a}: {b}",
+            "Choose {a} and output its compact JSON string from pairs {b}",
+            "From these pairs answer as compact JSON string for {a}: {b}",
+        ),
+        "eval": (
+            "Write a compact JSON string for label {a} after reading pairs {b}",
+            "Give the JSON string associated with {a}; pairs {b}",
+            "Output compact JSON string matching {a} in this roster {b}",
+            "Find {a} among pairs {b} and reply as compact JSON string",
+        ),
+    },
+    "boolean_json": {
+        "train": (
+            "Reply JSON bool for this comparison: {a} {b} {c}.",
+            "Convert the comparison to JSON bool: {a} {b} {c}.",
+            "For {a} {b} {c}, write only JSON bool.",
+            "Give JSON bool after checking: {a} {b} {c}.",
+        ),
+        "eval": (
+            "Write canonical JSON bool for: {a} {b} {c}.",
+            "Evaluate {a} {b} {c}; answer with JSON bool.",
+            "For the statement {a} {b} {c}, return JSON bool.",
+            "Decide {a} {b} {c} and emit JSON bool.",
+        ),
+    },
+    "array_json": {
+        "train": (
+            "Return compact JSON array from chunks: {a}",
+            "Convert these chunks into a compact JSON array: {a}",
+            "Write a compact JSON array containing these chunks: {a}",
+            "Emit JSON array only for chunks: {a}",
+        ),
+        "eval": (
+            "Produce compact JSON array from pieces: {a}",
+            "Turn these pieces into compact JSON array: {a}",
+            "Answer with a compact JSON array holding these pieces: {a}",
+            "Give JSON array only for pieces: {a}",
+        ),
+    },
+}
+
 
 @dataclass(frozen=True)
 class FeasibilityRecord:
@@ -91,6 +150,8 @@ def reject_scientific_markers(text: str) -> None:
 def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
     if not records:
         raise ValueError("records must be non-empty.")
+    for family in {record.family for record in records}:
+        validate_prompt_surface_contract(family)
     for record in records:
         reject_scientific_markers(record.prompt)
         reject_scientific_markers(record.answer)
@@ -100,6 +161,26 @@ def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
     eval_ = {(r.template_id, r.operand_id, r.prompt, r.answer) for r in records if r.split == "eval"}
     if train & eval_:
         raise ValueError("Feasibility train/evaluation records must be disjoint.")
+
+
+def validate_prompt_surface_contract(family: str) -> None:
+    surfaces = PROMPT_SURFACES.get(family)
+    if surfaces is None:
+        raise ValueError(f"Missing feasibility prompt surfaces for family: {family!r}.")
+    if set(surfaces) != {"train", "eval"}:
+        raise ValueError(f"Feasibility prompt surfaces for {family!r} must define train and eval splits.")
+    train_surfaces = tuple(surfaces["train"])
+    eval_surfaces = tuple(surfaces["eval"])
+    if len(train_surfaces) != 4 or len(eval_surfaces) != 4:
+        raise ValueError(f"Feasibility prompt surfaces for {family!r} must define four train and four eval forms.")
+    if len(set(train_surfaces)) != len(train_surfaces) or len(set(eval_surfaces)) != len(eval_surfaces):
+        raise ValueError(f"Feasibility prompt surfaces for {family!r} must be unique within each split.")
+    if set(train_surfaces) & set(eval_surfaces):
+        raise ValueError(f"Feasibility prompt surface overlap between train and eval for {family!r}.")
+    for surface in (*train_surfaces, *eval_surfaces):
+        reject_scientific_markers(surface)
+        if "template" in surface.lower():
+            raise ValueError("Feasibility prompt surfaces must not expose template markers.")
 
 
 @lru_cache(maxsize=1)
@@ -164,26 +245,28 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
     rng = random.Random(730000 + 10000 * FAMILIES.index(family) + operand_number)
     template_id = f"seq_{family}_{split}_{index % 4}"
     operand_id = f"seq_operand_{family}_{operand_number:05d}"
+    surface = PROMPT_SURFACES[family][split][index % 4]
     if family == "hex_copy":
         value = f"{rng.getrandbits(64):016x}"
-        prompt = f"Echo the 16 hex characters after tag {index % 17}: {value}"
+        prompt = surface.format(a=index % 17, b=value)
         answer = value
     elif family == "named_value_json":
         keys = ("red", "blue", "green", "silver")
         target = keys[index % len(keys)]
         fields = {key: f"{key}-{rng.randrange(1000, 9999)}" for key in keys}
-        prompt = "Return compact JSON for " + target + " from " + "; ".join(f"{key}={fields[key]}" for key in keys)
+        field_text = "; ".join(f"{key}={fields[key]}" for key in keys)
+        prompt = surface.format(a=target, b=field_text)
         answer = compact_json(fields[target])
     elif family == "boolean_json":
         left = rng.randrange(1, 200)
         right = rng.randrange(1, 200)
         truth = left <= right if index % 2 == 0 else left > right
         relation = "is at most" if index % 2 == 0 else "is greater than"
-        prompt = f"Return JSON truth value: {left} {relation} {right}."
+        prompt = surface.format(a=left, b=relation, c=right)
         answer = "true" if truth else "false"
     elif family == "array_json":
         items = [f"s{rng.randrange(100, 999)}" for _ in range(1 + index % 4)]
-        prompt = "Return compact JSON list from operands: " + " | ".join(items)
+        prompt = surface.format(a=" | ".join(items))
         answer = compact_json(items)
     else:
         raise AssertionError("unreachable")
@@ -241,7 +324,9 @@ def validate_cell_counts(cells: Sequence[dict[str, object]]) -> None:
     seen: set[tuple[str, str, int]] = set()
     for cell in cells:
         seed = require_exact_int(cell["seed"], "seed")
-        key = (str(cell["family"]), str(cell["model_size"]), seed)
+        family = require_exact_str(cell["family"], "family")
+        model_size = require_exact_str(cell["model_size"], "model_size")
+        key = (family, model_size, seed)
         if key not in expected_keys:
             raise ValueError(f"Unexpected feasibility cell: {key!r}.")
         if key in seen:
@@ -254,9 +339,8 @@ def validate_cell_counts(cells: Sequence[dict[str, object]]) -> None:
             raise ValueError("Every feasibility cell must evaluate 64 records.")
         if not 0 <= exact_matches <= eval_count:
             raise ValueError("Feasibility exact_matches must satisfy 0 <= exact_matches <= eval_count.")
-        passed = exact_matches >= PASS_THRESHOLD
-        if passed_value != passed:
-            raise ValueError("Feasibility cell pass/fail does not match the 52/64 requirement.")
+        if exact_matches < PASS_THRESHOLD or passed_value is not True:
+            raise ValueError("Every feasibility cell must pass the independent 52/64 requirement.")
     missing = expected_keys - seen
     if missing:
         raise ValueError(f"Missing feasibility cells: {sorted(missing)!r}.")
@@ -271,6 +355,12 @@ def require_exact_int(value: object, field_name: str) -> int:
 def require_exact_bool(value: object, field_name: str) -> bool:
     if type(value) is not bool:
         raise ValueError(f"Feasibility cell {field_name} must be a JSON boolean.")
+    return value
+
+
+def require_exact_str(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"Feasibility cell {field_name} must be a JSON string.")
     return value
 
 
@@ -405,11 +495,12 @@ def build_manifest(
     terminal_status: str,
     failure: str | None = None,
 ) -> dict[str, object]:
+    source_commit = git_output(["git", "rev-parse", "HEAD"])
     return {
         "protocol": "phase8_sequence_feasibility",
         "terminal_status": terminal_status,
         "failure": failure,
-        "source_commit": git_output(["git", "rev-parse", "HEAD"]),
+        "source_commit": source_commit,
         "configuration": {
             "families": FAMILIES,
             "model_sizes": MODEL_SIZES,
@@ -427,11 +518,59 @@ def build_manifest(
             "cuda_available": torch.cuda.is_available(),
             "cuda": torch.version.cuda,
             "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+            "gpu_driver": gpu_driver_version(),
         },
         "cells": list(cells),
         "predecessor_roots": [terminal_binding(path) for path in predecessor_roots],
         "predecessor_selections": [selection_binding(path) for path in predecessor_selections],
         "file_inventory": inventory(root),
+    }
+
+
+def gpu_driver_version() -> str | None:
+    driver = getattr(torch.version, "driver", None)
+    if driver is None:
+        return None
+    return str(driver)
+
+
+def build_summary(
+    cells: Sequence[dict[str, object]],
+    predecessor_roots: Sequence[Path],
+    predecessor_selections: Sequence[Path],
+    terminal_status: str,
+    *,
+    failure: str | None = None,
+) -> dict[str, object]:
+    source_commit = git_output(["git", "rev-parse", "HEAD"])
+    passed_cells = sum(1 for cell in cells if cell.get("passed") is True)
+    return {
+        "protocol": "phase8_sequence_feasibility",
+        "terminal_status": terminal_status,
+        "failure": failure,
+        "source": {
+            "commit": source_commit,
+            "script": "scripts/phase8_sequence_feasibility.py",
+        },
+        "configuration": {
+            "families": FAMILIES,
+            "model_sizes": MODEL_SIZES,
+            "seeds": SEEDS,
+            "train_records_per_family": TRAIN_RECORDS_PER_FAMILY,
+            "eval_records_per_family": EVAL_RECORDS_PER_FAMILY,
+            "training_steps": TRAINING_STEPS,
+            "batch_size": BATCH_SIZE,
+            "pass_threshold": PASS_THRESHOLD,
+        },
+        "cells": list(cells),
+        "summary": {
+            "total_cells": len(cells),
+            "passed_cells": passed_cells,
+            "failed_cells": len(cells) - passed_cells,
+            "all_cells_passed": len(cells) == len(FAMILIES) * len(MODEL_SIZES) * len(SEEDS) and passed_cells == len(cells),
+        },
+        "predecessor_root_count": len(predecessor_roots),
+        "predecessor_selection_count": len(predecessor_selections),
     }
 
 
@@ -446,6 +585,10 @@ def write_terminal(
 ) -> None:
     if terminal_status not in {"DONE", "FAILED"}:
         raise ValueError(f"Unknown terminal status: {terminal_status!r}.")
+    write_json(
+        root / "summary.json",
+        build_summary(cells, predecessor_roots, predecessor_selections, terminal_status, failure=failure),
+    )
     manifest = build_manifest(root, cells, predecessor_roots, predecessor_selections, terminal_status, failure)
     manifest_path = root / "manifest.json"
     write_json(manifest_path, manifest)
@@ -499,6 +642,7 @@ def validate_selection_record(path: Path) -> dict[str, object]:
 
 
 def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, object]:
+    selection_record_number(path)
     resolved = path.resolve()
     if resolved in seen:
         raise ValueError(f"Selection-record lineage contains a cycle at {path}.")
@@ -545,7 +689,8 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
         raise ValueError("Selection record predecessor_roots do not match selected manifest.")
     if manifest_data.get("predecessor_selections") != data["predecessor_selections"]:
         raise ValueError("Selection record predecessor_selections do not match selected manifest.")
-    if not bool(data["pass_decision"]):
+    pass_decision = data["pass_decision"]
+    if type(pass_decision) is not bool or pass_decision is not True:
         raise ValueError("Selection record pass_decision must be true for a selected root.")
     for predecessor in data["predecessor_roots"]:
         if predecessor["terminal_state"] not in {"DONE", "FAILED"}:
@@ -573,6 +718,13 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
                 raise ValueError("Selection record must bind transitive predecessor selection lineage.")
     seen.remove(resolved)
     return data
+
+
+def selection_record_number(path: Path) -> int:
+    match = SELECTION_RE.match(path.name)
+    if match is None:
+        raise ValueError("Selection record basename must be immutable numbered form feasibility_selection_NNN.json.")
+    return int(match.group(1))
 
 
 def inventory(root: Path) -> list[dict[str, object]]:

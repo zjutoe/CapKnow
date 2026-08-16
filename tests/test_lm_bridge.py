@@ -629,11 +629,16 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         eval_operands = {record.operand_id for record in splits["eval"]}
         train_templates = {record.template_id for record in splits["train"]}
         eval_templates = {record.template_id for record in splits["eval"]}
+        train_prompts = {record.prompt for record in splits["train"]}
+        eval_prompts = {record.prompt for record in splits["eval"]}
         assert train_operands.isdisjoint(eval_operands)
         assert train_templates.isdisjoint(eval_templates)
+        assert train_prompts.isdisjoint(eval_prompts)
+        assert set(sf.PROMPT_SURFACES[family]["train"]).isdisjoint(sf.PROMPT_SURFACES[family]["eval"])
         for record in (*splits["train"], *splits["eval"]):
             sf.reject_scientific_markers(record.prompt)
             sf.reject_scientific_markers(record.answer)
+            assert "template" not in record.prompt.lower()
 
     cells = _passing_feasibility_cells()
     sf.validate_cell_counts(cells)
@@ -643,6 +648,11 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         sf.validate_cell_counts(tampered)
     tampered = [dict(cell) for cell in cells]
     tampered[0]["exact_matches"] = 51
+    with pytest.raises(ValueError, match="52/64"):
+        sf.validate_cell_counts(tampered)
+    tampered = [dict(cell) for cell in cells]
+    tampered[0]["exact_matches"] = 51
+    tampered[0]["passed"] = False
     with pytest.raises(ValueError, match="52/64"):
         sf.validate_cell_counts(tampered)
     tampered = [dict(cell) for cell in cells]
@@ -674,6 +684,21 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     bad[0] = sf.FeasibilityRecord(**{**bad[0].__dict__, "prompt": "MEMORY marker"})
     with pytest.raises(ValueError, match="forbidden Phase 8"):
         sf.validate_feasibility_records(tuple(bad))
+
+
+def test_feasibility_prompt_surface_overlap_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    surfaces = {
+        family: {split: tuple(values) for split, values in by_split.items()}
+        for family, by_split in sf.PROMPT_SURFACES.items()
+    }
+    surfaces["hex_copy"]["eval"] = (surfaces["hex_copy"]["train"][0], *surfaces["hex_copy"]["eval"][1:])
+    monkeypatch.setattr(sf, "PROMPT_SURFACES", surfaces)
+
+    with pytest.raises(ValueError, match="surface overlap"):
+        sf.validate_prompt_surface_contract("hex_copy")
+    with pytest.raises(ValueError, match="surface overlap"):
+        sf.grouped_records()
 
 
 def test_feasibility_script_direct_cli_inspect_records() -> None:
@@ -723,15 +748,27 @@ def test_feasibility_failed_terminal_binds_manifest(tmp_path: Path) -> None:
     sf.write_terminal(tmp_path, "FAILED", [], (), (), failure="synthetic failure")
 
     manifest = tmp_path / "manifest.json"
+    summary = tmp_path / "summary.json"
     failed = tmp_path / "FAILED.json"
     assert manifest.exists()
+    assert summary.exists()
     assert failed.exists()
     failed_data = json.loads(failed.read_text())
     manifest_data = json.loads(manifest.read_text())
+    summary_data = json.loads(summary.read_text())
     assert failed_data["status"] == "FAILED"
     assert failed_data["manifest_sha256"] == sf.file_sha256(manifest)
     assert manifest_data["terminal_status"] == "FAILED"
     assert manifest_data["failure"] == "synthetic failure"
+    assert manifest_data["environment"]["gpu_driver"] == sf.gpu_driver_version()
+    assert summary_data["protocol"] == "phase8_sequence_feasibility"
+    assert summary_data["source"]["script"] == "scripts/phase8_sequence_feasibility.py"
+    assert summary_data["configuration"]["pass_threshold"] == sf.PASS_THRESHOLD
+    assert summary_data["cells"] == []
+    summary_inventory = [row for row in manifest_data["file_inventory"] if row["path"] == "summary.json"]
+    assert summary_inventory == [
+        {"path": "summary.json", "sha256": sf.file_sha256(summary), "bytes": summary.stat().st_size}
+    ]
 
 
 def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_path: Path) -> None:
@@ -838,9 +875,15 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     )
 
     assert sf.validate_selection_record(selection)["pass_decision"] is True
+
+    bad_name_selection = tmp_path / "feasibility_selection_bad_name.json"
+    bad_name_selection.write_text(selection.read_text())
+    with pytest.raises(ValueError, match="feasibility_selection_NNN"):
+        sf.validate_selection_record(bad_name_selection)
+
     bad_selection_data = json.loads(selection.read_text())
     bad_selection_data["source_commit"] = "wrong-source"
-    bad_selection = tmp_path / "feasibility_selection_bad_source.json"
+    bad_selection = tmp_path / "feasibility_selection_003.json"
     bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
     with pytest.raises(ValueError, match="source_commit"):
         sf.validate_selection_record(bad_selection)
@@ -848,23 +891,63 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     bad_selection_data = json.loads(selection.read_text())
     bad_selection_data["per_cell_counts"] = [dict(cell) for cell in cells]
     bad_selection_data["per_cell_counts"][0]["exact_matches"] = 53
-    bad_selection = tmp_path / "feasibility_selection_bad_cells.json"
+    bad_selection = tmp_path / "feasibility_selection_004.json"
     bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
     with pytest.raises(ValueError, match="per_cell_counts"):
         sf.validate_selection_record(bad_selection)
 
     bad_selection_data = json.loads(selection.read_text())
     bad_selection_data["predecessor_roots"] = []
-    bad_selection = tmp_path / "feasibility_selection_missing_predecessor_root.json"
+    bad_selection = tmp_path / "feasibility_selection_005.json"
     bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
     with pytest.raises(ValueError, match="predecessor_roots"):
         sf.validate_selection_record(bad_selection)
 
     bad_selection_data = json.loads(selection.read_text())
     bad_selection_data["predecessor_selections"] = []
-    bad_selection = tmp_path / "feasibility_selection_missing_predecessor_selection.json"
+    bad_selection = tmp_path / "feasibility_selection_006.json"
     bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
     with pytest.raises(ValueError, match="predecessor_selections"):
+        sf.validate_selection_record(bad_selection)
+
+    for offset, bad_value in enumerate(("true", 1, False), start=7):
+        bad_selection_data = json.loads(selection.read_text())
+        bad_selection_data["pass_decision"] = bad_value
+        bad_selection = tmp_path / f"feasibility_selection_{offset:03d}.json"
+        bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+        with pytest.raises(ValueError, match="pass_decision"):
+            sf.validate_selection_record(bad_selection)
+
+    bad_cells = [dict(cell) for cell in cells]
+    bad_cells[0]["exact_matches"] = 51
+    bad_cells[0]["passed"] = False
+    bad_root = tmp_path / "feasibility_003"
+    bad_root.mkdir()
+    bad_manifest = bad_root / "manifest.json"
+    bad_manifest.write_text(
+        json.dumps(
+            {
+                "source_commit": source_commit,
+                "configuration": configuration,
+                "cells": bad_cells,
+                "predecessor_roots": predecessor_roots,
+                "predecessor_selections": predecessor_selections,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    bad_done = bad_root / "DONE.json"
+    bad_done.write_text(
+        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(bad_manifest), "cells": bad_cells}) + "\n"
+    )
+    bad_selection_data = json.loads(selection.read_text())
+    bad_selection_data["selected_root"] = str(bad_root)
+    bad_selection_data["selected_manifest_sha256"] = sf.file_sha256(bad_manifest)
+    bad_selection_data["per_cell_counts"] = bad_cells
+    bad_selection = tmp_path / "feasibility_selection_010.json"
+    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="52/64"):
         sf.validate_selection_record(bad_selection)
 
     malformed_predecessor = tmp_path / "feasibility_bad_terminal"
