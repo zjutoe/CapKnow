@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -210,6 +211,17 @@ def test_evaluation_pack_identity_balance_styles_and_checksum() -> None:
         assert len({probe.answer for probe in by_task[task_id]}) == 64
 
 
+def test_evaluation_pack_prefix_budget_is_enforced() -> None:
+    pack = cg.build_evaluation_probe_pack()
+
+    assert max(cg.evaluation_prefix_token_count(probe.prompt) + 64 for probe in pack) <= 256
+
+    tampered = list(pack)
+    tampered[0] = replace(tampered[0], prompt="x" * 191)
+    with pytest.raises(ValueError, match="prefix length"):
+        cg.validate_evaluation_pack(tuple(tampered))
+
+
 def test_evaluation_pack_rejects_answer_tampering_preserving_boolean_balance() -> None:
     pack = list(cg.build_evaluation_probe_pack())
     search_indices = [idx for idx, probe in enumerate(pack) if probe.task_id == "SEARCH"]
@@ -384,6 +396,22 @@ def test_randomized_control_rejects_malformed_label_and_histogram_changes() -> N
             corpus_a_by_state=corpora_a,
             corpus_c_by_state=corpora_c,
         )
+
+
+def test_condition_c_single_state_validation_rejects_seen_composition_label_tamper() -> None:
+    corpus = list(cg.build_training_corpus("C", seed=0, state_mask=3, corpus_size="base"))
+    target_index = next(index for index, record in enumerate(corpus) if record.task_id in cg.SEEN_COMPOSITION_TASKS)
+    target = corpus[target_index]
+    context = json.loads(target.canonical_context)
+    tampered_answer = (
+        cg.UNABLE_RESPONSE
+        if target.answer != cg.UNABLE_RESPONSE
+        else cg.canonical_answer(target.task_id, context)
+    )
+    corpus[target_index] = replace(target, answer=tampered_answer)
+
+    with pytest.raises(ValueError, match="deterministic switch randomization"):
+        cg.validate_training_corpus(tuple(corpus), "C", seed=0, state_mask=3, corpus_size="base")
 
 
 def test_randomized_control_rejects_insufficient_randomization() -> None:

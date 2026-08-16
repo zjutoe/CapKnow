@@ -84,6 +84,9 @@ _TRAIN_TEMPLATES: tuple[str, ...] = ("train_a", "train_b", "train_c", "train_d")
 _EVALUATION_SPLIT = "evaluation"
 _TRAINING_SPLIT = "training"
 _MEMORY_SEARCH_TEMPLATE_PREFIX = "memory_search__"
+_EVALUATION_CONTEXT_WINDOW_TOKENS = 256
+_EVALUATION_COMPLETION_TOKENS = 64
+_EVALUATION_PREFIX_SPECIAL_TOKENS = 2
 
 _LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
@@ -582,7 +585,7 @@ def render_prompt(task_id: str, context: Mapping[str, Any], template_id: str, st
         items = _items_text(context["items"])
         if style == "explicit":
             prompt = (
-                f"First read that {key} maps to {value}. Then decide whether that read value appears in {items}. Return compact JSON true or false.",
+                f"Read {key}:{value}; is {value} in {items}? Return compact JSON true or false.",
                 f"Read {value} from key {key}; next, check whether {value} is in {items}. Return compact JSON true or false.",
                 f"Step one gives {value} for {key}. Step two asks whether that value occurs in {items}. Return compact JSON.",
                 f"Use {key} to read {value}, then answer whether the read value appears in {items} as compact JSON true or false.",
@@ -668,11 +671,22 @@ def build_training_corpus(
                 label = control_labels[(state_mask, task_id, record_index)]
             records.append(_training_record(condition, state_mask, task_id, record_index, label))
     corpus = tuple(records)
-    validate_training_corpus(corpus, condition, seed, state_mask, corpus_size)
+    _validate_training_corpus(corpus, condition, seed, state_mask, corpus_size, control_labels)
     return corpus
 
 
 def build_training_corpora(
+    condition: str,
+    seed: int,
+    corpus_size: str = "base",
+) -> Mapping[int, tuple[SplitRecord, ...]]:
+    result = _build_training_corpora(condition, seed, corpus_size)
+    if condition == "C":
+        validate_randomized_control(seed, corpus_size, corpus_c_by_state=result)
+    return result
+
+
+def _build_training_corpora(
     condition: str,
     seed: int,
     corpus_size: str = "base",
@@ -710,7 +724,7 @@ def _build_training_corpus_with_labels(
                 label = control_labels[(state_mask, task_id, record_index)]
             records.append(_training_record(condition, state_mask, task_id, record_index, label))
     corpus = tuple(records)
-    validate_training_corpus(corpus, condition, seed, state_mask, corpus_size)
+    _validate_training_corpus(corpus, condition, seed, state_mask, corpus_size, control_labels)
     return corpus
 
 
@@ -741,6 +755,17 @@ def validate_training_corpus(
     state_mask: int,
     corpus_size: str = "base",
 ) -> None:
+    _validate_training_corpus(records, condition, seed, state_mask, corpus_size, None)
+
+
+def _validate_training_corpus(
+    records: Sequence[SplitRecord],
+    condition: str,
+    seed: int,
+    state_mask: int,
+    corpus_size: str,
+    control_labels: Mapping[tuple[int, str, int], int] | None,
+) -> None:
     _validate_condition(condition)
     state_from_mask(state_mask)
     count = _records_per_family(corpus_size)
@@ -755,8 +780,13 @@ def validate_training_corpus(
     actual_positions = tuple((record.task_id, record.record_index) for record in records)
     if actual_positions != expected_positions:
         raise ValueError("Training corpus must use frozen task-stratified record order before shuffling.")
+    if condition == "C" and control_labels is None:
+        control_labels = _randomized_control_labels(seed, count)
     for record in records:
-        _validate_training_record(record, condition, state_mask)
+        control_label = None
+        if control_labels is not None and record.task_id in SEEN_COMPOSITION_TASKS:
+            control_label = control_labels[(state_mask, record.task_id, record.record_index)]
+        _validate_training_record(record, condition, state_mask, control_label)
 
 
 def validate_a_b_agreement(seed: int, state_mask: int, corpus_size: str = "base") -> None:
@@ -782,9 +812,9 @@ def validate_randomized_control(
 ) -> Mapping[str, Any]:
     count = _records_per_family(corpus_size)
     if corpus_a_by_state is None:
-        corpus_a_by_state = build_training_corpora("A", seed, corpus_size)
+        corpus_a_by_state = _build_training_corpora("A", seed, corpus_size)
     if corpus_c_by_state is None:
-        corpus_c_by_state = build_training_corpora("C", seed, corpus_size)
+        corpus_c_by_state = _build_training_corpora("C", seed, corpus_size)
     labels_once = _randomized_control_labels(seed, count)
     labels_twice = _randomized_control_labels(seed, count)
     if labels_once != labels_twice:
@@ -799,7 +829,7 @@ def validate_randomized_control(
         corpus_a = tuple(corpus_a_by_state[state_mask])
         corpus_c = tuple(corpus_c_by_state[state_mask])
         validate_training_corpus(corpus_a, "A", seed, state_mask, corpus_size)
-        validate_training_corpus(corpus_c, "C", seed, state_mask, corpus_size)
+        _validate_training_corpus(corpus_c, "C", seed, state_mask, corpus_size, labels_once)
         if len(corpus_a) != len(corpus_c):
             raise ValueError("Condition C record counts must match Condition A.")
         a_positive = 0
@@ -983,7 +1013,12 @@ def _state_training_answer(task_id: str, context: Mapping[str, Any], state_mask:
     return _canonical_json(value)
 
 
-def _validate_training_record(record: SplitRecord, condition: str, state_mask: int) -> None:
+def _validate_training_record(
+    record: SplitRecord,
+    condition: str,
+    state_mask: int,
+    control_label: int | None = None,
+) -> None:
     if record.split != _TRAINING_SPLIT:
         raise ValueError("Training corpus records must have training split metadata.")
     _reject_memory_search_training_record(record)
@@ -1012,8 +1047,12 @@ def _validate_training_record(record: SplitRecord, condition: str, state_mask: i
     elif record.task_id in PRIMITIVE_ORDER:
         expected_answer = _state_training_answer(record.task_id, context, state_mask)
     else:
-        expected_answer = canonical_answer(record.task_id, context) if record.answer != UNABLE_RESPONSE else UNABLE_RESPONSE
+        if control_label is None:
+            raise ValueError("Condition C composition records require deterministic switch labels.")
+        expected_answer = canonical_answer(record.task_id, context) if control_label else UNABLE_RESPONSE
     if record.answer != expected_answer:
+        if condition == "C" and record.task_id in SEEN_COMPOSITION_TASKS:
+            raise ValueError("Condition C label does not match deterministic switch randomization.")
         raise ValueError("Training record response target does not match the declared corpus condition.")
     leak_check_model_text(record.prompt)
     leak_check_model_text(record.answer)
@@ -1266,6 +1305,21 @@ def evaluation_pack_checksum(pack: Sequence[EvaluationProbe]) -> str:
     return sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def evaluation_prefix_token_count(prompt: str) -> int:
+    return len(prompt.encode("utf-8")) + _EVALUATION_PREFIX_SPECIAL_TOKENS
+
+
+def _validate_evaluation_prefix_budget(probe: EvaluationProbe) -> None:
+    prefix_tokens = evaluation_prefix_token_count(probe.prompt)
+    required_tokens = prefix_tokens + _EVALUATION_COMPLETION_TOKENS
+    if required_tokens > _EVALUATION_CONTEXT_WINDOW_TOKENS:
+        raise ValueError(
+            "Evaluation probe prefix length violates token budget: "
+            f"prefix {prefix_tokens} + completion {_EVALUATION_COMPLETION_TOKENS} "
+            f"> {_EVALUATION_CONTEXT_WINDOW_TOKENS} for {probe.task_id} record {probe.record_index}."
+        )
+
+
 def validate_evaluation_pack(pack: Sequence[EvaluationProbe]) -> None:
     if len(pack) != 512:
         raise ValueError("Evaluation pack must contain exactly 512 probes.")
@@ -1282,6 +1336,7 @@ def validate_evaluation_pack(pack: Sequence[EvaluationProbe]) -> None:
             raise ValueError("Evaluation pack task_id must match frozen task-major order.")
         if probe.probe_key != expected_probe_key:
             raise ValueError("Evaluation probe_key must be the frozen opaque key for its position.")
+        _validate_evaluation_prefix_budget(probe)
         leak_check_model_text(probe.prompt)
         leak_check_model_text(probe.answer)
         context = _parse_canonical_context(probe.canonical_context)
