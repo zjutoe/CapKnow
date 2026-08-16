@@ -642,6 +642,10 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
             sf.reject_scientific_markers(record.prompt)
             sf.reject_scientific_markers(record.answer)
             assert "template" not in record.prompt.lower()
+        decoy_record = sf.FeasibilityRecord(
+            **{**splits["train"][0].__dict__, "semantic_values": ("metadata-decoy",)}
+        )
+        assert "metadata-decoy" not in sf.semantic_values_for_record(decoy_record)
 
     cells = _passing_feasibility_cells()
     sf.validate_cell_counts(cells)
@@ -689,15 +693,20 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         sf.validate_feasibility_records(tuple(bad))
 
 
-def test_feasibility_semantic_train_eval_overlap_is_rejected() -> None:
+def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    records = list(sf.build_family_records("array_json"))
-    train_value = next(iter(sf.semantic_values_for_record(next(record for record in records if record.split == "train"))))
+    records = list(sf.build_family_records("named_value_json"))
+    train_value = next(
+        value
+        for value in sf.semantic_values_for_record(next(record for record in records if record.split == "train"))
+        if value.startswith(("red-", "blue-", "green-", "silver-"))
+    )
     eval_index = next(index for index, record in enumerate(records) if record.split == "eval")
     records[eval_index] = sf.FeasibilityRecord(
         **{
             **records[eval_index].__dict__,
-            "semantic_values": (train_value,),
+            "prompt": f"{records[eval_index].prompt} stray overlap token {train_value}",
+            "semantic_values": (),
         }
     )
 
@@ -817,47 +826,63 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     configuration = {"training_steps": 1500}
     cells = _passing_feasibility_cells()
 
-    lineage_root = tmp_path / "feasibility_001"
-    lineage_root.mkdir()
-    lineage_manifest = lineage_root / "manifest.json"
-    lineage_manifest.write_text(
-        json.dumps(
-            {
-                "terminal_status": "DONE",
-                "source_commit": source_commit,
-                "configuration": configuration,
-                "cells": cells,
-                "predecessor_roots": [],
-                "predecessor_selections": [],
-            },
-            sort_keys=True,
+    def write_root(
+        root: Path,
+        status: str,
+        root_cells: list[dict[str, object]],
+        predecessor_roots: list[dict[str, object]],
+        predecessor_selections: list[dict[str, object]],
+    ) -> tuple[Path, Path]:
+        root.mkdir()
+        manifest = root / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "terminal_status": status,
+                    "source_commit": source_commit,
+                    "configuration": configuration,
+                    "cells": root_cells,
+                    "predecessor_roots": predecessor_roots,
+                    "predecessor_selections": predecessor_selections,
+                },
+                sort_keys=True,
+            )
+            + "\n"
         )
-        + "\n"
-    )
-    lineage_done = lineage_root / "DONE.json"
-    lineage_done.write_text(
-        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(lineage_manifest), "cells": cells}) + "\n"
-    )
-    predecessor_selection = tmp_path / "feasibility_selection_001.json"
-    predecessor_selection.write_text(
-        json.dumps(
-            {
-                "selected_root": str(lineage_root),
-                "selected_manifest_sha256": sf.file_sha256(lineage_manifest),
-                "source_commit": source_commit,
-                "configuration": configuration,
-                "per_cell_counts": cells,
-                "pass_decision": True,
-                "independent_review_verdict": "accepted",
-                "predecessor_roots": [],
-                "predecessor_selections": [],
-            },
-            sort_keys=True,
+        terminal = root / f"{status}.json"
+        terminal.write_text(
+            json.dumps({"status": status, "manifest_sha256": sf.file_sha256(manifest), "cells": root_cells})
+            + "\n"
         )
-        + "\n"
-    )
+        return manifest, terminal
 
-    predecessor = tmp_path / "feasibility_000"
+    def write_selection(
+        path: Path,
+        root: Path,
+        manifest: Path,
+        predecessor_roots: list[dict[str, object]],
+        predecessor_selections: list[dict[str, object]],
+        *,
+        selected_cells: list[dict[str, object]] | None = None,
+        overrides: dict[str, object] | None = None,
+    ) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "selected_root": str(root),
+            "selected_manifest_sha256": sf.file_sha256(manifest),
+            "source_commit": source_commit,
+            "configuration": configuration,
+            "per_cell_counts": cells if selected_cells is None else selected_cells,
+            "pass_decision": True,
+            "independent_review_verdict": "accepted",
+            "predecessor_roots": predecessor_roots,
+            "predecessor_selections": predecessor_selections,
+        }
+        if overrides:
+            data.update(overrides)
+        path.write_text(json.dumps(data, sort_keys=True) + "\n")
+
+    predecessor = tmp_path / "feasibility_001"
     predecessor.mkdir()
     predecessor_manifest = predecessor / "manifest.json"
     predecessor_manifest.write_text('{"old":true,"terminal_status":"FAILED"}\n')
@@ -873,141 +898,164 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
             "manifest_sha256": sf.file_sha256(predecessor_manifest),
         }
     ]
+
+    lineage_root = tmp_path / "feasibility_002"
+    lineage_manifest, _lineage_done = write_root(lineage_root, "DONE", cells, predecessor_roots, [])
+    predecessor_selection = tmp_path / "feasibility_selection_001.json"
+    write_selection(predecessor_selection, lineage_root, lineage_manifest, predecessor_roots, [])
     predecessor_selections = [
         {"path": str(predecessor_selection), "sha256": sf.file_sha256(predecessor_selection)}
     ]
 
-    root = tmp_path / "feasibility_002"
-    root.mkdir()
-    manifest = root / "manifest.json"
-    manifest.write_text(
-        json.dumps(
-            {
-                "terminal_status": "DONE",
-                "source_commit": source_commit,
-                "configuration": configuration,
-                "cells": cells,
-                "predecessor_roots": predecessor_roots,
-                "predecessor_selections": predecessor_selections,
-            },
-            sort_keys=True,
-        )
-        + "\n"
-    )
-    done = root / "DONE.json"
-    done.write_text(json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(manifest), "cells": cells}) + "\n")
+    root = tmp_path / "feasibility_003"
+    manifest, done = write_root(root, "DONE", cells, predecessor_roots, predecessor_selections)
 
     selection = tmp_path / "feasibility_selection_002.json"
-    selection.write_text(
-        json.dumps(
-            {
-                "selected_root": str(root),
-                "selected_manifest_sha256": sf.file_sha256(manifest),
-                "source_commit": source_commit,
-                "configuration": configuration,
-                "per_cell_counts": cells,
-                "pass_decision": True,
-                "independent_review_verdict": "accepted",
-                "predecessor_roots": predecessor_roots,
-                "predecessor_selections": predecessor_selections,
-            },
-            sort_keys=True,
-        )
-        + "\n"
-    )
+    write_selection(selection, root, manifest, predecessor_roots, predecessor_selections)
 
     assert sf.validate_selection_record(selection)["pass_decision"] is True
 
-    bad_selection_data = json.loads(selection.read_text())
-    bad_selection_data["selected_root"] = str(tmp_path / "selected_root")
-    bad_selection = tmp_path / "feasibility_selection_011.json"
-    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    bad_selection = tmp_path / "bad_selected_root" / "feasibility_selection_002.json"
+    write_selection(
+        bad_selection,
+        root,
+        manifest,
+        predecessor_roots,
+        predecessor_selections,
+        overrides={"selected_root": str(tmp_path / "selected_root")},
+    )
     with pytest.raises(ValueError, match="feasibility_NNN"):
         sf.validate_selection_record(bad_selection)
 
-    bad_selection_data = json.loads(selection.read_text())
-    bad_selection_data["selected_root"] = 12
-    bad_selection = tmp_path / "feasibility_selection_012.json"
-    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    bad_selection = tmp_path / "bad_selected_root_type" / "feasibility_selection_002.json"
+    write_selection(
+        bad_selection,
+        root,
+        manifest,
+        predecessor_roots,
+        predecessor_selections,
+        overrides={"selected_root": 12},
+    )
     with pytest.raises(ValueError, match="selected_root"):
         sf.validate_selection_record(bad_selection)
+
+    bad_selection = tmp_path / "bad_selected_root_alias" / "feasibility_selection_002.json"
+    write_selection(
+        bad_selection,
+        root,
+        manifest,
+        predecessor_roots,
+        predecessor_selections,
+        overrides={"selected_root": str(root.parent / "alias" / ".." / root.name)},
+    )
+    with pytest.raises(ValueError, match="canonical path spelling"):
+        sf.validate_selection_record(bad_selection)
+
+    for spelling in (
+        f"./{root.name}",
+        f"{root}/",
+        f"{root.parent}//{root.name}",
+    ):
+        bad_selection = tmp_path / f"bad_selected_root_spelling_{len(spelling)}" / "feasibility_selection_002.json"
+        write_selection(
+            bad_selection,
+            root,
+            manifest,
+            predecessor_roots,
+            predecessor_selections,
+            overrides={"selected_root": spelling},
+        )
+        with pytest.raises(ValueError, match="canonical path spelling"):
+            sf.validate_selection_record(bad_selection)
 
     bad_name_selection = tmp_path / "feasibility_selection_bad_name.json"
     bad_name_selection.write_text(selection.read_text())
     with pytest.raises(ValueError, match="feasibility_selection_NNN"):
         sf.validate_selection_record(bad_name_selection)
 
-    bad_selection_data = json.loads(selection.read_text())
-    bad_selection_data["source_commit"] = "wrong-source"
-    bad_selection = tmp_path / "feasibility_selection_003.json"
-    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    skip_selection = tmp_path / "feasibility_selection_999.json"
+    skip_selection.write_text(selection.read_text())
+    with pytest.raises(ValueError, match="next numbered selection"):
+        sf.validate_selection_record(skip_selection)
+
+    bad_selection = tmp_path / "bad_source" / "feasibility_selection_002.json"
+    write_selection(
+        bad_selection,
+        root,
+        manifest,
+        predecessor_roots,
+        predecessor_selections,
+        overrides={"source_commit": "wrong-source"},
+    )
     with pytest.raises(ValueError, match="source_commit"):
         sf.validate_selection_record(bad_selection)
 
-    bad_selection_data = json.loads(selection.read_text())
-    bad_selection_data["per_cell_counts"] = [dict(cell) for cell in cells]
-    bad_selection_data["per_cell_counts"][0]["exact_matches"] = 53
-    bad_selection = tmp_path / "feasibility_selection_004.json"
-    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    bad_counts = [dict(cell) for cell in cells]
+    bad_counts[0]["exact_matches"] = 53
+    bad_selection = tmp_path / "bad_counts" / "feasibility_selection_002.json"
+    write_selection(bad_selection, root, manifest, predecessor_roots, predecessor_selections, selected_cells=bad_counts)
     with pytest.raises(ValueError, match="per_cell_counts"):
         sf.validate_selection_record(bad_selection)
 
-    bad_selection_data = json.loads(selection.read_text())
-    bad_selection_data["predecessor_roots"] = []
-    bad_selection = tmp_path / "feasibility_selection_005.json"
-    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    bad_selection = tmp_path / "bad_predecessor_roots" / "feasibility_selection_002.json"
+    write_selection(bad_selection, root, manifest, [], predecessor_selections)
     with pytest.raises(ValueError, match="predecessor_roots"):
         sf.validate_selection_record(bad_selection)
 
-    bad_selection_data = json.loads(selection.read_text())
-    bad_selection_data["predecessor_selections"] = []
-    bad_selection = tmp_path / "feasibility_selection_006.json"
-    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    bad_selection = tmp_path / "bad_predecessor_selections" / "feasibility_selection_001.json"
+    write_selection(bad_selection, root, manifest, predecessor_roots, [])
     with pytest.raises(ValueError, match="predecessor_selections"):
         sf.validate_selection_record(bad_selection)
 
-    for offset, bad_value in enumerate(("true", 1, False), start=7):
-        bad_selection_data = json.loads(selection.read_text())
-        bad_selection_data["pass_decision"] = bad_value
-        bad_selection = tmp_path / f"feasibility_selection_{offset:03d}.json"
-        bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    for bad_value in ("true", 1, False):
+        bad_selection = tmp_path / f"bad_pass_{bad_value!r}" / "feasibility_selection_002.json"
+        write_selection(
+            bad_selection,
+            root,
+            manifest,
+            predecessor_roots,
+            predecessor_selections,
+            overrides={"pass_decision": bad_value},
+        )
         with pytest.raises(ValueError, match="pass_decision"):
             sf.validate_selection_record(bad_selection)
 
     bad_cells = [dict(cell) for cell in cells]
     bad_cells[0]["exact_matches"] = 51
     bad_cells[0]["passed"] = False
-    bad_root = tmp_path / "feasibility_003"
-    bad_root.mkdir()
-    bad_manifest = bad_root / "manifest.json"
-    bad_manifest.write_text(
-        json.dumps(
-            {
-                "terminal_status": "DONE",
-                "source_commit": source_commit,
-                "configuration": configuration,
-                "cells": bad_cells,
-                "predecessor_roots": predecessor_roots,
-                "predecessor_selections": predecessor_selections,
-            },
-            sort_keys=True,
-        )
-        + "\n"
+    bad_root = tmp_path / "feasibility_004"
+    bad_manifest, _bad_done = write_root(bad_root, "DONE", bad_cells, predecessor_roots, predecessor_selections)
+    bad_selection = tmp_path / "bad_52_64" / "feasibility_selection_002.json"
+    write_selection(
+        bad_selection,
+        bad_root,
+        bad_manifest,
+        predecessor_roots,
+        predecessor_selections,
+        selected_cells=bad_cells,
     )
-    bad_done = bad_root / "DONE.json"
-    bad_done.write_text(
-        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(bad_manifest), "cells": bad_cells}) + "\n"
-    )
-    bad_selection_data = json.loads(selection.read_text())
-    bad_selection_data["selected_root"] = str(bad_root)
-    bad_selection_data["selected_manifest_sha256"] = sf.file_sha256(bad_manifest)
-    bad_selection_data["per_cell_counts"] = bad_cells
-    bad_selection = tmp_path / "feasibility_selection_010.json"
-    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
     with pytest.raises(ValueError, match="52/64"):
         sf.validate_selection_record(bad_selection)
 
-    malformed_predecessor = tmp_path / "feasibility_bad_terminal"
+    aliased_predecessor_roots = [dict(predecessor_roots[0])]
+    aliased_predecessor_roots[0]["path"] = str(predecessor.parent / "alias" / ".." / predecessor.name)
+    alias_root = tmp_path / "feasibility_005"
+    alias_manifest, _alias_done = write_root(alias_root, "DONE", cells, aliased_predecessor_roots, predecessor_selections)
+    bad_selection = tmp_path / "bad_predecessor_root_alias" / "feasibility_selection_002.json"
+    write_selection(bad_selection, alias_root, alias_manifest, aliased_predecessor_roots, predecessor_selections)
+    with pytest.raises(ValueError, match="canonical path spelling"):
+        sf.validate_selection_record(bad_selection)
+
+    aliased_predecessor_selections = [dict(predecessor_selections[0])]
+    aliased_predecessor_selections[0]["path"] = str(predecessor_selection.parent / "alias" / ".." / predecessor_selection.name)
+    alias_root = tmp_path / "feasibility_006"
+    alias_manifest, _alias_done = write_root(alias_root, "DONE", cells, predecessor_roots, aliased_predecessor_selections)
+    bad_selection = tmp_path / "bad_predecessor_selection_alias" / "feasibility_selection_002.json"
+    write_selection(bad_selection, alias_root, alias_manifest, predecessor_roots, aliased_predecessor_selections)
+    with pytest.raises(ValueError, match="canonical path spelling"):
+        sf.validate_selection_record(bad_selection)
+
+    malformed_predecessor = tmp_path / "feasibility_007"
     malformed_predecessor.mkdir()
     malformed_manifest = malformed_predecessor / "manifest.json"
     malformed_manifest.write_text('{"old":true,"terminal_status":"FAILED"}\n')

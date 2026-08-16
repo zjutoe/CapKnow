@@ -8,6 +8,7 @@ from hashlib import sha256
 import json
 import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import platform
 import random
 import re
@@ -42,6 +43,9 @@ BATCH_SIZE = 64
 PASS_THRESHOLD = 52
 ROOT_RE = re.compile(r"^feasibility_(\d{3})$")
 SELECTION_RE = re.compile(r"^feasibility_selection_(\d{3})\.json$")
+HEX_OPERAND_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9a-f]{16})(?![0-9A-Fa-f])")
+NAMED_VALUE_RE = re.compile(r"\b(?:red|blue|green|silver)-[te][0-9a-f]{8}\b")
+ARRAY_ITEM_RE = re.compile(r"\bs[te][0-9a-f]{8}\b")
 
 SCIENTIFIC_MARKERS = (
     *cg.TASK_ORDER,
@@ -182,21 +186,23 @@ def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
 
 
 def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
-    values = set(record.semantic_values)
+    prompt_and_answer = f"{record.prompt}\n{record.answer}"
+    values: set[str] = set()
     if record.family == "hex_copy":
-        values.add(record.answer)
+        values.update(HEX_OPERAND_RE.findall(prompt_and_answer))
     elif record.family == "named_value_json":
         decoded = json.loads(record.answer)
         if not isinstance(decoded, str):
             raise ValueError("named_value_json answers must be JSON strings.")
         values.add(decoded)
-        values.update(value.strip() for value in re.findall(r"=([^;]+)", record.prompt))
+        values.update(NAMED_VALUE_RE.findall(prompt_and_answer))
     elif record.family == "array_json":
         decoded = json.loads(record.answer)
         if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
             raise ValueError("array_json answers must be JSON arrays of strings.")
         values.update(decoded)
         values.add(compact_json(decoded))
+        values.update(ARRAY_ITEM_RE.findall(prompt_and_answer))
     elif record.family == "boolean_json":
         values.update(re.findall(r"\b\d+\b", record.prompt))
     else:
@@ -655,6 +661,7 @@ def write_terminal(
 
 
 def terminal_binding(root: Path) -> dict[str, object]:
+    require_canonical_path_string(str(root), "predecessor_root.path", ROOT_RE)
     terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
     return {
         "path": str(root),
@@ -689,6 +696,7 @@ def load_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, st
 
 
 def selection_binding(path: Path) -> dict[str, object]:
+    require_canonical_path_string(str(path), "predecessor_selection.path", SELECTION_RE)
     return {"path": str(path), "sha256": file_sha256(path)}
 
 
@@ -697,7 +705,8 @@ def validate_selection_record(path: Path) -> dict[str, object]:
 
 
 def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, object]:
-    selection_record_number(path)
+    current_number = selection_record_number(path)
+    require_canonical_path_string(str(path), "selection_record.path", SELECTION_RE)
     resolved = path.resolve()
     if resolved in seen:
         raise ValueError(f"Selection-record lineage contains a cycle at {path}.")
@@ -717,11 +726,10 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
     missing = required - set(data)
     if missing:
         raise ValueError(f"Selection record is missing required fields: {sorted(missing)!r}.")
-    selected_root = require_exact_str(data["selected_root"], "selected_root")
+    selected_root = require_canonical_path_string(data["selected_root"], "selected_root", ROOT_RE)
     selected_manifest_sha = require_exact_str(data["selected_manifest_sha256"], "selected_manifest_sha256")
     source_commit = require_exact_str(data["source_commit"], "source_commit")
     root = Path(selected_root)
-    feasibility_root_number(root)
     terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
     if manifest_sha != selected_manifest_sha:
         raise ValueError("Selection record manifest checksum does not match selected root.")
@@ -749,11 +757,11 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
     pass_decision = data["pass_decision"]
     if type(pass_decision) is not bool or pass_decision is not True:
         raise ValueError("Selection record pass_decision must be true for a selected root.")
+    predecessor_selection_numbers: list[int] = []
     for predecessor in data["predecessor_roots"]:
         if not isinstance(predecessor, dict):
             raise ValueError("Predecessor root binding must be a JSON object.")
-        predecessor_path = Path(require_exact_str(predecessor.get("path"), "predecessor_root.path"))
-        feasibility_root_number(predecessor_path)
+        predecessor_path = Path(require_canonical_path_string(predecessor.get("path"), "predecessor_root.path", ROOT_RE))
         predecessor_terminal_state = require_exact_str(predecessor.get("terminal_state"), "predecessor_root.terminal_state")
         if predecessor_terminal_state not in {"DONE", "FAILED"}:
             raise ValueError("Predecessor terminal_state must be DONE or FAILED.")
@@ -766,16 +774,29 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
             raise ValueError("Predecessor manifest checksum mismatch.")
         if terminal_data.get("manifest_sha256") != predecessor["manifest_sha256"]:
             raise ValueError("Predecessor terminal does not bind the predecessor manifest checksum.")
-    lineage_bindings = {str(Path(predecessor["path"]).resolve()): predecessor["sha256"] for predecessor in data["predecessor_selections"]}
+    predecessor_selection_bindings: list[tuple[Path, str]] = []
     for predecessor in data["predecessor_selections"]:
-        predecessor_path = Path(predecessor["path"])
-        if file_sha256(predecessor_path) != predecessor["sha256"]:
+        if not isinstance(predecessor, dict):
+            raise ValueError("Predecessor selection binding must be a JSON object.")
+        predecessor_path = Path(require_canonical_path_string(predecessor.get("path"), "predecessor_selection.path", SELECTION_RE))
+        predecessor_selection_numbers.append(selection_record_number(predecessor_path))
+        predecessor_sha = require_exact_str(predecessor.get("sha256"), "predecessor_selection.sha256")
+        predecessor_selection_bindings.append((predecessor_path, predecessor_sha))
+    lineage_bindings = {str(predecessor_path.resolve()): sha for predecessor_path, sha in predecessor_selection_bindings}
+    for predecessor_path, predecessor_sha in predecessor_selection_bindings:
+        if file_sha256(predecessor_path) != predecessor_sha:
             raise ValueError("Predecessor selection checksum mismatch.")
         predecessor_data = _validate_selection_record(predecessor_path, seen=seen)
         for transitive in predecessor_data["predecessor_selections"]:
             transitive_path = str(Path(transitive["path"]).resolve())
             if lineage_bindings.get(transitive_path) != transitive["sha256"]:
                 raise ValueError("Selection record must bind transitive predecessor selection lineage.")
+    expected_selection_number = max(predecessor_selection_numbers, default=0) + 1
+    if current_number != expected_selection_number:
+        raise ValueError(
+            f"Selection record must use next numbered selection feasibility_selection_{expected_selection_number:03d}.json; "
+            f"got {path.name!r}."
+        )
     seen.remove(resolved)
     return data
 
@@ -785,6 +806,25 @@ def selection_record_number(path: Path) -> int:
     if match is None:
         raise ValueError("Selection record basename must be immutable numbered form feasibility_selection_NNN.json.")
     return int(match.group(1))
+
+
+def require_canonical_path_string(value: object, field_name: str, basename_pattern: re.Pattern[str]) -> str:
+    raw = require_exact_str(value, field_name)
+    if not raw:
+        raise ValueError(f"{field_name} must be a non-empty canonical path string.")
+    if "\\" in raw or "//" in raw:
+        raise ValueError(f"{field_name} must use canonical path spelling.")
+    normalized = PurePosixPath(raw).as_posix()
+    if raw != normalized:
+        raise ValueError(f"{field_name} must use canonical path spelling.")
+    if any(part in {".", ".."} for part in PurePosixPath(raw).parts):
+        raise ValueError(f"{field_name} must use canonical path spelling.")
+    path = Path(raw)
+    if basename_pattern.match(path.name) is None:
+        if basename_pattern is ROOT_RE:
+            raise ValueError("Feasibility root basename must be immutable numbered form feasibility_NNN.")
+        raise ValueError("Selection record basename must be immutable numbered form feasibility_selection_NNN.json.")
+    return raw
 
 
 def inventory(root: Path) -> list[dict[str, object]]:
