@@ -527,6 +527,10 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
         raise ValueError("Selection record per_cell_counts do not match selected manifest cells.")
     if terminal_data.get("cells") != cells:
         raise ValueError("Selection record per_cell_counts do not match selected DONE cells.")
+    if manifest_data.get("predecessor_roots") != data["predecessor_roots"]:
+        raise ValueError("Selection record predecessor_roots do not match selected manifest.")
+    if manifest_data.get("predecessor_selections") != data["predecessor_selections"]:
+        raise ValueError("Selection record predecessor_selections do not match selected manifest.")
     if not bool(data["pass_decision"]):
         raise ValueError("Selection record pass_decision must be true for a selected root.")
     for predecessor in data["predecessor_roots"]:

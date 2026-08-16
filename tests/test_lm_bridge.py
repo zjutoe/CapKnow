@@ -734,7 +734,16 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     lineage_root.mkdir()
     lineage_manifest = lineage_root / "manifest.json"
     lineage_manifest.write_text(
-        json.dumps({"source_commit": source_commit, "configuration": configuration, "cells": cells}, sort_keys=True)
+        json.dumps(
+            {
+                "source_commit": source_commit,
+                "configuration": configuration,
+                "cells": cells,
+                "predecessor_roots": [],
+                "predecessor_selections": [],
+            },
+            sort_keys=True,
+        )
         + "\n"
     )
     lineage_done = lineage_root / "DONE.json"
@@ -760,15 +769,6 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
         + "\n"
     )
 
-    root = tmp_path / "feasibility_002"
-    root.mkdir()
-    manifest = root / "manifest.json"
-    manifest.write_text(
-        json.dumps({"source_commit": source_commit, "configuration": configuration, "cells": cells}, sort_keys=True)
-        + "\n"
-    )
-    done = root / "DONE.json"
-    done.write_text(json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(manifest), "cells": cells}) + "\n")
     predecessor = tmp_path / "feasibility_000"
     predecessor.mkdir()
     predecessor_manifest = predecessor / "manifest.json"
@@ -777,6 +777,36 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     predecessor_done.write_text(
         json.dumps({"status": "FAILED", "manifest_sha256": sf.file_sha256(predecessor_manifest)}) + "\n"
     )
+    predecessor_roots = [
+        {
+            "path": str(predecessor),
+            "terminal_state": "FAILED",
+            "terminal_sha256": sf.file_sha256(predecessor_done),
+            "manifest_sha256": sf.file_sha256(predecessor_manifest),
+        }
+    ]
+    predecessor_selections = [
+        {"path": str(predecessor_selection), "sha256": sf.file_sha256(predecessor_selection)}
+    ]
+
+    root = tmp_path / "feasibility_002"
+    root.mkdir()
+    manifest = root / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "source_commit": source_commit,
+                "configuration": configuration,
+                "cells": cells,
+                "predecessor_roots": predecessor_roots,
+                "predecessor_selections": predecessor_selections,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+    done = root / "DONE.json"
+    done.write_text(json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(manifest), "cells": cells}) + "\n")
 
     selection = tmp_path / "feasibility_selection_002.json"
     selection.write_text(
@@ -789,17 +819,8 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
                 "per_cell_counts": cells,
                 "pass_decision": True,
                 "independent_review_verdict": "accepted",
-                "predecessor_roots": [
-                    {
-                        "path": str(predecessor),
-                        "terminal_state": "FAILED",
-                        "terminal_sha256": sf.file_sha256(predecessor_done),
-                        "manifest_sha256": sf.file_sha256(predecessor_manifest),
-                    }
-                ],
-                "predecessor_selections": [
-                    {"path": str(predecessor_selection), "sha256": sf.file_sha256(predecessor_selection)}
-                ],
+                "predecessor_roots": predecessor_roots,
+                "predecessor_selections": predecessor_selections,
             },
             sort_keys=True,
         )
@@ -822,14 +843,28 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     with pytest.raises(ValueError, match="per_cell_counts"):
         sf.validate_selection_record(bad_selection)
 
-    malformed_predecessor_done = predecessor / "FAILED.json"
-    malformed_predecessor_done.write_text('{"status":"FAILED"}\n')
     bad_selection_data = json.loads(selection.read_text())
-    bad_selection_data["predecessor_roots"][0]["terminal_sha256"] = sf.file_sha256(malformed_predecessor_done)
-    bad_selection = tmp_path / "feasibility_selection_bad_predecessor_terminal.json"
+    bad_selection_data["predecessor_roots"] = []
+    bad_selection = tmp_path / "feasibility_selection_missing_predecessor_root.json"
     bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
-    with pytest.raises(ValueError, match="does not bind"):
+    with pytest.raises(ValueError, match="predecessor_roots"):
         sf.validate_selection_record(bad_selection)
+
+    bad_selection_data = json.loads(selection.read_text())
+    bad_selection_data["predecessor_selections"] = []
+    bad_selection = tmp_path / "feasibility_selection_missing_predecessor_selection.json"
+    bad_selection.write_text(json.dumps(bad_selection_data, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="predecessor_selections"):
+        sf.validate_selection_record(bad_selection)
+
+    malformed_predecessor = tmp_path / "feasibility_bad_terminal"
+    malformed_predecessor.mkdir()
+    malformed_manifest = malformed_predecessor / "manifest.json"
+    malformed_manifest.write_text('{"old":true}\n')
+    malformed_done = malformed_predecessor / "FAILED.json"
+    malformed_done.write_text('{"status":"FAILED"}\n')
+    with pytest.raises(ValueError, match="does not bind"):
+        sf.terminal_binding(malformed_predecessor)
 
     predecessor_done.write_text('{"status":"DONE"}\n')
     with pytest.raises(ValueError, match="checksum mismatch"):
