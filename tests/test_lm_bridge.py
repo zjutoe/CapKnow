@@ -1,12 +1,30 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import importlib
 import json
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
+import torch
 
 from capability_certificate_lab.lm_bridge import corpus_generator as cg
 from capability_certificate_lab.dsl.executor import MissingCapabilityError
+from capability_certificate_lab.lm_bridge.model import ToyCausalTransformer, TransformerConfig, build_model, transformer_config
+from capability_certificate_lab.lm_bridge.tokenizer import BOS_ID, EOS_ID, PAD_ID, SEP_ID, ByteTokenizer
+from capability_certificate_lab.lm_bridge.train import (
+    TextRecord,
+    encode_record_batch,
+    load_model_from_checkpoint,
+    make_optimizer,
+    response_only_labels,
+    response_only_loss,
+    run_byte_copy_overfit_control,
+    save_checkpoint,
+    set_deterministic_backend,
+)
 
 
 def test_frozen_primitive_state_and_task_order() -> None:
@@ -461,3 +479,319 @@ def test_response_target_length_diagnostics_and_paired_differences_are_determini
         for state_mask in cg.STATE_MASKS
         for task_id in cg.SEEN_COMPOSITION_TASKS
     )
+
+
+def test_byte_tokenizer_round_trip_specials_padding_length_gates_and_response_mask() -> None:
+    tokenizer = ByteTokenizer()
+    text = "utf-8 bytes: café ☃"
+    assert tokenizer.decode_text(tokenizer.encode_text(text)) == text
+
+    record = tokenizer.encode_training_record("xy", "ab")
+    assert record.input_ids == (BOS_ID, ord("x"), ord("y"), SEP_ID, ord("a"), ord("b"), EOS_ID)
+    padded = tokenizer.pad(record.input_ids, 10)
+    assert padded[-3:] == (PAD_ID, PAD_ID, PAD_ID)
+    with pytest.raises(ValueError, match="BOS"):
+        tokenizer.validate_special_token_placement((ord("x"), BOS_ID, SEP_ID, EOS_ID), mode="training")
+    with pytest.raises(ValueError, match="PAD"):
+        tokenizer.validate_special_token_placement((BOS_ID, ord("x"), PAD_ID, SEP_ID, EOS_ID), mode="training")
+    with pytest.raises(ValueError, match="EOS"):
+        tokenizer.validate_special_token_placement((*tokenizer.encode_evaluation_prefix("xy"), EOS_ID), mode="evaluation_prefix")
+    with pytest.raises(ValueError, match="exceeds maximum sequence length|truncation"):
+        tokenizer.encode_training_record("p" * 254, "r")
+    with pytest.raises(ValueError, match="prefix length|truncation"):
+        tokenizer.encode_evaluation_prefix("p" * 191)
+
+    input_ids = torch.tensor([padded], dtype=torch.long)
+    labels = response_only_labels(input_ids)
+    assert labels[0, :3].tolist() == [-100, -100, -100]
+    assert labels[0, 3].item() == ord("a")
+    assert labels[0, 4].item() == ord("b")
+    assert labels[0, 5].item() == EOS_ID
+    assert labels[0, 6:].tolist() == [-100, -100, -100, -100]
+    with pytest.raises(ValueError, match="BOS"):
+        response_only_labels(torch.tensor([[BOS_ID, ord("x"), SEP_ID, BOS_ID, EOS_ID]], dtype=torch.long))
+
+
+def test_frozen_small_medium_model_constants_and_recorded_parameter_counts() -> None:
+    small_config = transformer_config("small")
+    medium_config = transformer_config("medium")
+    assert (small_config.d_model, small_config.n_heads, small_config.n_layers, small_config.d_ff) == (64, 4, 2, 256)
+    assert (medium_config.d_model, medium_config.n_heads, medium_config.n_layers, medium_config.d_ff) == (128, 4, 4, 512)
+    assert small_config.max_seq_len == medium_config.max_seq_len == 256
+    assert small_config.dropout == medium_config.dropout == 0.0
+
+    small = build_model("small")
+    medium = build_model("medium")
+    assert small.parameter_count == sum(parameter.numel() for parameter in small.parameters())
+    assert medium.parameter_count == sum(parameter.numel() for parameter in medium.parameters())
+    assert medium.parameter_count > small.parameter_count
+
+
+def test_causal_mask_prevents_future_token_access() -> None:
+    set_deterministic_backend(0)
+    model = ToyCausalTransformer(TransformerConfig(name="test-tiny", d_model=16, n_heads=2, n_layers=1, d_ff=32))
+    model.eval()
+    left = torch.tensor([[BOS_ID, ord("a"), ord("b"), ord("c"), ord("d"), EOS_ID]])
+    right = left.clone()
+    right[0, 4] = ord("z")
+
+    with torch.no_grad():
+        left_logits = model(left)
+        right_logits = model(right)
+
+    torch.testing.assert_close(left_logits[:, :4, :], right_logits[:, :4, :], atol=0.0, rtol=0.0)
+    assert not torch.equal(left_logits[:, 4, :], right_logits[:, 4, :])
+
+
+def test_deterministic_initialization_optimizer_step_and_greedy_decode() -> None:
+    config = TransformerConfig(name="test-tiny", d_model=16, n_heads=2, n_layers=1, d_ff=32)
+    set_deterministic_backend(3)
+    model_a = ToyCausalTransformer(config)
+    set_deterministic_backend(3)
+    model_b = ToyCausalTransformer(config)
+    for state_a, state_b in zip(model_a.state_dict().values(), model_b.state_dict().values()):
+        torch.testing.assert_close(state_a, state_b, atol=0.0, rtol=0.0)
+
+    tokenizer = ByteTokenizer()
+    batch = encode_record_batch((TextRecord("copy a", "a"), TextRecord("copy b", "b")), tokenizer)
+    for model in (model_a, model_b):
+        optimizer = make_optimizer(model)
+        optimizer.zero_grad(set_to_none=True)
+        loss = response_only_loss(model(batch), batch)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+
+    for state_a, state_b in zip(model_a.state_dict().values(), model_b.state_dict().values()):
+        torch.testing.assert_close(state_a, state_b, atol=0.0, rtol=0.0)
+    prefix = torch.tensor([tokenizer.encode_evaluation_prefix("copy a")], dtype=torch.long)
+    torch.testing.assert_close(model_a.greedy_decode(prefix), model_b.greedy_decode(prefix), atol=0, rtol=0)
+    with pytest.raises(ValueError, match="64"):
+        model_a.greedy_decode(prefix, max_new_tokens=65)
+
+
+def test_model_save_load_round_trip_preserves_state_dict_and_logits(tmp_path: Path) -> None:
+    set_deterministic_backend(4)
+    model = ToyCausalTransformer(TransformerConfig(name="test-tiny", d_model=16, n_heads=2, n_layers=1, d_ff=32))
+    path = tmp_path / "checkpoint.pt"
+    save_checkpoint(str(path), model, metadata={"purpose": "unit-test"})
+
+    loaded = load_model_from_checkpoint(str(path))
+    assert loaded.parameter_count == model.parameter_count == sum(parameter.numel() for parameter in model.parameters())
+    for key, tensor in model.state_dict().items():
+        torch.testing.assert_close(tensor, loaded.state_dict()[key], atol=0.0, rtol=0.0)
+
+    sample = torch.tensor([[BOS_ID, ord("x"), SEP_ID, ord("y"), EOS_ID]], dtype=torch.long)
+    with torch.no_grad():
+        torch.testing.assert_close(model(sample), loaded(sample), atol=0.0, rtol=0.0)
+
+
+def test_four_record_cpu_byte_copy_overfit_control() -> None:
+    result = run_byte_copy_overfit_control(
+        seed=0,
+        max_steps=500,
+        config=TransformerConfig(name="test-tiny", d_model=32, n_heads=4, n_layers=1, d_ff=128),
+    )
+
+    assert result.steps <= 500
+    assert result.training_accuracy == 1.0
+
+
+def _passing_feasibility_cells() -> list[dict[str, object]]:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    return [
+        {
+            "family": family,
+            "model_size": model_size,
+            "seed": seed,
+            "eval_count": sf.EVAL_RECORDS_PER_FAMILY,
+            "exact_matches": sf.PASS_THRESHOLD,
+            "passed": True,
+            "generations_path": f"{family}__{model_size}__seed{seed}/generations.jsonl",
+            "checkpoint_path": f"{family}__{model_size}__seed{seed}/checkpoint_step1500.pt",
+            "parameter_count": 123,
+        }
+        for family in sf.FAMILIES
+        for model_size in sf.MODEL_SIZES
+        for seed in sf.SEEDS
+    ]
+
+
+def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_rejection(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+
+    groups = sf.grouped_records()
+    assert set(groups) == set(sf.FAMILIES)
+    for family, splits in groups.items():
+        assert len(splits["train"]) == 512
+        assert len(splits["eval"]) == 64
+        train_operands = {record.operand_id for record in splits["train"]}
+        eval_operands = {record.operand_id for record in splits["eval"]}
+        train_templates = {record.template_id for record in splits["train"]}
+        eval_templates = {record.template_id for record in splits["eval"]}
+        assert train_operands.isdisjoint(eval_operands)
+        assert train_templates.isdisjoint(eval_templates)
+        for record in (*splits["train"], *splits["eval"]):
+            sf.reject_scientific_markers(record.prompt)
+            sf.reject_scientific_markers(record.answer)
+
+    cells = _passing_feasibility_cells()
+    sf.validate_cell_counts(cells)
+    tampered = [dict(cell) for cell in cells]
+    tampered[0]["passed"] = False
+    with pytest.raises(ValueError, match="52/64"):
+        sf.validate_cell_counts(tampered)
+    tampered = [dict(cell) for cell in cells]
+    tampered[0]["exact_matches"] = 51
+    with pytest.raises(ValueError, match="52/64"):
+        sf.validate_cell_counts(tampered)
+
+    cell_dir = tmp_path / "hex_copy__small__seed0"
+    cell_dir.mkdir()
+    generations = cell_dir / "generations.jsonl"
+    checkpoint = cell_dir / "checkpoint_step1500.pt"
+    generations.write_text('{"generated":"abc","exact_match":true}\n')
+    checkpoint.write_bytes(b"checkpoint")
+    inventory = sf.inventory(tmp_path)
+    assert any(row["path"] == "hex_copy__small__seed0/generations.jsonl" for row in inventory)
+    assert any(row["path"] == "hex_copy__small__seed0/checkpoint_step1500.pt" for row in inventory)
+
+    bad = list(groups["hex_copy"]["train"])
+    bad[0] = sf.FeasibilityRecord(**{**bad[0].__dict__, "prompt": "MEMORY marker"})
+    with pytest.raises(ValueError, match="forbidden Phase 8"):
+        sf.validate_feasibility_records(tuple(bad))
+
+
+def test_feasibility_script_direct_cli_inspect_records() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/phase8_sequence_feasibility.py",
+            "inspect-records",
+            "--family",
+            "hex_copy",
+        ],
+        check=True,
+        cwd=Path(__file__).resolve().parents[1],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    data = json.loads(completed.stdout)
+    assert len(data["hex_copy"]) == 576
+
+
+def test_feasibility_root_numbering_refuses_overwrite_and_skips(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    with pytest.raises(ValueError, match="next numbered root"):
+        sf.validate_new_root(tmp_path / "feasibility_002")
+
+    predecessor = tmp_path / "feasibility_001"
+    predecessor.mkdir()
+    predecessor_manifest = predecessor / "manifest.json"
+    predecessor_manifest.write_text('{"old":true}\n')
+    predecessor_failed = predecessor / "FAILED.json"
+    predecessor_failed.write_text(
+        json.dumps({"status": "FAILED", "manifest_sha256": sf.file_sha256(predecessor_manifest)}) + "\n"
+    )
+
+    sf.validate_new_root(tmp_path / "feasibility_002", (predecessor,), ())
+    with pytest.raises(ValueError, match="next numbered root"):
+        sf.validate_new_root(tmp_path / "feasibility_003", (predecessor,), ())
+
+    existing = tmp_path / "feasibility_002"
+    existing.mkdir()
+    with pytest.raises(FileExistsError, match="overwrite"):
+        sf.validate_new_root(existing, (predecessor,), ())
+
+
+def test_feasibility_failed_terminal_binds_manifest(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    sf.write_terminal(tmp_path, "FAILED", [], (), (), failure="synthetic failure")
+
+    manifest = tmp_path / "manifest.json"
+    failed = tmp_path / "FAILED.json"
+    assert manifest.exists()
+    assert failed.exists()
+    failed_data = json.loads(failed.read_text())
+    manifest_data = json.loads(manifest.read_text())
+    assert failed_data["status"] == "FAILED"
+    assert failed_data["manifest_sha256"] == sf.file_sha256(manifest)
+    assert manifest_data["terminal_status"] == "FAILED"
+    assert manifest_data["failure"] == "synthetic failure"
+
+
+def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+
+    lineage_root = tmp_path / "feasibility_001"
+    lineage_root.mkdir()
+    lineage_manifest = lineage_root / "manifest.json"
+    lineage_manifest.write_text('{"lineage":true}\n')
+    lineage_done = lineage_root / "DONE.json"
+    lineage_done.write_text(
+        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(lineage_manifest)}) + "\n"
+    )
+    predecessor_selection = tmp_path / "feasibility_selection_001.json"
+    predecessor_selection.write_text(
+        json.dumps(
+            {
+                "selected_root": str(lineage_root),
+                "selected_manifest_sha256": sf.file_sha256(lineage_manifest),
+                "source_commit": "source-sha",
+                "configuration": {"training_steps": 1500},
+                "per_cell_counts": _passing_feasibility_cells(),
+                "pass_decision": True,
+                "independent_review_verdict": "accepted",
+                "predecessor_roots": [],
+                "predecessor_selections": [],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    root = tmp_path / "feasibility_002"
+    root.mkdir()
+    manifest = root / "manifest.json"
+    manifest.write_text('{"ok":true}\n')
+    done = root / "DONE.json"
+    done.write_text(json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(manifest)}) + "\n")
+    predecessor = tmp_path / "feasibility_000"
+    predecessor.mkdir()
+    predecessor_manifest = predecessor / "manifest.json"
+    predecessor_manifest.write_text('{"old":true}\n')
+    predecessor_done = predecessor / "FAILED.json"
+    predecessor_done.write_text('{"status":"FAILED"}\n')
+
+    selection = tmp_path / "feasibility_selection_002.json"
+    selection.write_text(
+        json.dumps(
+            {
+                "selected_root": str(root),
+                "selected_manifest_sha256": sf.file_sha256(manifest),
+                "source_commit": "source-sha",
+                "configuration": {"training_steps": 1500},
+                "per_cell_counts": _passing_feasibility_cells(),
+                "pass_decision": True,
+                "independent_review_verdict": "accepted",
+                "predecessor_roots": [
+                    {
+                        "path": str(predecessor),
+                        "terminal_state": "FAILED",
+                        "terminal_sha256": sf.file_sha256(predecessor_done),
+                        "manifest_sha256": sf.file_sha256(predecessor_manifest),
+                    }
+                ],
+                "predecessor_selections": [
+                    {"path": str(predecessor_selection), "sha256": sf.file_sha256(predecessor_selection)}
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    assert sf.validate_selection_record(selection)["pass_decision"] is True
+    predecessor_done.write_text('{"status":"DONE"}\n')
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        sf.validate_selection_record(selection)
