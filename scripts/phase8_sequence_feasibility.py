@@ -307,7 +307,7 @@ def phase8_scientific_identity_markers() -> frozenset[str]:
 
 
 def _add_phase8_record_markers(markers: set[str], record: object) -> None:
-    for field_name in ("task_id", "template_id", "payload_id"):
+    for field_name in ("task_id", "template_id", "payload_id", "prompt"):
         value = getattr(record, field_name, None)
         if isinstance(value, str) and value:
             markers.add(value)
@@ -579,13 +579,13 @@ def run_suite(root: Path, predecessor_roots: Sequence[Path], predecessor_selecti
                     )
         validate_cell_counts(cells)
         terminal_status = "DONE" if all(cell["passed"] for cell in cells) else "FAILED"
-        verify_source_unchanged(source_snapshot)
+        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
         write_terminal(temp_root, terminal_status, cells, predecessor_roots, predecessor_selections, source_snapshot=source_snapshot)
         os.replace(temp_root, root)
     except SourceChangedError:
         raise
     except Exception as exc:
-        verify_source_unchanged(source_snapshot)
+        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
         write_terminal(
             temp_root,
             "FAILED",
@@ -614,10 +614,10 @@ def validate_new_root(
         data = validate_selection_record(selection)
         previous_numbers.append(feasibility_root_number(Path(str(data["selected_root"]))))
     expected_previous_numbers = list(range(1, root_number))
-    if sorted(previous_numbers) != expected_previous_numbers:
+    if previous_numbers != expected_previous_numbers:
         raise ValueError(
             f"Feasibility predecessor roots must be complete and continuous before {root.name!r}; "
-            f"expected {expected_previous_numbers!r}, got {sorted(previous_numbers)!r}."
+            f"expected {expected_previous_numbers!r}, got {previous_numbers!r}."
         )
     expected_number = len(expected_previous_numbers) + 1
     if root_number != expected_number:
@@ -633,7 +633,10 @@ def feasibility_root_number(root: Path) -> int:
     match = ROOT_RE.match(root.name)
     if match is None:
         raise ValueError("Feasibility root basename must be immutable numbered form feasibility_NNN.")
-    return int(match.group(1))
+    number = int(match.group(1))
+    if number <= 0:
+        raise ValueError("Feasibility root numbering starts at feasibility_001.")
+    return number
 
 
 def require_artifact_location(path: Path, field_name: str, basename_pattern: re.Pattern[str]) -> None:
@@ -673,11 +676,13 @@ def capture_source_provenance(
         check=True,
         text=True,
         stdout=subprocess.PIPE,
+        cwd=REPO_ROOT,
     ).stdout.splitlines()
     for line in status:
         code = line[:2]
         rel = line[3:]
-        candidate = Path(rel).resolve()
+        rel_path = Path(rel)
+        candidate = (rel_path if rel_path.is_absolute() else REPO_ROOT / rel_path).resolve()
         if code != "??":
             raise RuntimeError(f"Tracked or staged source change blocks feasibility run: {line}")
         if candidate not in allowed:
@@ -696,7 +701,7 @@ def capture_source_provenance(
     )
 
 
-def verify_source_unchanged(snapshot: SourceSnapshot) -> None:
+def verify_source_unchanged(snapshot: SourceSnapshot, *, active_output_root: Path | None = None) -> None:
     current = git_output(["git", "rev-parse", "HEAD"])
     if current != snapshot.commit:
         raise SourceChangedError("Source HEAD changed during feasibility run before terminal publication.")
@@ -705,8 +710,10 @@ def verify_source_unchanged(snapshot: SourceSnapshot) -> None:
         check=True,
         text=True,
         stdout=subprocess.PIPE,
+        cwd=REPO_ROOT,
     ).stdout.splitlines()
-    if tuple(status) != snapshot.status_lines:
+    filtered_status = tuple(line for line in status if not is_active_output_status_line(line, active_output_root))
+    if filtered_status != snapshot.status_lines:
         raise SourceChangedError("Source worktree status changed during feasibility run before terminal publication.")
     if ignored_source_inputs() != snapshot.ignored_inputs:
         raise SourceChangedError("Ignored executable source inputs changed during feasibility run before terminal publication.")
@@ -727,6 +734,7 @@ def ignored_source_inputs() -> tuple[dict[str, object], ...]:
         check=True,
         text=True,
         stdout=subprocess.PIPE,
+        cwd=REPO_ROOT,
     )
     for line in completed.stdout.splitlines():
         if not line.startswith("!! "):
@@ -735,11 +743,26 @@ def ignored_source_inputs() -> tuple[dict[str, object], ...]:
         path = Path(rel)
         if "__pycache__" not in path.parts and path.suffix not in {".py", ".pyc", ".pyo", ".so"}:
             continue
-        resolved = path.resolve()
+        resolved = (path if path.is_absolute() else REPO_ROOT / path).resolve()
         if not resolved.is_file():
             continue
         rows.append({"path": path.as_posix(), "sha256": file_sha256(resolved), "bytes": resolved.stat().st_size})
     return tuple(sorted(rows, key=lambda row: str(row["path"])))
+
+
+def is_active_output_status_line(line: str, active_output_root: Path | None) -> bool:
+    if active_output_root is None or not line.startswith("?? "):
+        return False
+    rel = line[3:]
+    candidate = Path(rel)
+    candidate_path = candidate if candidate.is_absolute() else REPO_ROOT / candidate
+    active_path = active_output_root if active_output_root.is_absolute() else REPO_ROOT / active_output_root
+    try:
+        candidate_resolved = candidate_path.resolve(strict=False)
+        active_resolved = active_path.resolve(strict=False)
+    except OSError:
+        return False
+    return candidate_resolved == active_resolved or active_resolved in candidate_resolved.parents
 
 
 def source_clean_allowed_paths(predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> set[Path]:
@@ -957,6 +980,10 @@ def load_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, st
         raise ValueError("Manifest terminal_status does not match the terminal marker.")
     if terminal_data.get("manifest_sha256") != manifest_sha:
         raise ValueError("Terminal marker does not bind the manifest checksum.")
+    if terminal_data.get("manifest_path") != "manifest.json":
+        raise ValueError("Terminal marker manifest_path must be manifest.json.")
+    if terminal_data.get("pass_threshold") != PASS_THRESHOLD:
+        raise ValueError("Terminal marker pass_threshold does not match the frozen threshold.")
     return terminal, terminal_data, manifest, manifest_sha
 
 
@@ -978,6 +1005,7 @@ def validate_feasibility_root_artifacts(root: Path, *, require_passing: bool) ->
     if summary_data.get("protocol") != "phase8_sequence_feasibility":
         raise ValueError("Summary protocol is not phase8_sequence_feasibility.")
     source_commit = validate_git_sha(manifest_data.get("source_commit"), "source_commit")
+    validate_git_commit_exists(source_commit)
     validate_source_provenance(manifest_data.get("source_provenance"), source_commit)
     if summary_data.get("source", {}).get("commit") != source_commit:
         raise ValueError("Summary source commit does not match manifest source_commit.")
@@ -998,6 +1026,7 @@ def validate_feasibility_root_artifacts(root: Path, *, require_passing: bool) ->
         raise ValueError("Terminal marker cells do not match manifest cells.")
     if summary_data.get("cells") != cells:
         raise ValueError("Summary cells do not match manifest cells.")
+    validate_summary_aggregates(summary_data, cells, terminal.stem, manifest_data.get("failure"))
     if require_passing:
         validate_cell_counts(cells)
     else:
@@ -1016,6 +1045,8 @@ def validate_feasibility_root_artifacts(root: Path, *, require_passing: bool) ->
             raise ValueError("Feasibility cell generations artifact is missing.")
         if not (root / checkpoint_path).is_file():
             raise ValueError("Feasibility cell checkpoint artifact is missing.")
+        validate_generation_artifact(root / generations_path, cell)
+        validate_checkpoint_artifact(root / checkpoint_path, cell)
 
 
 def validate_cell_artifact_schema(cells: object, *, require_pass: bool) -> None:
@@ -1071,6 +1102,97 @@ def validate_root_file_inventory(root: Path, manifest_data: dict[str, object]) -
     if sorted(file_inventory, key=lambda row: row["path"]) != actual_inventory:
         raise ValueError("Manifest file_inventory does not exactly match root files.")
     return seen_paths
+
+
+def validate_summary_aggregates(
+    summary_data: dict[str, object],
+    cells: Sequence[dict[str, object]],
+    terminal_status: str,
+    failure: object,
+) -> None:
+    if summary_data.get("failure") != failure:
+        raise ValueError("Summary failure does not match manifest failure.")
+    if terminal_status == "DONE" and failure is not None:
+        raise ValueError("Passing DONE roots must not record a failure string.")
+    summary = summary_data.get("summary")
+    if not isinstance(summary, dict):
+        raise ValueError("Summary aggregate must be a JSON object.")
+    passed_cells = sum(1 for cell in cells if cell.get("passed") is True)
+    expected = {
+        "total_cells": len(cells),
+        "passed_cells": passed_cells,
+        "failed_cells": len(cells) - passed_cells,
+        "all_cells_passed": len(cells) == len(FAMILIES) * len(MODEL_SIZES) * len(SEEDS) and passed_cells == len(cells),
+    }
+    for key, value in expected.items():
+        if summary.get(key) != value:
+            raise ValueError(f"Summary aggregate {key} does not match manifest cells.")
+
+
+def validate_generation_artifact(path: Path, cell: dict[str, object]) -> None:
+    expected_count = require_exact_int(cell.get("eval_count"), "eval_count")
+    expected_matches = require_exact_int(cell.get("exact_matches"), "exact_matches")
+    rows: list[dict[str, object]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                raise ValueError(f"Generation artifact contains a blank row at line {line_number}.")
+            row = json.loads(stripped)
+            if not isinstance(row, dict):
+                raise ValueError("Generation artifact rows must be JSON objects.")
+            exact_match = row.get("exact_match")
+            if type(exact_match) is not bool:
+                raise ValueError("Generation artifact exact_match values must be JSON booleans.")
+            raw_token_ids = row.get("raw_token_ids")
+            if not isinstance(raw_token_ids, list) or not all(type(token) is int for token in raw_token_ids):
+                raise ValueError("Generation artifact rows must retain raw_token_ids as JSON integers.")
+            rows.append(row)
+    if len(rows) != expected_count:
+        raise ValueError("Generation artifact row count does not match cell eval_count.")
+    actual_matches = sum(1 for row in rows if row["exact_match"] is True)
+    if actual_matches != expected_matches:
+        raise ValueError("Generation artifact exact_match count does not match cell exact_matches.")
+
+
+def validate_checkpoint_artifact(path: Path, cell: dict[str, object]) -> None:
+    family = require_exact_str(cell.get("family"), "family")
+    model_size = require_exact_str(cell.get("model_size"), "model_size")
+    seed = require_exact_int(cell.get("seed"), "seed")
+    parameter_count = require_exact_int(cell.get("parameter_count"), "parameter_count")
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        raise ValueError(f"Checkpoint artifact is not a loadable PyTorch checkpoint: {exc}") from exc
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Checkpoint artifact must be a JSON-like mapping.")
+    expected_model = build_model(model_size)
+    if checkpoint.get("config") != expected_model.config.__dict__:
+        raise ValueError("Checkpoint config does not match the frozen model configuration.")
+    if checkpoint.get("parameter_count") != parameter_count or parameter_count != expected_model.parameter_count:
+        raise ValueError("Checkpoint parameter_count does not match the cell and frozen model configuration.")
+    metadata = checkpoint.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("Checkpoint metadata must be a mapping.")
+    expected_metadata = {
+        "family": family,
+        "model_size": model_size,
+        "seed": seed,
+        "training_steps": TRAINING_STEPS,
+    }
+    for key, value in expected_metadata.items():
+        if metadata.get(key) != value:
+            raise ValueError(f"Checkpoint metadata {key} does not match the cell.")
+    state = checkpoint.get("model_state_dict")
+    if not isinstance(state, dict):
+        raise ValueError("Checkpoint model_state_dict must be a mapping.")
+    expected_state = expected_model.state_dict()
+    if set(state) != set(expected_state):
+        raise ValueError("Checkpoint state_dict keys do not match the frozen model.")
+    for key, expected_tensor in expected_state.items():
+        tensor = state[key]
+        if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != tuple(expected_tensor.shape):
+            raise ValueError("Checkpoint state_dict tensor shapes do not match the frozen model.")
 
 
 def selection_binding(path: Path) -> dict[str, object]:
@@ -1382,7 +1504,7 @@ def file_sha256(path: Path) -> str:
 
 
 def git_output(args: Sequence[str]) -> str:
-    return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+    return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, cwd=REPO_ROOT).stdout.strip()
 
 
 def unchecked_source_snapshot() -> SourceSnapshot:
@@ -1396,6 +1518,19 @@ def validate_git_sha(value: object, field_name: str) -> str:
     if GIT_SHA_RE.fullmatch(text) is None:
         raise ValueError(f"{field_name} must be a full 40-character lowercase Git SHA.")
     return text
+
+
+def validate_git_commit_exists(commit: str) -> None:
+    completed = subprocess.run(
+        ["git", "cat-file", "-e", f"{commit}^{{commit}}"],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ValueError("Manifest source_commit does not exist as a commit in the CapKnow repository.")
 
 
 def validate_source_provenance(value: object, source_commit: str) -> None:

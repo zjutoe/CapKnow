@@ -112,6 +112,7 @@ class ByteTokenizer:
         return tuple(self.pad(record, target_length, mode=mode) for record in records)
 
     def decode_generated_response(self, full_sequence: Sequence[int]) -> str:
+        self._validate_context_window(len(full_sequence))
         self.validate_special_token_placement(full_sequence, mode="generated")
         unpadded = self._strip_padding(full_sequence)
         sep_index = unpadded.index(SEP_ID)
@@ -120,6 +121,8 @@ class ByteTokenizer:
             response_ids = unpadded[sep_index + 1 : eos_index]
         else:
             response_ids = unpadded[sep_index + 1 :]
+        if len(unpadded[sep_index + 1 :]) > MAX_GENERATED_TOKENS:
+            raise ValueError("Generated response exceeds the fixed 64-token completion window.")
         return self.decode_text(response_ids)
 
     def validate_special_token_placement(
@@ -128,6 +131,7 @@ class ByteTokenizer:
         *,
         mode: Literal["training", "evaluation_prefix", "generated"],
     ) -> None:
+        self._validate_context_window(len(input_ids))
         if not input_ids:
             raise ValueError("Token sequence must be non-empty.")
         ids = tuple(input_ids)

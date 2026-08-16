@@ -515,6 +515,12 @@ def test_byte_tokenizer_round_trip_specials_padding_length_gates_and_response_ma
         tokenizer.batch_pad((record.input_ids,), length=256.0)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="non-negative"):
         tokenizer.encode_evaluation_prefix("xy", max_generated_tokens=-1)
+    with pytest.raises(ValueError, match="64-token"):
+        tokenizer.decode_generated_response((BOS_ID, ord("p"), SEP_ID, *([ord("a")] * 65)))
+    with pytest.raises(ValueError, match="256-token"):
+        tokenizer.decode_generated_response((BOS_ID, *([ord("p")] * 300), SEP_ID, EOS_ID))
+    with pytest.raises(ValueError, match="256-token"):
+        tokenizer.validate_special_token_placement((BOS_ID, *([ord("p")] * 300), SEP_ID, EOS_ID), mode="generated")
 
     input_ids = torch.tensor([padded], dtype=torch.long)
     labels = response_only_labels(input_ids)
@@ -639,7 +645,17 @@ def _passing_feasibility_cells() -> list[dict[str, object]]:
 
 def _source_snapshot() -> object:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    return sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=())
+    return sf.SourceSnapshot(commit=_test_source_commit(), status_lines=(), ignored_inputs=())
+
+
+def _test_source_commit() -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        cwd=REPO_ROOT,
+    ).stdout.strip()
 
 
 def _write_feasibility_root(
@@ -657,12 +673,29 @@ def _write_feasibility_root(
         generations.parent.mkdir(parents=True, exist_ok=True)
         generations.write_text(
             "\n".join(
-                json.dumps({"index": index, "generated": "ok", "raw_token_ids": [1, 2], "exact_match": True})
+                json.dumps(
+                    {
+                        "index": index,
+                        "generated": "ok" if index < int(cell["exact_matches"]) else "miss",
+                        "raw_token_ids": [1, 2],
+                        "exact_match": index < int(cell["exact_matches"]),
+                    }
+                )
                 for index in range(int(cell["eval_count"]))
             )
             + "\n"
         )
-        checkpoint.write_bytes(b"checkpoint")
+        model = build_model(str(cell["model_size"]))
+        save_checkpoint(
+            str(checkpoint),
+            model,
+            metadata={
+                "family": cell["family"],
+                "model_size": cell["model_size"],
+                "seed": cell["seed"],
+                "training_steps": sf.TRAINING_STEPS,
+            },
+        )
     sf.write_terminal(
         root,
         status,
@@ -689,7 +722,7 @@ def _write_selection(
     data = {
         "selected_root": str(root),
         "selected_manifest_sha256": sf.file_sha256(manifest),
-        "source_commit": "a" * 40,
+        "source_commit": _test_source_commit(),
         "configuration": sf.frozen_configuration(),
         "per_cell_counts": _passing_feasibility_cells() if cells is None else cells,
         "pass_decision": True,
@@ -791,6 +824,16 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     ):
         with pytest.raises(ValueError, match="forbidden Phase 8"):
             sf.reject_scientific_markers(forbidden)
+
+    condition_prompts = {
+        record.prompt
+        for split in ("training", "evaluation")
+        for record in cg.build_split_records(split, "CONDITION", 8)
+    }
+    assert len(condition_prompts) >= 8
+    for prompt in condition_prompts:
+        with pytest.raises(ValueError):
+            sf.reject_scientific_markers(prompt)
 
 
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
@@ -1016,6 +1059,8 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(
     artifact_parent.mkdir(parents=True)
     monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
 
+    with pytest.raises(ValueError, match="feasibility_001"):
+        sf.validate_new_root(artifact_parent / "feasibility_000")
     with pytest.raises(ValueError, match="complete and continuous"):
         sf.validate_new_root(artifact_parent / "feasibility_002")
     with pytest.raises(ValueError, match="canonical path spelling"):
@@ -1032,11 +1077,13 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(
     sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
     with pytest.raises(ValueError, match="complete and continuous"):
         sf.validate_new_root(artifact_parent / "feasibility_003", (predecessor,), ())
+    second_predecessor = artifact_parent / "feasibility_002"
+    _write_feasibility_root(second_predecessor, "FAILED", [], predecessor_roots=(predecessor,))
+    with pytest.raises(ValueError, match="complete and continuous"):
+        sf.validate_new_root(artifact_parent / "feasibility_003", (second_predecessor, predecessor), ())
 
-    existing = artifact_parent / "feasibility_002"
-    existing.mkdir()
     with pytest.raises(FileExistsError, match="overwrite"):
-        sf.validate_new_root(existing, (predecessor,), ())
+        sf.validate_new_root(second_predecessor, (predecessor,), ())
 
 
 def test_feasibility_failed_terminal_binds_manifest(tmp_path: Path) -> None:
@@ -1106,13 +1153,21 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
     inventory_bytes = {path: path.read_bytes() for path in inventory_files}
 
     def set_git_status(paths: list[Path], *, ignored_lines: tuple[str, ...] = ()) -> None:
-        def fake_run(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+        def fake_run(
+            args: list[str],
+            check: bool,
+            text: bool,
+            stdout: object,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[str]:
             if args[:4] == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
                 return subprocess.CompletedProcess(args, 0, stdout="".join(f"?? {path}\n" for path in paths))
             if args[:5] == ["git", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"]:
                 return subprocess.CompletedProcess(args, 0, stdout="".join(f"!! {line}\n" for line in ignored_lines))
             if args == ["git", "rev-parse", "HEAD"]:
                 return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
+            if args[:3] == ["git", "cat-file", "-e"]:
+                return subprocess.CompletedProcess(args, 0, stdout="")
             raise AssertionError(args)
 
         monkeypatch.setattr(sf.subprocess, "run", fake_run)
@@ -1146,7 +1201,13 @@ def test_source_snapshot_rejects_head_or_status_change_before_terminal_publicati
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     snapshot = sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=())
 
-    def changed_head(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+    def changed_head(
+        args: list[str],
+        check: bool,
+        text: bool,
+        stdout: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
         if args == ["git", "rev-parse", "HEAD"]:
             return subprocess.CompletedProcess(args, 0, stdout="b" * 40 + "\n")
         raise AssertionError(args)
@@ -1155,7 +1216,13 @@ def test_source_snapshot_rejects_head_or_status_change_before_terminal_publicati
     with pytest.raises(sf.SourceChangedError, match="HEAD changed"):
         sf.verify_source_unchanged(snapshot)
 
-    def changed_status(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+    def changed_status(
+        args: list[str],
+        check: bool,
+        text: bool,
+        stdout: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
         if args == ["git", "rev-parse", "HEAD"]:
             return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
         if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
@@ -1166,7 +1233,13 @@ def test_source_snapshot_rejects_head_or_status_change_before_terminal_publicati
     with pytest.raises(sf.SourceChangedError, match="worktree status changed"):
         sf.verify_source_unchanged(snapshot)
 
-    def changed_ignored(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+    def changed_ignored(
+        args: list[str],
+        check: bool,
+        text: bool,
+        stdout: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
         if args == ["git", "rev-parse", "HEAD"]:
             return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
         if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
@@ -1178,6 +1251,30 @@ def test_source_snapshot_rejects_head_or_status_change_before_terminal_publicati
     monkeypatch.setattr(sf.subprocess, "run", changed_ignored)
     with pytest.raises(sf.SourceChangedError, match="Ignored executable"):
         sf.verify_source_unchanged(snapshot)
+
+    active_root = sf.ARTIFACT_PARENT / "feasibility_001.tmp"
+
+    def active_output_only(
+        args: list[str],
+        check: bool,
+        text: bool,
+        stdout: object,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        if args == ["git", "rev-parse", "HEAD"]:
+            return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
+        if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                stdout="?? artifacts/phase8_toy_lm_bridge/feasibility_001.tmp/in_progress.txt\n",
+            )
+        if args[:5] == ["git", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"]:
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(sf.subprocess, "run", active_output_only)
+    sf.verify_source_unchanged(snapshot, active_output_root=active_root)
 
 
 def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
@@ -1256,6 +1353,30 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     with pytest.raises(ValueError, match="file_inventory|checkpoint"):
         sf.validate_selection_record(bad_selection)
 
+    parent = set_parent("bad_generation_counts")
+    bad_root = parent / "feasibility_001"
+    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
+    generation = bad_root / str(cells[0]["generations_path"])
+    generation.write_text(json.dumps({"exact_match": True, "raw_token_ids": [1, 2]}) + "\n")
+    sf.write_terminal(bad_root, "DONE", cells, (), (), source_snapshot=_source_snapshot())
+    bad_manifest = bad_root / "manifest.json"
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="Generation artifact"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("bad_checkpoint_contents")
+    bad_root = parent / "feasibility_001"
+    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
+    checkpoint = bad_root / str(cells[0]["checkpoint_path"])
+    checkpoint.write_bytes(b"not-a-checkpoint")
+    sf.write_terminal(bad_root, "DONE", cells, (), (), source_snapshot=_source_snapshot())
+    bad_manifest = bad_root / "manifest.json"
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="Checkpoint artifact"):
+        sf.validate_selection_record(bad_selection)
+
     parent = set_parent("symlink_inventory")
     bad_root = parent / "feasibility_001"
     bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
@@ -1285,7 +1406,16 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     manifest_data["configuration"] = {"training_steps": 1500}
     bad_manifest.write_text(json.dumps(manifest_data, sort_keys=True) + "\n")
     (bad_root / "DONE.json").write_text(
-        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(bad_manifest), "cells": cells}) + "\n"
+        json.dumps(
+            {
+                "status": "DONE",
+                "manifest_path": "manifest.json",
+                "manifest_sha256": sf.file_sha256(bad_manifest),
+                "pass_threshold": sf.PASS_THRESHOLD,
+                "cells": cells,
+            }
+        )
+        + "\n"
     )
     bad_selection = parent / "feasibility_selection_001.json"
     _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
@@ -1299,11 +1429,57 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     manifest_data["source_provenance"]["commit"] = "b" * 40
     bad_manifest.write_text(json.dumps(manifest_data, sort_keys=True) + "\n")
     (bad_root / "DONE.json").write_text(
-        json.dumps({"status": "DONE", "manifest_sha256": sf.file_sha256(bad_manifest), "cells": cells}) + "\n"
+        json.dumps(
+            {
+                "status": "DONE",
+                "manifest_path": "manifest.json",
+                "manifest_sha256": sf.file_sha256(bad_manifest),
+                "pass_threshold": sf.PASS_THRESHOLD,
+                "cells": cells,
+            }
+        )
+        + "\n"
     )
     bad_selection = parent / "feasibility_selection_001.json"
     _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
     with pytest.raises(ValueError, match="source_provenance"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("missing_source_commit")
+    bad_root = parent / "feasibility_001"
+    _write_feasibility_root(bad_root, "DONE", cells)
+    missing_commit = "a" * 40
+    sf.write_terminal(
+        bad_root,
+        "DONE",
+        cells,
+        (),
+        (),
+        source_snapshot=sf.SourceSnapshot(commit=missing_commit, status_lines=(), ignored_inputs=()),
+    )
+    bad_manifest = bad_root / "manifest.json"
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(
+        bad_selection,
+        bad_root,
+        bad_manifest,
+        [],
+        [],
+        cells=cells,
+        overrides={"source_commit": missing_commit},
+    )
+    with pytest.raises(ValueError, match="source_commit"):
+        sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("bad_terminal_threshold")
+    bad_root = parent / "feasibility_001"
+    bad_manifest, bad_done = _write_feasibility_root(bad_root, "DONE", cells)
+    terminal_data = json.loads(bad_done.read_text())
+    terminal_data["pass_threshold"] = 999
+    bad_done.write_text(json.dumps(terminal_data, sort_keys=True) + "\n")
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="pass_threshold"):
         sf.validate_selection_record(bad_selection)
 
     parent = set_parent("bad_parameter_count")
