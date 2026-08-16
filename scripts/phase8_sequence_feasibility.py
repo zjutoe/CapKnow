@@ -44,8 +44,9 @@ PASS_THRESHOLD = 52
 ROOT_RE = re.compile(r"^feasibility_(\d{3})$")
 SELECTION_RE = re.compile(r"^feasibility_selection_(\d{3})\.json$")
 HEX_OPERAND_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9a-f]{16})(?![0-9A-Fa-f])", re.IGNORECASE)
-NAMED_VALUE_RE = re.compile(r"\b(?:red|blue|green|silver)-[te][0-9a-f]{8}\b")
-ARRAY_ITEM_RE = re.compile(r"\bs[te][0-9a-f]{8}\b")
+NAMED_VALUE_RE = re.compile(r"\b(?:red|blue|green|silver)-[te][0-9a-f]{8}\b", re.IGNORECASE)
+ARRAY_ITEM_RE = re.compile(r"\bs[te][0-9a-f]{8}\b", re.IGNORECASE)
+ACCEPTED_INDEPENDENT_REVIEW_VERDICT = "ACCEPT"
 
 SCIENTIFIC_MARKERS = (
     *cg.TASK_ORDER,
@@ -164,6 +165,14 @@ def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
         reject_scientific_markers(record.operand_id)
         for value in semantic_values_for_record(record):
             reject_scientific_markers(value)
+    train_templates = {r.template_id.casefold() for r in records if r.split == "train"}
+    eval_templates = {r.template_id.casefold() for r in records if r.split == "eval"}
+    if train_templates & eval_templates:
+        raise ValueError("Feasibility train/evaluation template_id values must be disjoint.")
+    train_operands = {r.operand_id.casefold() for r in records if r.split == "train"}
+    eval_operands = {r.operand_id.casefold() for r in records if r.split == "eval"}
+    if train_operands & eval_operands:
+        raise ValueError("Feasibility train/evaluation operand_id values must be disjoint.")
     train = {(r.template_id, r.operand_id, r.prompt, r.answer) for r in records if r.split == "train"}
     eval_ = {(r.template_id, r.operand_id, r.prompt, r.answer) for r in records if r.split == "eval"}
     if train & eval_:
@@ -194,15 +203,16 @@ def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
         decoded = json.loads(record.answer)
         if not isinstance(decoded, str):
             raise ValueError("named_value_json answers must be JSON strings.")
-        values.add(decoded)
-        values.update(NAMED_VALUE_RE.findall(prompt_and_answer))
+        values.add(decoded.casefold())
+        values.update(value.casefold() for value in NAMED_VALUE_RE.findall(prompt_and_answer))
     elif record.family == "array_json":
         decoded = json.loads(record.answer)
         if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
             raise ValueError("array_json answers must be JSON arrays of strings.")
-        values.update(decoded)
-        values.add(compact_json(decoded))
-        values.update(ARRAY_ITEM_RE.findall(prompt_and_answer))
+        normalized = [item.casefold() for item in decoded]
+        values.update(normalized)
+        values.add(compact_json(normalized))
+        values.update(value.casefold() for value in ARRAY_ITEM_RE.findall(prompt_and_answer))
     elif record.family == "boolean_json":
         values.update(re.findall(r"\b\d+\b", record.prompt))
     else:
@@ -532,6 +542,7 @@ def validate_source_clean(root: Path, predecessor_roots: Sequence[Path], predece
         stdout=subprocess.PIPE,
     ).stdout.splitlines()
     allowed = {path.resolve() for path in (*predecessor_roots, *predecessor_selections)}
+    allowed.update(path.resolve() for path in predecessor_root_paths_from_selections(predecessor_selections))
     allowed.add(root.resolve())
     for line in status:
         code = line[:2]
@@ -577,7 +588,7 @@ def build_manifest(
             "gpu_driver": gpu_driver_version(),
         },
         "cells": list(cells),
-        "predecessor_roots": [terminal_binding(path) for path in predecessor_roots],
+        "predecessor_roots": complete_predecessor_root_bindings(predecessor_roots, predecessor_selections),
         "predecessor_selections": [selection_binding(path) for path in predecessor_selections],
         "file_inventory": inventory(root),
     }
@@ -701,11 +712,101 @@ def selection_binding(path: Path) -> dict[str, object]:
     return {"path": str(path), "sha256": file_sha256(path)}
 
 
+def root_binding_key(binding: dict[str, object]) -> tuple[str, str, str, str]:
+    path = Path(require_canonical_path_string(binding.get("path"), "predecessor_root.path", ROOT_RE))
+    terminal_state = require_exact_str(binding.get("terminal_state"), "predecessor_root.terminal_state")
+    terminal_sha = require_exact_str(binding.get("terminal_sha256"), "predecessor_root.terminal_sha256")
+    manifest_sha = require_exact_str(binding.get("manifest_sha256"), "predecessor_root.manifest_sha256")
+    return str(path.resolve()), terminal_state, terminal_sha, manifest_sha
+
+
+def require_root_binding_map(bindings: object) -> tuple[dict[str, tuple[str, str, str]], list[int]]:
+    if not isinstance(bindings, list):
+        raise ValueError("predecessor_roots must be a JSON list.")
+    binding_map: dict[str, tuple[str, str, str]] = {}
+    root_numbers: list[int] = []
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            raise ValueError("Predecessor root binding must be a JSON object.")
+        path_key, terminal_state, terminal_sha, manifest_sha = root_binding_key(binding)
+        if path_key in binding_map:
+            raise ValueError("predecessor_roots must not contain duplicate root bindings.")
+        predecessor_path = Path(require_canonical_path_string(binding.get("path"), "predecessor_root.path", ROOT_RE))
+        root_numbers.append(feasibility_root_number(predecessor_path))
+        if terminal_state not in {"DONE", "FAILED"}:
+            raise ValueError("Predecessor terminal_state must be DONE or FAILED.")
+        terminal_path, terminal_data, _manifest_path, actual_manifest_sha = load_terminal_binding(predecessor_path)
+        if terminal_path.stem != terminal_state:
+            raise ValueError("Predecessor terminal status does not match its binding.")
+        if file_sha256(terminal_path) != terminal_sha:
+            raise ValueError("Predecessor terminal checksum mismatch.")
+        if actual_manifest_sha != manifest_sha:
+            raise ValueError("Predecessor manifest checksum mismatch.")
+        if terminal_data.get("manifest_sha256") != manifest_sha:
+            raise ValueError("Predecessor terminal does not bind the predecessor manifest checksum.")
+        binding_map[path_key] = (terminal_state, terminal_sha, manifest_sha)
+    return binding_map, root_numbers
+
+
+def add_root_binding(
+    binding_map: dict[str, tuple[str, str, str]],
+    binding: dict[str, object],
+) -> None:
+    path_key, terminal_state, terminal_sha, manifest_sha = root_binding_key(binding)
+    previous = binding_map.get(path_key)
+    current = (terminal_state, terminal_sha, manifest_sha)
+    if previous is not None and previous != current:
+        raise ValueError("predecessor_roots contain inconsistent bindings for the same root.")
+    binding_map[path_key] = current
+
+
+def complete_predecessor_root_bindings(
+    predecessor_roots: Sequence[Path],
+    predecessor_selections: Sequence[Path],
+) -> list[dict[str, object]]:
+    completed: list[dict[str, object]] = []
+    binding_map: dict[str, tuple[str, str, str]] = {}
+
+    def add(binding: dict[str, object]) -> None:
+        path_key, terminal_state, terminal_sha, manifest_sha = root_binding_key(binding)
+        previous = binding_map.get(path_key)
+        current = (terminal_state, terminal_sha, manifest_sha)
+        if previous is not None:
+            if previous != current:
+                raise ValueError("predecessor_roots contain inconsistent bindings for the same root.")
+            return
+        binding_map[path_key] = current
+        completed.append(binding)
+
+    for root in predecessor_roots:
+        add(terminal_binding(root))
+    for selection_path in predecessor_selections:
+        selection_data = validate_selection_record(selection_path)
+        add(terminal_binding(Path(str(selection_data["selected_root"]))))
+        for predecessor in selection_data["predecessor_roots"]:
+            add(predecessor)
+    return completed
+
+
+def predecessor_root_paths_from_selections(predecessor_selections: Sequence[Path]) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for selection_path in predecessor_selections:
+        selection_data = validate_selection_record(selection_path)
+        paths.append(Path(str(selection_data["selected_root"])))
+        paths.extend(Path(str(predecessor["path"])) for predecessor in selection_data["predecessor_roots"])
+    return tuple(paths)
+
+
 def validate_selection_record(path: Path) -> dict[str, object]:
-    return _validate_selection_record(path, seen=set())
+    data, _root_binding_map = _validate_selection_record(path, seen=set())
+    return data
 
 
-def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, object]:
+def _validate_selection_record(
+    path: Path,
+    *,
+    seen: set[Path],
+) -> tuple[dict[str, object], dict[str, tuple[str, str, str]]]:
     current_number = selection_record_number(path)
     require_canonical_path_string(str(path), "selection_record.path", SELECTION_RE)
     resolved = path.resolve()
@@ -758,25 +859,12 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
     pass_decision = data["pass_decision"]
     if type(pass_decision) is not bool or pass_decision is not True:
         raise ValueError("Selection record pass_decision must be true for a selected root.")
-    predecessor_root_numbers: list[int] = []
+    verdict = require_exact_str(data["independent_review_verdict"], "independent_review_verdict")
+    if verdict != ACCEPTED_INDEPENDENT_REVIEW_VERDICT:
+        raise ValueError("Selection record independent_review_verdict must be exact JSON string 'ACCEPT'.")
+    predecessor_root_bindings, predecessor_root_numbers = require_root_binding_map(data["predecessor_roots"])
+    expected_root_bindings = dict(predecessor_root_bindings)
     predecessor_selection_numbers: list[int] = []
-    for predecessor in data["predecessor_roots"]:
-        if not isinstance(predecessor, dict):
-            raise ValueError("Predecessor root binding must be a JSON object.")
-        predecessor_path = Path(require_canonical_path_string(predecessor.get("path"), "predecessor_root.path", ROOT_RE))
-        predecessor_root_numbers.append(feasibility_root_number(predecessor_path))
-        predecessor_terminal_state = require_exact_str(predecessor.get("terminal_state"), "predecessor_root.terminal_state")
-        if predecessor_terminal_state not in {"DONE", "FAILED"}:
-            raise ValueError("Predecessor terminal_state must be DONE or FAILED.")
-        terminal_path, terminal_data, manifest_path, manifest_sha = load_terminal_binding(predecessor_path)
-        if terminal_path.stem != predecessor_terminal_state:
-            raise ValueError("Predecessor terminal status does not match its binding.")
-        if file_sha256(terminal_path) != predecessor["terminal_sha256"]:
-            raise ValueError("Predecessor terminal checksum mismatch.")
-        if manifest_sha != predecessor["manifest_sha256"]:
-            raise ValueError("Predecessor manifest checksum mismatch.")
-        if terminal_data.get("manifest_sha256") != predecessor["manifest_sha256"]:
-            raise ValueError("Predecessor terminal does not bind the predecessor manifest checksum.")
     predecessor_selection_bindings: list[tuple[Path, str]] = []
     for predecessor in data["predecessor_selections"]:
         if not isinstance(predecessor, dict):
@@ -789,12 +877,27 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
     for predecessor_path, predecessor_sha in predecessor_selection_bindings:
         if file_sha256(predecessor_path) != predecessor_sha:
             raise ValueError("Predecessor selection checksum mismatch.")
-        predecessor_data = _validate_selection_record(predecessor_path, seen=seen)
-        predecessor_root_numbers.append(feasibility_root_number(Path(str(predecessor_data["selected_root"]))))
+        predecessor_data, predecessor_validated_roots = _validate_selection_record(predecessor_path, seen=seen)
+        predecessor_selected_root = Path(str(predecessor_data["selected_root"]))
+        predecessor_root_numbers.append(feasibility_root_number(predecessor_selected_root))
+        add_root_binding(expected_root_bindings, terminal_binding(predecessor_selected_root))
+        for predecessor_root_key, predecessor_root_binding in predecessor_validated_roots.items():
+            terminal_state, terminal_sha, manifest_sha = predecessor_root_binding
+            add_root_binding(
+                expected_root_bindings,
+                {
+                    "path": predecessor_root_key,
+                    "terminal_state": terminal_state,
+                    "terminal_sha256": terminal_sha,
+                    "manifest_sha256": manifest_sha,
+                },
+            )
         for transitive in predecessor_data["predecessor_selections"]:
             transitive_path = str(Path(transitive["path"]).resolve())
             if lineage_bindings.get(transitive_path) != transitive["sha256"]:
                 raise ValueError("Selection record must bind transitive predecessor selection lineage.")
+    if predecessor_root_bindings != expected_root_bindings:
+        raise ValueError("Selection record predecessor_roots must include the complete root lineage closure.")
     expected_root_number = max(predecessor_root_numbers, default=0) + 1
     selected_root_number = feasibility_root_number(root)
     if selected_root_number != expected_root_number:
@@ -809,7 +912,7 @@ def _validate_selection_record(path: Path, *, seen: set[Path]) -> dict[str, obje
             f"got {path.name!r}."
         )
     seen.remove(resolved)
-    return data
+    return data, predecessor_root_bindings
 
 
 def selection_record_number(path: Path) -> int:

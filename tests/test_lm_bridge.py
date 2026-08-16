@@ -742,6 +742,89 @@ def test_feasibility_hex_semantic_overlap_is_case_insensitive() -> None:
         sf.validate_feasibility_records((train, eval_record))
 
 
+def test_feasibility_named_and_array_semantic_overlap_is_case_insensitive() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+
+    named_train = sf.FeasibilityRecord(
+        family="named_value_json",
+        split="train",
+        index=0,
+        template_id="named-train-surface",
+        operand_id="named-train-value",
+        prompt="choose red-tdeadbeef from pairs red-tdeadbeef=value",
+        answer=json.dumps("red-tdeadbeef"),
+    )
+    named_eval = sf.FeasibilityRecord(
+        family="named_value_json",
+        split="eval",
+        index=0,
+        template_id="named-eval-surface",
+        operand_id="named-eval-value",
+        prompt="choose RED-TDEADBEEF from pairs RED-TDEADBEEF=value",
+        answer=json.dumps("RED-TDEADBEEF"),
+    )
+    assert "red-tdeadbeef" in sf.semantic_values_for_record(named_eval)
+    with pytest.raises(ValueError, match="semantic values"):
+        sf.validate_feasibility_records((named_train, named_eval))
+
+    array_train = sf.FeasibilityRecord(
+        family="array_json",
+        split="train",
+        index=0,
+        template_id="array-train-surface",
+        operand_id="array-train-value",
+        prompt="chunks ste00ff11",
+        answer=json.dumps(["ste00ff11"]),
+    )
+    array_eval = sf.FeasibilityRecord(
+        family="array_json",
+        split="eval",
+        index=0,
+        template_id="array-eval-surface",
+        operand_id="array-eval-value",
+        prompt="pieces STE00FF11",
+        answer=json.dumps(["STE00FF11"]),
+    )
+    assert "ste00ff11" in sf.semantic_values_for_record(array_eval)
+    with pytest.raises(ValueError, match="semantic values"):
+        sf.validate_feasibility_records((array_train, array_eval))
+
+
+def test_feasibility_template_and_operand_overlap_are_rejected_independently() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+
+    base_train = sf.FeasibilityRecord(
+        family="hex_copy",
+        split="train",
+        index=0,
+        template_id="shared-form",
+        operand_id="train-operand",
+        prompt="copy 1111111111111111",
+        answer="1111111111111111",
+    )
+    base_eval = sf.FeasibilityRecord(
+        family="hex_copy",
+        split="eval",
+        index=0,
+        template_id="SHARED-FORM",
+        operand_id="eval-operand",
+        prompt="copy 2222222222222222",
+        answer="2222222222222222",
+    )
+    with pytest.raises(ValueError, match="template_id"):
+        sf.validate_feasibility_records((base_train, base_eval))
+
+    base_eval = sf.FeasibilityRecord(
+        **{
+            **base_eval.__dict__,
+            "template_id": "eval-form",
+            "operand_id": "TRAIN-OPERAND",
+        }
+    )
+    with pytest.raises(ValueError, match="operand_id"):
+        sf.validate_feasibility_records((base_train, base_eval))
+
+
 def test_feasibility_prompt_surface_overlap_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     surfaces = {
@@ -906,7 +989,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
             "configuration": configuration,
             "per_cell_counts": cells if selected_cells is None else selected_cells,
             "pass_decision": True,
-            "independent_review_verdict": "accepted",
+            "independent_review_verdict": "ACCEPT",
             "predecessor_roots": predecessor_roots,
             "predecessor_selections": predecessor_selections,
         }
@@ -954,21 +1037,79 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     predecessor_selections = [
         {"path": str(predecessor_selection), "sha256": sf.file_sha256(predecessor_selection)}
     ]
+    full_predecessor_roots = [*predecessor_roots, sf.terminal_binding(lineage_root)]
 
     root = tmp_path / "feasibility_003"
-    manifest, done = write_root(root, "DONE", cells, predecessor_roots, predecessor_selections)
+    manifest, done = write_root(root, "DONE", cells, full_predecessor_roots, predecessor_selections)
 
     selection = tmp_path / "feasibility_selection_002.json"
-    write_selection(selection, root, manifest, predecessor_roots, predecessor_selections)
+    write_selection(selection, root, manifest, full_predecessor_roots, predecessor_selections)
 
     assert sf.validate_selection_record(selection)["pass_decision"] is True
+
+    auto_manifest_root = tmp_path / "auto_manifest" / "feasibility_004"
+    auto_manifest_root.mkdir(parents=True)
+    assert sf.build_manifest(auto_manifest_root, cells, (predecessor,), (predecessor_selection,), "DONE")[
+        "predecessor_roots"
+    ] == full_predecessor_roots
+
+    omitted_transitive_root = tmp_path / "omitted_transitive_root" / "feasibility_003"
+    omitted_transitive_root.parent.mkdir()
+    omitted_transitive_roots = [sf.terminal_binding(lineage_root)]
+    omitted_transitive_manifest, _omitted_transitive_done = write_root(
+        omitted_transitive_root,
+        "DONE",
+        cells,
+        omitted_transitive_roots,
+        predecessor_selections,
+    )
+    omitted_transitive_selection = (
+        tmp_path / "bad_omitted_transitive_root" / "feasibility_selection_002.json"
+    )
+    write_selection(
+        omitted_transitive_selection,
+        omitted_transitive_root,
+        omitted_transitive_manifest,
+        omitted_transitive_roots,
+        predecessor_selections,
+    )
+    with pytest.raises(ValueError, match="complete root lineage closure"):
+        sf.validate_selection_record(omitted_transitive_selection)
+
+    for index, bad_value in enumerate(("REJECT", "accepted", "", 1)):
+        bad_selection = tmp_path / f"bad_verdict_{index}" / "feasibility_selection_002.json"
+        write_selection(
+            bad_selection,
+            root,
+            manifest,
+            full_predecessor_roots,
+            predecessor_selections,
+            overrides={"independent_review_verdict": bad_value},
+        )
+        with pytest.raises(ValueError, match="independent_review_verdict"):
+            sf.validate_selection_record(bad_selection)
+
+    duplicate_root = tmp_path / "duplicate_root_binding" / "feasibility_003"
+    duplicate_root.parent.mkdir()
+    duplicate_roots = [*full_predecessor_roots, dict(full_predecessor_roots[0])]
+    duplicate_manifest, _duplicate_done = write_root(
+        duplicate_root,
+        "DONE",
+        cells,
+        duplicate_roots,
+        predecessor_selections,
+    )
+    duplicate_selection = tmp_path / "bad_duplicate_root_binding" / "feasibility_selection_002.json"
+    write_selection(duplicate_selection, duplicate_root, duplicate_manifest, duplicate_roots, predecessor_selections)
+    with pytest.raises(ValueError, match="duplicate root bindings"):
+        sf.validate_selection_record(duplicate_selection)
 
     bad_selection = tmp_path / "bad_selected_root" / "feasibility_selection_002.json"
     write_selection(
         bad_selection,
         root,
         manifest,
-        predecessor_roots,
+        full_predecessor_roots,
         predecessor_selections,
         overrides={"selected_root": str(tmp_path / "selected_root")},
     )
@@ -980,7 +1121,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
         bad_selection,
         root,
         manifest,
-        predecessor_roots,
+        full_predecessor_roots,
         predecessor_selections,
         overrides={"selected_root": 12},
     )
@@ -992,7 +1133,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
         bad_selection,
         root,
         manifest,
-        predecessor_roots,
+        full_predecessor_roots,
         predecessor_selections,
         overrides={"selected_root": str(root.parent / "alias" / ".." / root.name)},
     )
@@ -1009,7 +1150,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
             bad_selection,
             root,
             manifest,
-            predecessor_roots,
+            full_predecessor_roots,
             predecessor_selections,
             overrides={"selected_root": spelling},
         )
@@ -1031,7 +1172,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
         bad_selection,
         root,
         manifest,
-        predecessor_roots,
+        full_predecessor_roots,
         predecessor_selections,
         overrides={"source_commit": "wrong-source"},
     )
@@ -1041,7 +1182,14 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     bad_counts = [dict(cell) for cell in cells]
     bad_counts[0]["exact_matches"] = 53
     bad_selection = tmp_path / "bad_counts" / "feasibility_selection_002.json"
-    write_selection(bad_selection, root, manifest, predecessor_roots, predecessor_selections, selected_cells=bad_counts)
+    write_selection(
+        bad_selection,
+        root,
+        manifest,
+        full_predecessor_roots,
+        predecessor_selections,
+        selected_cells=bad_counts,
+    )
     with pytest.raises(ValueError, match="per_cell_counts"):
         sf.validate_selection_record(bad_selection)
 
@@ -1051,7 +1199,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
         sf.validate_selection_record(bad_selection)
 
     bad_selection = tmp_path / "bad_predecessor_selections" / "feasibility_selection_001.json"
-    write_selection(bad_selection, root, manifest, predecessor_roots, [])
+    write_selection(bad_selection, root, manifest, full_predecessor_roots, [])
     with pytest.raises(ValueError, match="predecessor_selections"):
         sf.validate_selection_record(bad_selection)
 
@@ -1061,7 +1209,7 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
             bad_selection,
             root,
             manifest,
-            predecessor_roots,
+            full_predecessor_roots,
             predecessor_selections,
             overrides={"pass_decision": bad_value},
         )
@@ -1072,20 +1220,20 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     bad_cells[0]["exact_matches"] = 51
     bad_cells[0]["passed"] = False
     bad_root = tmp_path / "feasibility_004"
-    bad_manifest, _bad_done = write_root(bad_root, "DONE", bad_cells, predecessor_roots, predecessor_selections)
+    bad_manifest, _bad_done = write_root(bad_root, "DONE", bad_cells, full_predecessor_roots, predecessor_selections)
     bad_selection = tmp_path / "bad_52_64" / "feasibility_selection_002.json"
     write_selection(
         bad_selection,
         bad_root,
         bad_manifest,
-        predecessor_roots,
+        full_predecessor_roots,
         predecessor_selections,
         selected_cells=bad_cells,
     )
     with pytest.raises(ValueError, match="52/64"):
         sf.validate_selection_record(bad_selection)
 
-    aliased_predecessor_roots = [dict(predecessor_roots[0])]
+    aliased_predecessor_roots = [dict(full_predecessor_roots[0]), *full_predecessor_roots[1:]]
     aliased_predecessor_roots[0]["path"] = str(predecessor.parent / "alias" / ".." / predecessor.name)
     alias_root = tmp_path / "feasibility_005"
     alias_manifest, _alias_done = write_root(alias_root, "DONE", cells, aliased_predecessor_roots, predecessor_selections)
@@ -1097,9 +1245,9 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     aliased_predecessor_selections = [dict(predecessor_selections[0])]
     aliased_predecessor_selections[0]["path"] = str(predecessor_selection.parent / "alias" / ".." / predecessor_selection.name)
     alias_root = tmp_path / "feasibility_006"
-    alias_manifest, _alias_done = write_root(alias_root, "DONE", cells, predecessor_roots, aliased_predecessor_selections)
+    alias_manifest, _alias_done = write_root(alias_root, "DONE", cells, full_predecessor_roots, aliased_predecessor_selections)
     bad_selection = tmp_path / "bad_predecessor_selection_alias" / "feasibility_selection_002.json"
-    write_selection(bad_selection, alias_root, alias_manifest, predecessor_roots, aliased_predecessor_selections)
+    write_selection(bad_selection, alias_root, alias_manifest, full_predecessor_roots, aliased_predecessor_selections)
     with pytest.raises(ValueError, match="canonical path spelling"):
         sf.validate_selection_record(bad_selection)
 
