@@ -7,6 +7,10 @@ from pathlib import Path
 import subprocess
 import sys
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import pytest
 import torch
 
@@ -935,6 +939,97 @@ def test_feasibility_root_rejects_dual_terminal_and_manifest_status_mismatch(tmp
         sf.load_terminal_binding(root)
 
 
+def test_source_clean_only_allows_inventory_bound_predecessor_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    source_commit = "source-sha"
+    configuration = {"training_steps": 1500}
+    cells = _passing_feasibility_cells()
+
+    def write_inventory_root(root: Path, status: str) -> tuple[Path, Path, list[Path]]:
+        root.mkdir(parents=True)
+        summary = root / "summary.json"
+        summary.write_text("{}\n")
+        cell_dir = root / "hex_copy__small__seed0"
+        cell_dir.mkdir()
+        generations = cell_dir / "generations.jsonl"
+        generations.write_text('{"generated":"abc","exact_match":true}\n')
+        file_inventory = [
+            {"path": "hex_copy__small__seed0/generations.jsonl", "sha256": sf.file_sha256(generations), "bytes": generations.stat().st_size},
+            {"path": "summary.json", "sha256": sf.file_sha256(summary), "bytes": summary.stat().st_size},
+        ]
+        root_cells = cells if status == "DONE" else []
+        manifest = root / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "terminal_status": status,
+                    "source_commit": source_commit,
+                    "configuration": configuration,
+                    "cells": root_cells,
+                    "predecessor_roots": [],
+                    "predecessor_selections": [],
+                    "file_inventory": file_inventory,
+                },
+                sort_keys=True,
+            )
+            + "\n"
+        )
+        terminal = root / f"{status}.json"
+        terminal.write_text(
+            json.dumps({"status": status, "manifest_sha256": sf.file_sha256(manifest), "cells": root_cells})
+            + "\n"
+        )
+        return manifest, terminal, [generations, summary]
+
+    selected_root = tmp_path / "feasibility_001"
+    manifest, terminal, inventory_files = write_inventory_root(selected_root, "DONE")
+    selection = tmp_path / "feasibility_selection_001.json"
+    selection.write_text(
+        json.dumps(
+            {
+                "selected_root": str(selected_root),
+                "selected_manifest_sha256": sf.file_sha256(manifest),
+                "source_commit": source_commit,
+                "configuration": configuration,
+                "per_cell_counts": cells,
+                "pass_decision": True,
+                "independent_review_verdict": "ACCEPT",
+                "predecessor_roots": [],
+                "predecessor_selections": [],
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+    def set_git_status(paths: list[Path]) -> None:
+        def fake_run(args: list[str], check: bool, text: bool, stdout: object) -> subprocess.CompletedProcess[str]:
+            assert args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]
+            assert check is True
+            assert text is True
+            return subprocess.CompletedProcess(args, 0, stdout="".join(f"?? {path}\n" for path in paths))
+
+        monkeypatch.setattr(sf.subprocess, "run", fake_run)
+
+    allowed_paths = [selection, manifest, terminal, *inventory_files]
+    set_git_status(allowed_paths)
+    sf.validate_source_clean(tmp_path / "feasibility_002", (), (selection,))
+
+    extra = selected_root / "unbound_extra.txt"
+    extra.write_text("not bound\n")
+    set_git_status([*allowed_paths, extra])
+    with pytest.raises(RuntimeError, match="Untracked file"):
+        sf.validate_source_clean(tmp_path / "feasibility_002", (), (selection,))
+
+    inventory_files[-1].write_text("tampered after manifest\n")
+    set_git_status(allowed_paths)
+    with pytest.raises(ValueError, match="file_inventory"):
+        sf.validate_source_clean(tmp_path / "feasibility_002", (), (selection,))
+
+
 def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_path: Path) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     source_commit = "source-sha"
@@ -1046,6 +1141,56 @@ def test_selection_record_validation_binds_root_predecessors_and_checksums(tmp_p
     write_selection(selection, root, manifest, full_predecessor_roots, predecessor_selections)
 
     assert sf.validate_selection_record(selection)["pass_decision"] is True
+
+    duplicate_predecessor_selections = [dict(predecessor_selections[0]), dict(predecessor_selections[0])]
+    duplicate_selection_root = tmp_path / "bad_duplicate_predecessor_selection_root" / "feasibility_003"
+    duplicate_selection_root.parent.mkdir()
+    duplicate_selection_manifest, _duplicate_selection_done = write_root(
+        duplicate_selection_root,
+        "DONE",
+        cells,
+        full_predecessor_roots,
+        duplicate_predecessor_selections,
+    )
+    duplicate_predecessor_selection = (
+        tmp_path / "bad_duplicate_predecessor_selection" / "feasibility_selection_002.json"
+    )
+    write_selection(
+        duplicate_predecessor_selection,
+        duplicate_selection_root,
+        duplicate_selection_manifest,
+        full_predecessor_roots,
+        duplicate_predecessor_selections,
+    )
+    with pytest.raises(ValueError, match="duplicate canonical paths"):
+        sf.validate_selection_record(duplicate_predecessor_selection)
+
+    descending_predecessor_selections = [
+        {"path": str(selection), "sha256": sf.file_sha256(selection)},
+        dict(predecessor_selections[0]),
+    ]
+    descending_predecessor_roots = [*full_predecessor_roots, sf.terminal_binding(root)]
+    descending_selection_root = tmp_path / "bad_descending_predecessor_selection_root" / "feasibility_004"
+    descending_selection_root.parent.mkdir()
+    descending_selection_manifest, _descending_selection_done = write_root(
+        descending_selection_root,
+        "DONE",
+        cells,
+        descending_predecessor_roots,
+        descending_predecessor_selections,
+    )
+    descending_predecessor_selection = (
+        tmp_path / "bad_descending_predecessor_selection" / "feasibility_selection_003.json"
+    )
+    write_selection(
+        descending_predecessor_selection,
+        descending_selection_root,
+        descending_selection_manifest,
+        descending_predecessor_roots,
+        descending_predecessor_selections,
+    )
+    with pytest.raises(ValueError, match="strictly ascending"):
+        sf.validate_selection_record(descending_predecessor_selection)
 
     auto_manifest_root = tmp_path / "auto_manifest" / "feasibility_004"
     auto_manifest_root.mkdir(parents=True)

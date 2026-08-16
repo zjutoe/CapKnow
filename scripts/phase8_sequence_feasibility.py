@@ -535,23 +535,64 @@ def feasibility_root_number(root: Path) -> int:
 
 
 def validate_source_clean(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> None:
+    allowed = source_clean_allowed_paths(predecessor_roots, predecessor_selections)
     status = subprocess.run(
         ["git", "status", "--porcelain=v1", "--untracked-files=all"],
         check=True,
         text=True,
         stdout=subprocess.PIPE,
     ).stdout.splitlines()
-    allowed = {path.resolve() for path in (*predecessor_roots, *predecessor_selections)}
-    allowed.update(path.resolve() for path in predecessor_root_paths_from_selections(predecessor_selections))
-    allowed.add(root.resolve())
     for line in status:
         code = line[:2]
         rel = line[3:]
         candidate = Path(rel).resolve()
         if code != "??":
             raise RuntimeError(f"Tracked or staged source change blocks feasibility run: {line}")
-        if not any(candidate == item or item in candidate.parents for item in allowed):
+        if candidate not in allowed:
             raise RuntimeError(f"Untracked file is not an exact supplied predecessor/root binding: {line}")
+
+
+def source_clean_allowed_paths(predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> set[Path]:
+    allowed: set[Path] = set()
+    for selection in predecessor_selection_paths_from_selections(predecessor_selections):
+        allowed.add(selection.resolve())
+    for predecessor_root in (*predecessor_roots, *predecessor_root_paths_from_selections(predecessor_selections)):
+        allowed.update(inventory_bound_root_paths(predecessor_root))
+    return allowed
+
+
+def inventory_bound_root_paths(root: Path) -> set[Path]:
+    require_canonical_path_string(str(root), "predecessor_root.path", ROOT_RE)
+    terminal, _terminal_data, manifest, _manifest_sha = load_terminal_binding(root)
+    manifest_data = json.loads(manifest.read_text())
+    file_inventory = manifest_data.get("file_inventory")
+    if not isinstance(file_inventory, list):
+        raise ValueError("Predecessor manifest must contain a file_inventory list.")
+    allowed = {manifest.resolve(), terminal.resolve()}
+    root_resolved = root.resolve()
+    seen_paths: set[str] = set()
+    for index, row in enumerate(file_inventory):
+        if not isinstance(row, dict):
+            raise ValueError("Predecessor manifest file_inventory entries must be JSON objects.")
+        rel_path = require_canonical_relative_path(row.get("path"), f"file_inventory[{index}].path")
+        if rel_path in seen_paths:
+            raise ValueError("Predecessor manifest file_inventory must not contain duplicate paths.")
+        seen_paths.add(rel_path)
+        candidate = (root / rel_path).resolve()
+        if root_resolved not in candidate.parents:
+            raise ValueError("Predecessor manifest file_inventory path escapes its root.")
+        if not candidate.is_file():
+            raise ValueError("Predecessor manifest file_inventory path does not exist as a file.")
+        expected_sha = require_exact_str(row.get("sha256"), f"file_inventory[{index}].sha256")
+        expected_bytes = row.get("bytes")
+        if type(expected_bytes) is not int or expected_bytes < 0:
+            raise ValueError(f"file_inventory[{index}].bytes must be a non-negative integer.")
+        if candidate.stat().st_size != expected_bytes:
+            raise ValueError("Predecessor manifest file_inventory byte count mismatch.")
+        if file_sha256(candidate) != expected_sha:
+            raise ValueError("Predecessor manifest file_inventory checksum mismatch.")
+        allowed.add(candidate)
+    return allowed
 
 
 def build_manifest(
@@ -797,6 +838,15 @@ def predecessor_root_paths_from_selections(predecessor_selections: Sequence[Path
     return tuple(paths)
 
 
+def predecessor_selection_paths_from_selections(predecessor_selections: Sequence[Path]) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for selection_path in predecessor_selections:
+        selection_data = validate_selection_record(selection_path)
+        paths.append(selection_path)
+        paths.extend(Path(str(predecessor["path"])) for predecessor in selection_data["predecessor_selections"])
+    return tuple(paths)
+
+
 def validate_selection_record(path: Path) -> dict[str, object]:
     data, _root_binding_map = _validate_selection_record(path, seen=set())
     return data
@@ -866,11 +916,19 @@ def _validate_selection_record(
     expected_root_bindings = dict(predecessor_root_bindings)
     predecessor_selection_numbers: list[int] = []
     predecessor_selection_bindings: list[tuple[Path, str]] = []
+    predecessor_selection_path_keys: set[str] = set()
     for predecessor in data["predecessor_selections"]:
         if not isinstance(predecessor, dict):
             raise ValueError("Predecessor selection binding must be a JSON object.")
         predecessor_path = Path(require_canonical_path_string(predecessor.get("path"), "predecessor_selection.path", SELECTION_RE))
-        predecessor_selection_numbers.append(selection_record_number(predecessor_path))
+        predecessor_path_key = str(predecessor_path.resolve())
+        if predecessor_path_key in predecessor_selection_path_keys:
+            raise ValueError("predecessor_selections must not contain duplicate canonical paths.")
+        predecessor_selection_path_keys.add(predecessor_path_key)
+        predecessor_number = selection_record_number(predecessor_path)
+        if predecessor_selection_numbers and predecessor_number <= predecessor_selection_numbers[-1]:
+            raise ValueError("predecessor_selections must be in strictly ascending selection-number order.")
+        predecessor_selection_numbers.append(predecessor_number)
         predecessor_sha = require_exact_str(predecessor.get("sha256"), "predecessor_selection.sha256")
         predecessor_selection_bindings.append((predecessor_path, predecessor_sha))
     lineage_bindings = {str(predecessor_path.resolve()): sha for predecessor_path, sha in predecessor_selection_bindings}
@@ -938,6 +996,20 @@ def require_canonical_path_string(value: object, field_name: str, basename_patte
         if basename_pattern is ROOT_RE:
             raise ValueError("Feasibility root basename must be immutable numbered form feasibility_NNN.")
         raise ValueError("Selection record basename must be immutable numbered form feasibility_selection_NNN.json.")
+    return raw
+
+
+def require_canonical_relative_path(value: object, field_name: str) -> str:
+    raw = require_exact_str(value, field_name)
+    if not raw:
+        raise ValueError(f"{field_name} must be a non-empty canonical relative path string.")
+    if "\\" in raw or "//" in raw:
+        raise ValueError(f"{field_name} must use canonical relative path spelling.")
+    path = PurePosixPath(raw)
+    if path.is_absolute():
+        raise ValueError(f"{field_name} must be relative.")
+    if raw != path.as_posix() or any(part in {".", ".."} for part in path.parts):
+        raise ValueError(f"{field_name} must use canonical relative path spelling.")
     return raw
 
 
