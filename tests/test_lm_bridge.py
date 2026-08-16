@@ -649,6 +649,16 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     tampered[0]["exact_matches"] = 65
     with pytest.raises(ValueError, match="exact_matches"):
         sf.validate_cell_counts(tampered)
+    for field_name, bad_value in (
+        ("exact_matches", 52.9),
+        ("eval_count", "64"),
+        ("seed", "0"),
+        ("passed", 1),
+    ):
+        tampered = [dict(cell) for cell in cells]
+        tampered[0][field_name] = bad_value
+        with pytest.raises(ValueError, match=field_name):
+            sf.validate_cell_counts(tampered)
 
     cell_dir = tmp_path / "hex_copy__small__seed0"
     cell_dir.mkdir()

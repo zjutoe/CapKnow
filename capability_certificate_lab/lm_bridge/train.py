@@ -62,7 +62,9 @@ def set_deterministic_backend(seed: int) -> None:
     torch.manual_seed(model_seed(seed))
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(model_seed(seed))
+    torch.set_num_threads(1)
     torch.use_deterministic_algorithms(True)
+    torch.backends.mkldnn.enabled = False
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.backends.cudnn.benchmark = False

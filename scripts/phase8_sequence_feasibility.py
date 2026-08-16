@@ -240,24 +240,38 @@ def validate_cell_counts(cells: Sequence[dict[str, object]]) -> None:
     expected_keys = {(family, model_size, seed) for family in FAMILIES for model_size in MODEL_SIZES for seed in SEEDS}
     seen: set[tuple[str, str, int]] = set()
     for cell in cells:
-        key = (str(cell["family"]), str(cell["model_size"]), int(cell["seed"]))
+        seed = require_exact_int(cell["seed"], "seed")
+        key = (str(cell["family"]), str(cell["model_size"]), seed)
         if key not in expected_keys:
             raise ValueError(f"Unexpected feasibility cell: {key!r}.")
         if key in seen:
             raise ValueError(f"Duplicate feasibility cell: {key!r}.")
         seen.add(key)
-        eval_count = int(cell["eval_count"])
-        exact_matches = int(cell["exact_matches"])
+        eval_count = require_exact_int(cell["eval_count"], "eval_count")
+        exact_matches = require_exact_int(cell["exact_matches"], "exact_matches")
+        passed_value = require_exact_bool(cell["passed"], "passed")
         if eval_count != EVAL_RECORDS_PER_FAMILY:
             raise ValueError("Every feasibility cell must evaluate 64 records.")
         if not 0 <= exact_matches <= eval_count:
             raise ValueError("Feasibility exact_matches must satisfy 0 <= exact_matches <= eval_count.")
         passed = exact_matches >= PASS_THRESHOLD
-        if bool(cell["passed"]) != passed:
+        if passed_value != passed:
             raise ValueError("Feasibility cell pass/fail does not match the 52/64 requirement.")
     missing = expected_keys - seen
     if missing:
         raise ValueError(f"Missing feasibility cells: {sorted(missing)!r}.")
+
+
+def require_exact_int(value: object, field_name: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"Feasibility cell {field_name} must be an exact JSON integer.")
+    return value
+
+
+def require_exact_bool(value: object, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"Feasibility cell {field_name} must be a JSON boolean.")
+    return value
 
 
 def run_suite(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> None:
