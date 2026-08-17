@@ -15,7 +15,7 @@ import random
 import re
 import subprocess
 import sys
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -199,9 +199,9 @@ class SourceSnapshot:
 @dataclass
 class FeasibilityValidationContext:
     active_roots: set[Path] = field(default_factory=set)
-    validated_roots: set[tuple[Path, bool]] = field(default_factory=set)
-    inventory_bound_paths: dict[Path, set[Path]] = field(default_factory=dict)
-    selection_records: dict[Path, tuple[dict[str, object], dict[str, tuple[str, str, str]]]] = field(default_factory=dict)
+    validated_roots: set[tuple[Path, bool, str]] = field(default_factory=set)
+    inventory_bound_paths: dict[tuple[Path, str], set[Path]] = field(default_factory=dict)
+    selection_records: dict[tuple[Path, str], tuple[dict[str, object], dict[str, tuple[str, str, str]]]] = field(default_factory=dict)
 
 
 class SourceChangedError(RuntimeError):
@@ -1056,7 +1056,9 @@ def inventory_bound_root_paths(
     require_canonical_path_string(str(root), "predecessor_root.path", ROOT_RE)
     require_artifact_location(root, "predecessor_root.path", ROOT_RE)
     resolved_root = root.resolve()
-    cached = context.inventory_bound_paths.get(resolved_root)
+    current_commit = current_source_commit()
+    cache_key = (resolved_root, current_commit)
+    cached = context.inventory_bound_paths.get(cache_key)
     if cached is not None:
         return set(cached)
     validate_feasibility_root_artifacts(root, require_passing=False, context=context)
@@ -1092,7 +1094,7 @@ def inventory_bound_root_paths(
         if file_sha256(candidate) != expected_sha:
             raise ValueError("Predecessor manifest file_inventory checksum mismatch.")
         allowed.add(candidate)
-    context.inventory_bound_paths[resolved_root] = set(allowed)
+    context.inventory_bound_paths[cache_key] = set(allowed)
     return allowed
 
 
@@ -1289,19 +1291,25 @@ def validate_feasibility_root_artifacts(
     if not root.is_dir():
         raise ValueError(f"Feasibility root is not a directory: {root}")
     resolved_root = root.resolve()
-    cache_key = (resolved_root, require_passing)
-    if cache_key in context.validated_roots or (not require_passing and (resolved_root, True) in context.validated_roots):
+    current_commit = current_source_commit()
+    cache_key = (resolved_root, require_passing, current_commit)
+    if cache_key in context.validated_roots or (not require_passing and (resolved_root, True, current_commit) in context.validated_roots):
         return
     if resolved_root in context.active_roots:
         raise ValueError(f"Feasibility root lineage contains a cycle at {root}.")
     context.active_roots.add(resolved_root)
     try:
-        _validate_feasibility_root_artifacts(root, require_passing=require_passing, context=context)
+        _validate_feasibility_root_artifacts(
+            root,
+            require_passing=require_passing,
+            context=context,
+            current_commit=current_commit,
+        )
     finally:
         context.active_roots.remove(resolved_root)
     context.validated_roots.add(cache_key)
     if require_passing:
-        context.validated_roots.add((resolved_root, False))
+        context.validated_roots.add((resolved_root, False, current_commit))
 
 
 def _validate_feasibility_root_artifacts(
@@ -1309,6 +1317,7 @@ def _validate_feasibility_root_artifacts(
     *,
     require_passing: bool,
     context: FeasibilityValidationContext,
+    current_commit: str,
 ) -> None:
     require_artifact_location(root, "selected_root" if require_passing else "predecessor_root.path", ROOT_RE)
     if not root.is_dir():
@@ -1328,6 +1337,7 @@ def _validate_feasibility_root_artifacts(
         raise ValueError("Summary protocol is not phase8_sequence_feasibility.")
     source_commit = validate_git_sha(manifest_data.get("source_commit"), "source_commit")
     validate_git_commit_exists(source_commit)
+    current_protocol = source_commit == current_commit
     validate_root_manifest_lineage(root, manifest_data, context=context)
     validate_source_provenance(
         manifest_data.get("source_provenance"),
@@ -1372,9 +1382,12 @@ def _validate_feasibility_root_artifacts(
             raise ValueError("Feasibility cell generations artifact is missing.")
         if not (root / checkpoint_path).is_file():
             raise ValueError("Feasibility cell checkpoint artifact is missing.")
-        generation_rows = validate_generation_artifact(root / generations_path, cell)
+        if current_protocol:
+            generation_rows = validate_generation_artifact(root / generations_path, cell)
+        else:
+            generation_rows = validate_historical_generation_artifact(root / generations_path, cell)
         validate_checkpoint_artifact(root / checkpoint_path, cell)
-        if require_passing:
+        if require_passing and current_protocol:
             validate_checkpoint_replays_generations(root / checkpoint_path, cell, generation_rows)
 
 
@@ -1518,10 +1531,43 @@ def validate_summary_aggregates(
 
 def validate_generation_artifact(path: Path, cell: dict[str, object]) -> list[dict[str, object]]:
     family = require_exact_str(cell.get("family"), "family")
+    if family not in FAMILIES:
+        raise ValueError(f"Unexpected feasibility generation artifact family: {family!r}.")
+    eval_records = grouped_records()[family]["eval"]
+
+    def current_record_for_row(row_number: int) -> FeasibilityRecord:
+        if row_number >= len(eval_records):
+            raise ValueError("Generation artifact contains more rows than the frozen evaluation split.")
+        return eval_records[row_number]
+
+    return validate_generation_rows(
+        path,
+        cell,
+        current_record_for_row=current_record_for_row,
+    )
+
+
+def validate_historical_generation_artifact(path: Path, cell: dict[str, object]) -> list[dict[str, object]]:
+    family = require_exact_str(cell.get("family"), "family")
+    if family not in FAMILIES:
+        raise ValueError(f"Unexpected feasibility generation artifact family: {family!r}.")
+    return validate_generation_rows(path, cell, current_record_for_row=None)
+
+
+def validate_generation_rows(
+    path: Path,
+    cell: dict[str, object],
+    *,
+    current_record_for_row: Callable[[int], FeasibilityRecord] | None,
+) -> list[dict[str, object]]:
+    family = require_exact_str(cell.get("family"), "family")
     expected_count = require_exact_int(cell.get("eval_count"), "eval_count")
     expected_matches = require_exact_int(cell.get("exact_matches"), "exact_matches")
+    if expected_count < 0:
+        raise ValueError("Generation artifact eval_count must be non-negative.")
+    if not 0 <= expected_matches <= expected_count:
+        raise ValueError("Generation artifact exact_matches must satisfy 0 <= exact_matches <= eval_count.")
     rows: list[dict[str, object]] = []
-    eval_records = grouped_records()[family]["eval"]
     tokenizer = ByteTokenizer()
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -1531,27 +1577,39 @@ def validate_generation_artifact(path: Path, cell: dict[str, object]) -> list[di
             row = json.loads(stripped)
             if not isinstance(row, dict):
                 raise ValueError("Generation artifact rows must be JSON objects.")
-            exact_match = row.get("exact_match")
-            if type(exact_match) is not bool:
-                raise ValueError("Generation artifact exact_match values must be JSON booleans.")
+            row_family = require_exact_str(row.get("family"), "generation.family")
+            row_index = require_exact_int(row.get("index"), "generation.index")
+            template_id = require_exact_str(row.get("template_id"), "generation.template_id")
+            operand_id = require_exact_str(row.get("operand_id"), "generation.operand_id")
+            prompt = require_exact_str(row.get("prompt"), "generation.prompt")
+            expected = require_exact_str(row.get("expected"), "generation.expected")
+            exact_match = require_exact_bool(row.get("exact_match"), "generation.exact_match")
             raw_token_ids = row.get("raw_token_ids")
             if not isinstance(raw_token_ids, list) or not all(type(token) is int for token in raw_token_ids):
                 raise ValueError("Generation artifact rows must retain raw_token_ids as JSON integers.")
-            if len(rows) >= len(eval_records):
-                raise ValueError("Generation artifact contains more rows than the frozen evaluation split.")
-            record = eval_records[len(rows)]
-            if row.get("family") != record.family:
-                raise ValueError("Generation artifact row family does not match the frozen evaluation record.")
-            if row.get("index") != record.index:
-                raise ValueError("Generation artifact row index does not match the frozen evaluation record.")
-            if row.get("template_id") != record.template_id:
-                raise ValueError("Generation artifact row template_id does not match the frozen evaluation record.")
-            if row.get("operand_id") != record.operand_id:
-                raise ValueError("Generation artifact row operand_id does not match the frozen evaluation record.")
-            if row.get("prompt") != record.prompt:
-                raise ValueError("Generation artifact row prompt does not match the frozen evaluation record.")
-            if row.get("expected") != record.answer:
-                raise ValueError("Generation artifact row expected answer does not match the frozen evaluation record.")
+            if row_family != family:
+                raise ValueError("Generation artifact row family does not match its cell family.")
+            if row_index != len(rows):
+                raise ValueError("Generation artifact row indices must be deterministic and ordered from zero.")
+            expected_prefix = list(tokenizer.encode_evaluation_prefix(prompt))
+            if raw_token_ids[: len(expected_prefix)] != expected_prefix:
+                raise ValueError("Generation artifact raw_token_ids prefix does not exactly encode the retained prompt.")
+            if current_record_for_row is not None:
+                record = current_record_for_row(len(rows))
+                if row_family != record.family:
+                    raise ValueError("Generation artifact row family does not match the frozen evaluation record.")
+                if row_index != record.index:
+                    raise ValueError("Generation artifact row index does not match the frozen evaluation record.")
+                if template_id != record.template_id:
+                    raise ValueError("Generation artifact row template_id does not match the frozen evaluation record.")
+                if operand_id != record.operand_id:
+                    raise ValueError("Generation artifact row operand_id does not match the frozen evaluation record.")
+                if prompt != record.prompt:
+                    raise ValueError("Generation artifact row prompt does not match the frozen evaluation record.")
+                if expected != record.answer:
+                    raise ValueError("Generation artifact row expected answer does not match the frozen evaluation record.")
+            elif len(rows) >= expected_count:
+                raise ValueError("Generation artifact contains more rows than cell eval_count.")
             decoded_error = None
             try:
                 decoded = tokenizer.decode_generated_response(raw_token_ids)
@@ -1566,14 +1624,17 @@ def validate_generation_artifact(path: Path, cell: dict[str, object]) -> list[di
             if decoded_error is not None:
                 if row.get("generated") is not None:
                     raise ValueError("Invalid generation rows must record generated as null.")
-                if not isinstance(row.get("generation_error"), str):
-                    raise ValueError("Invalid generation rows must retain a generation_error string.")
+                if row.get("generation_error") != decoded_error:
+                    raise ValueError("Invalid generation rows must retain the exact generation_error string.")
             else:
+                generated = require_exact_str(row.get("generated"), "generation.generated")
                 if row.get("generated") != decoded:
                     raise ValueError("Generation artifact generated text does not match raw_token_ids decoding.")
                 if row.get("generation_error") is not None:
                     raise ValueError("Valid generation rows must record generation_error as null.")
-            if exact_match != (decoded == record.answer):
+                if exact_match != (generated == expected):
+                    raise ValueError("Generation artifact exact_match does not match generated-vs-expected semantics.")
+            if decoded_error is not None and exact_match is not False:
                 raise ValueError("Generation artifact exact_match does not match generated-vs-expected semantics.")
             rows.append(row)
     if len(rows) != expected_count:
@@ -1808,7 +1869,9 @@ def _validate_selection_record(
     resolved = path.resolve()
     if resolved in seen:
         raise ValueError(f"Selection-record lineage contains a cycle at {path}.")
-    cached = context.selection_records.get(resolved)
+    current_commit = current_source_commit()
+    cache_key = (resolved, current_commit)
+    cached = context.selection_records.get(cache_key)
     if cached is not None:
         return cached
     seen.add(resolved)
@@ -1926,7 +1989,7 @@ def _validate_selection_record(
             f"got {path.name!r}."
         )
     result = (data, predecessor_root_bindings)
-    context.selection_records[resolved] = result
+    context.selection_records[cache_key] = result
     seen.remove(resolved)
     return result
 
@@ -2007,9 +2070,12 @@ def git_output(args: Sequence[str]) -> str:
     return subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, cwd=REPO_ROOT).stdout.strip()
 
 
+def current_source_commit() -> str:
+    return validate_git_sha(git_output(["git", "rev-parse", "HEAD"]), "current_source_commit")
+
+
 def unchecked_source_snapshot() -> SourceSnapshot:
-    commit = git_output(["git", "rev-parse", "HEAD"])
-    validate_git_sha(commit, "source_commit")
+    commit = current_source_commit()
     return SourceSnapshot(commit=commit, status_lines=(), ignored_inputs=ignored_source_inputs())
 
 

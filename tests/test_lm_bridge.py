@@ -644,14 +644,24 @@ def _passing_feasibility_cells() -> list[dict[str, object]]:
     ]
 
 
-def _source_snapshot() -> object:
+def _source_snapshot(source_commit: str | None = None) -> object:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    return sf.SourceSnapshot(commit=_test_source_commit(), status_lines=(), ignored_inputs=())
+    return sf.SourceSnapshot(commit=_test_source_commit() if source_commit is None else source_commit, status_lines=(), ignored_inputs=())
 
 
 def _test_source_commit() -> str:
     return subprocess.run(
         ["git", "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        cwd=REPO_ROOT,
+    ).stdout.strip()
+
+
+def _historical_source_commit() -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD^"],
         check=True,
         text=True,
         stdout=subprocess.PIPE,
@@ -667,6 +677,7 @@ def _write_feasibility_root(
     predecessor_selections: tuple[Path, ...] = (),
     *,
     lightweight: bool = False,
+    source_commit: str | None = None,
 ) -> tuple[Path, Path]:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     root.mkdir(parents=True)
@@ -707,7 +718,7 @@ def _write_feasibility_root(
         predecessor_roots,
         predecessor_selections,
         failure=None if status == "DONE" else "synthetic failure",
-        source_snapshot=_source_snapshot(),
+        source_snapshot=_source_snapshot(source_commit),
     )
     return root / "manifest.json", root / f"{status}.json"
 
@@ -728,6 +739,83 @@ def _generation_row(record: object, tokenizer: ByteTokenizer, *, exact_match: bo
         "generation_error": None,
         "exact_match": exact_match,
     }
+
+
+def _historical_failed_cell() -> dict[str, object]:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    return {
+        "family": "hex_copy",
+        "model_size": "small",
+        "seed": 0,
+        "eval_count": 2,
+        "exact_matches": 1,
+        "passed": False,
+        "generations_path": "hex_copy__small__seed0/generations.jsonl",
+        "checkpoint_path": "hex_copy__small__seed0/checkpoint_step1500.pt",
+        "parameter_count": sf.expected_parameter_count("small"),
+    }
+
+
+def _legacy_generation_rows() -> list[dict[str, object]]:
+    tokenizer = ByteTokenizer()
+    rows = []
+    for index, expected, generated in (
+        (0, "legacy-expected-0000", "legacy-expected-0000"),
+        (1, "legacy-expected-0001", "legacy-generated-0001"),
+    ):
+        prompt = f"Legacy source prompt {index}: abcdef01234567{index:02d}"
+        raw_token_ids = [*tokenizer.encode_evaluation_prefix(prompt), *tokenizer.encode_text(generated), EOS_ID]
+        rows.append(
+            {
+                "family": "hex_copy",
+                "index": index,
+                "template_id": f"legacy-template-{index}",
+                "operand_id": f"legacy-operand-{index}",
+                "prompt": prompt,
+                "expected": expected,
+                "generated": generated,
+                "raw_token_ids": raw_token_ids,
+                "invalid_generation": False,
+                "generation_error": None,
+                "exact_match": generated == expected,
+            }
+        )
+    return rows
+
+
+def _write_historical_generation_root(
+    root: Path,
+    *,
+    source_commit: str,
+    rows: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    cell = _historical_failed_cell()
+    root.mkdir(parents=True)
+    generations = root / str(cell["generations_path"])
+    checkpoint = root / str(cell["checkpoint_path"])
+    generations.parent.mkdir(parents=True, exist_ok=True)
+    generations.write_text("\n".join(json.dumps(row) for row in (rows or _legacy_generation_rows())) + "\n")
+    save_checkpoint(
+        str(checkpoint),
+        build_model("small"),
+        metadata={
+            "family": cell["family"],
+            "model_size": cell["model_size"],
+            "seed": cell["seed"],
+            "training_steps": sf.TRAINING_STEPS,
+        },
+    )
+    sf.write_terminal(
+        root,
+        "FAILED",
+        [cell],
+        (),
+        (),
+        failure="historical synthetic failure",
+        source_snapshot=_source_snapshot(source_commit),
+    )
+    return cell
 
 
 def _write_selection(
@@ -1484,6 +1572,85 @@ def test_feasibility_root_rejects_dual_terminal_and_manifest_status_mismatch(tmp
         sf.load_terminal_binding(root)
 
 
+def test_historical_predecessor_generation_rows_are_not_reinterpreted_as_current_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
+    artifact_parent.mkdir(parents=True)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
+
+    historical_commit = _historical_source_commit()
+    predecessor = artifact_parent / "feasibility_001"
+    _write_historical_generation_root(predecessor, source_commit=historical_commit)
+    current_first = sf.grouped_records()["hex_copy"]["eval"][0]
+    historical_first = json.loads(
+        (predecessor / "hex_copy__small__seed0" / "generations.jsonl").read_text().splitlines()[0]
+    )
+    assert historical_first["prompt"] != current_first.prompt
+    assert historical_first["expected"] != current_first.answer
+
+    sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
+
+
+def test_historical_predecessor_generation_internal_inconsistency_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
+    artifact_parent.mkdir(parents=True)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
+
+    historical_commit = _historical_source_commit()
+    predecessor = artifact_parent / "feasibility_001"
+    cell = _write_historical_generation_root(predecessor, source_commit=historical_commit)
+    rows = _legacy_generation_rows()
+    rows[0] = {**rows[0], "prompt": "tampered retained prompt with unchanged raw prefix"}
+    (predecessor / str(cell["generations_path"])).write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    sf.write_terminal(
+        predecessor,
+        "FAILED",
+        [cell],
+        (),
+        (),
+        failure="historical synthetic failure",
+        source_snapshot=_source_snapshot(historical_commit),
+    )
+
+    with pytest.raises(ValueError, match="raw_token_ids prefix"):
+        sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
+
+
+def test_current_source_generation_prompt_mismatch_is_still_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
+    artifact_parent.mkdir(parents=True)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
+
+    current_source_root = artifact_parent / "feasibility_001"
+    tokenizer = ByteTokenizer()
+    current_records = sf.grouped_records()["hex_copy"]["eval"][:2]
+    rows = [
+        _generation_row(record, tokenizer, exact_match=index == 0)
+        for index, record in enumerate(current_records)
+    ]
+    rows[0]["prompt"] = "Current-source retained prompt tamper"
+    rows[0]["raw_token_ids"] = [
+        *tokenizer.encode_evaluation_prefix(str(rows[0]["prompt"])),
+        *tokenizer.encode_text(str(rows[0]["generated"])),
+        EOS_ID,
+    ]
+    _write_historical_generation_root(current_source_root, source_commit=_test_source_commit(), rows=rows)
+
+    with pytest.raises(ValueError, match="row prompt"):
+        sf.validate_new_root(artifact_parent / "feasibility_002", (current_source_root,), ())
+
+
 def test_source_clean_only_allows_inventory_bound_predecessor_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1491,6 +1658,7 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     cells = _passing_feasibility_cells()
     monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+    monkeypatch.setattr(sf, "validate_historical_generation_artifact", lambda path, cell: [])
     monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
     monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
     artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
@@ -1839,9 +2007,15 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
         *,
         require_passing: bool,
         context: object,
+        current_commit: str,
     ) -> None:
         root_validation_calls.append(root.resolve())
-        original_validate_root_artifacts(root, require_passing=require_passing, context=context)
+        original_validate_root_artifacts(
+            root,
+            require_passing=require_passing,
+            context=context,
+            current_commit=current_commit,
+        )
 
     monkeypatch.setattr(sf, "_validate_feasibility_root_artifacts", counted_validate_root_artifacts)
     sf.validate_feasibility_root_artifacts(roots[-1], require_passing=False)
