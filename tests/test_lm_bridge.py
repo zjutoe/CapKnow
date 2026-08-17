@@ -757,6 +757,25 @@ def _write_selection(
     path.write_text(json.dumps(data, sort_keys=True) + "\n")
 
 
+def _unchecked_terminal_binding(root: Path) -> dict[str, object]:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    terminal, _terminal_data, _manifest, manifest_sha = sf.load_terminal_binding(root)
+    return {
+        "path": str(root),
+        "terminal_state": terminal.stem,
+        "terminal_sha256": sf.file_sha256(terminal),
+        "manifest_sha256": manifest_sha,
+    }
+
+
+def _rewrite_terminal_manifest_sha(root: Path, status: str) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    terminal = root / f"{status}.json"
+    terminal_data = json.loads(terminal.read_text())
+    terminal_data["manifest_sha256"] = sf.file_sha256(root / "manifest.json")
+    sf.write_json(terminal, terminal_data)
+
+
 def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_rejection(tmp_path: Path) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
 
@@ -1635,6 +1654,82 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     )
     assert sf.validate_selection_record(retry_selection)["selected_root"] == str(retry_root)
 
+    parent = set_parent("nested_fabricated_intermediate_lineage")
+    first_root = parent / "feasibility_001"
+    _write_feasibility_root(first_root, "FAILED", [])
+    fabricated_second_root = parent / "feasibility_002"
+    _write_feasibility_root(fabricated_second_root, "FAILED", [])
+    selected_root = parent / "feasibility_003"
+    selected_manifest, _selected_done = _write_feasibility_root(
+        selected_root,
+        "DONE",
+        cells,
+        predecessor_roots=(first_root,),
+    )
+    selected_manifest_data = json.loads(selected_manifest.read_text())
+    selected_manifest_data["predecessor_roots"] = [
+        _unchecked_terminal_binding(first_root),
+        _unchecked_terminal_binding(fabricated_second_root),
+    ]
+    sf.write_json(selected_manifest, selected_manifest_data)
+    _rewrite_terminal_manifest_sha(selected_root, "DONE")
+    selected_manifest_data = json.loads(selected_manifest.read_text())
+    fabricated_selection = parent / "feasibility_selection_001.json"
+    _write_selection(
+        fabricated_selection,
+        selected_root,
+        selected_manifest,
+        selected_manifest_data["predecessor_roots"],
+        [],
+        cells=cells,
+    )
+    with pytest.raises(ValueError, match="complete and continuous"):
+        sf.validate_selection_record(fabricated_selection)
+
+    parent = set_parent("nested_forged_selection_sha")
+    first_root = parent / "feasibility_001"
+    first_manifest, _first_done = _write_feasibility_root(first_root, "DONE", cells)
+    first_selection = parent / "feasibility_selection_001.json"
+    _write_selection(first_selection, first_root, first_manifest, [], [], cells=cells)
+    forged_second_root = parent / "feasibility_002"
+    second_manifest, _second_failed = _write_feasibility_root(
+        forged_second_root,
+        "FAILED",
+        [],
+        predecessor_selections=(first_selection,),
+    )
+    second_manifest_data = json.loads(second_manifest.read_text())
+    second_manifest_data["predecessor_selections"][0]["sha256"] = "0" * 64
+    sf.write_json(second_manifest, second_manifest_data)
+    _rewrite_terminal_manifest_sha(forged_second_root, "FAILED")
+    final_root = parent / "feasibility_003"
+    final_manifest, _final_done = _write_feasibility_root(
+        final_root,
+        "DONE",
+        cells,
+        predecessor_roots=(first_root,),
+    )
+    final_manifest_data = json.loads(final_manifest.read_text())
+    final_manifest_data["predecessor_roots"] = [
+        _unchecked_terminal_binding(first_root),
+        _unchecked_terminal_binding(forged_second_root),
+    ]
+    final_manifest_data["predecessor_selections"] = [sf.selection_binding(first_selection)]
+    sf.write_json(final_manifest, final_manifest_data)
+    _rewrite_terminal_manifest_sha(final_root, "DONE")
+    final_manifest_data = json.loads(final_manifest.read_text())
+    final_selection = parent / "feasibility_selection_002.json"
+    _write_selection(
+        final_selection,
+        final_root,
+        final_manifest,
+        final_manifest_data["predecessor_roots"],
+        final_manifest_data["predecessor_selections"],
+        cells=cells,
+    )
+    with pytest.raises(ValueError, match="selection checksum"):
+        sf.validate_selection_record(final_selection)
+
     parent = set_parent("root_validation_cache")
     roots: list[Path] = []
     for number in range(1, 9):
@@ -1676,7 +1771,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     failed_data = json.loads(failed.read_text())
     failed_data["manifest_sha256"] = sf.file_sha256(manifest)
     sf.write_json(failed, failed_data)
-    with pytest.raises(ValueError, match="lineage contains a cycle"):
+    with pytest.raises(ValueError, match="checksum mismatch|lineage contains a cycle"):
         sf.validate_feasibility_root_artifacts(cyclic_root, require_passing=False)
 
     outside_selection = tmp_path / "feasibility_selection_001.json"

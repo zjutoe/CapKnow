@@ -1234,6 +1234,7 @@ def _validate_feasibility_root_artifacts(
         raise ValueError("Summary protocol is not phase8_sequence_feasibility.")
     source_commit = validate_git_sha(manifest_data.get("source_commit"), "source_commit")
     validate_git_commit_exists(source_commit)
+    validate_root_manifest_lineage(root, manifest_data, context=context)
     validate_source_provenance(
         manifest_data.get("source_provenance"),
         source_commit,
@@ -1281,6 +1282,64 @@ def _validate_feasibility_root_artifacts(
         validate_checkpoint_artifact(root / checkpoint_path, cell)
         if require_passing:
             validate_checkpoint_replays_generations(root / checkpoint_path, cell, generation_rows)
+
+
+def validate_root_manifest_lineage(
+    root: Path,
+    manifest_data: dict[str, object],
+    *,
+    context: FeasibilityValidationContext,
+) -> None:
+    predecessor_root_bindings, predecessor_root_numbers = require_root_binding_map(manifest_data.get("predecessor_roots"))
+    predecessor_selection_paths = require_selection_binding_paths(
+        manifest_data.get("predecessor_selections"),
+        context=context,
+    )
+    selected_root_numbers = [
+        feasibility_root_number(Path(str(validate_selection_record(path, context=context)["selected_root"])))
+        for path in predecessor_selection_paths
+    ]
+    root_number = feasibility_root_number(root)
+    observed_numbers = sorted({*predecessor_root_numbers, *selected_root_numbers})
+    expected_numbers = list(range(1, root_number))
+    if observed_numbers != expected_numbers:
+        raise ValueError(
+            "Manifest predecessor_roots must be complete and continuous before its feasibility root; "
+            f"expected {expected_numbers!r}, got {observed_numbers!r}."
+        )
+    if predecessor_root_numbers != observed_numbers:
+        raise ValueError("Manifest predecessor_roots must explicitly bind the complete root lineage closure.")
+
+
+def require_selection_binding_paths(
+    bindings: object,
+    *,
+    context: FeasibilityValidationContext,
+) -> tuple[Path, ...]:
+    if not isinstance(bindings, list):
+        raise ValueError("predecessor_selections must be a JSON list.")
+    paths: list[Path] = []
+    seen_path_keys: set[str] = set()
+    selection_numbers: list[int] = []
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            raise ValueError("Predecessor selection binding must be a JSON object.")
+        path = Path(require_canonical_path_string(binding.get("path"), "predecessor_selection.path", SELECTION_RE))
+        require_artifact_location(path, "predecessor_selection.path", SELECTION_RE)
+        path_key = str(path.resolve())
+        if path_key in seen_path_keys:
+            raise ValueError("predecessor_selections must not contain duplicate canonical paths.")
+        seen_path_keys.add(path_key)
+        number = selection_record_number(path)
+        if selection_numbers and number <= selection_numbers[-1]:
+            raise ValueError("predecessor_selections must be in strictly ascending selection-number order.")
+        selection_numbers.append(number)
+        expected_sha = require_exact_str(binding.get("sha256"), "predecessor_selection.sha256")
+        if file_sha256(path) != expected_sha:
+            raise ValueError("Predecessor selection checksum mismatch.")
+        validate_selection_record(path, context=context)
+        paths.append(path)
+    return tuple(paths)
 
 
 def validate_cell_artifact_schema(cells: object, *, require_pass: bool) -> None:
