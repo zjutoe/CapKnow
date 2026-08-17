@@ -861,6 +861,21 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         sf.reject_scientific_markers(
             "A table entry says newkey has stored value newvalue. Write the value for newkey in compact JSON."
         )
+    composition_context = {
+        "memory": {"novel-key": "novel-value"},
+        "key": "novel-key",
+        "items": ["novel-value", "other-value"],
+    }
+    composition_prompt = cg.render_prompt(
+        "MEMORY_FILTER",
+        composition_context,
+        "memory_filter__train_explicit_a",
+        "train_explicit",
+    )
+    with pytest.raises(ValueError):
+        sf.reject_scientific_markers(composition_prompt)
+    with pytest.raises(ValueError):
+        sf.reject_scientific_markers(composition_prompt.swapcase())
 
 
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
@@ -1145,7 +1160,15 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(
 
     predecessor = artifact_parent / "feasibility_001"
     predecessor.mkdir()
-    sf.write_terminal(predecessor, "FAILED", [], (), (), failure="synthetic predecessor failure")
+    sf.write_terminal(
+        predecessor,
+        "FAILED",
+        [],
+        (),
+        (),
+        failure="synthetic predecessor failure",
+        source_snapshot=_source_snapshot(),
+    )
 
     sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
     with pytest.raises(ValueError, match="complete and continuous"):
@@ -1173,7 +1196,15 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(
 
 def test_feasibility_failed_terminal_binds_manifest(tmp_path: Path) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    sf.write_terminal(tmp_path, "FAILED", [], (), (), failure="synthetic failure")
+    sf.write_terminal(
+        tmp_path,
+        "FAILED",
+        [],
+        (),
+        (),
+        failure="synthetic failure",
+        source_snapshot=_source_snapshot(),
+    )
 
     manifest = tmp_path / "manifest.json"
     summary = tmp_path / "summary.json"
@@ -1454,6 +1485,37 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     )
     assert sf.validate_selection_record(second_selection)["selected_root"] == str(second_root)
 
+    parent = set_parent("valid_retry_after_selected_root")
+    first_root = parent / "feasibility_001"
+    first_manifest, _first_done = _write_feasibility_root(first_root, "DONE", cells)
+    first_selection = parent / "feasibility_selection_001.json"
+    _write_selection(first_selection, first_root, first_manifest, [], [], cells=cells)
+    failed_retry = parent / "feasibility_002"
+    _write_feasibility_root(failed_retry, "FAILED", [], predecessor_selections=(first_selection,))
+    retry_root = parent / "feasibility_003"
+    retry_manifest, _retry_done = _write_feasibility_root(
+        retry_root,
+        "DONE",
+        cells,
+        predecessor_roots=(failed_retry,),
+        predecessor_selections=(first_selection,),
+    )
+    retry_manifest_data = json.loads(retry_manifest.read_text())
+    assert [Path(binding["path"]).name for binding in retry_manifest_data["predecessor_roots"]] == [
+        "feasibility_001",
+        "feasibility_002",
+    ]
+    retry_selection = parent / "feasibility_selection_002.json"
+    _write_selection(
+        retry_selection,
+        retry_root,
+        retry_manifest,
+        retry_manifest_data["predecessor_roots"],
+        retry_manifest_data["predecessor_selections"],
+        cells=cells,
+    )
+    assert sf.validate_selection_record(retry_selection)["selected_root"] == str(retry_root)
+
     outside_selection = tmp_path / "feasibility_selection_001.json"
     outside_selection.write_text(selection.read_text())
     with pytest.raises(ValueError, match="located directly"):
@@ -1556,6 +1618,44 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
     with pytest.raises(ValueError, match="tracked or staged"):
         sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("unbound_source_provenance")
+    failed_root = parent / "feasibility_001"
+    failed_root.mkdir()
+    sf.write_terminal(
+        failed_root,
+        "FAILED",
+        [],
+        (),
+        (),
+        failure="synthetic failure",
+        source_snapshot=sf.SourceSnapshot(
+            commit=_test_source_commit(),
+            status_lines=("?? arbitrary_unbound_input.py",),
+            ignored_inputs=(),
+        ),
+    )
+    with pytest.raises(ValueError, match="unbound untracked"):
+        sf.terminal_binding(failed_root)
+
+    parent = set_parent("ignored_source_provenance")
+    failed_root = parent / "feasibility_001"
+    failed_root.mkdir()
+    sf.write_terminal(
+        failed_root,
+        "FAILED",
+        [],
+        (),
+        (),
+        failure="synthetic failure",
+        source_snapshot=sf.SourceSnapshot(
+            commit=_test_source_commit(),
+            status_lines=(),
+            ignored_inputs=({"path": "scripts/untracked_exec.py", "sha256": "0" * 64, "bytes": 1},),
+        ),
+    )
+    with pytest.raises(ValueError, match="ignored executable"):
+        sf.terminal_binding(failed_root)
 
     parent = set_parent("missing_source_commit")
     bad_root = parent / "feasibility_001"

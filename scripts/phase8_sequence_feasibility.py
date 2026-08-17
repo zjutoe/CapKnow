@@ -314,12 +314,20 @@ def phase8_scientific_identity_markers() -> frozenset[str]:
 @lru_cache(maxsize=1)
 def phase8_scientific_prompt_patterns() -> tuple[re.Pattern[str], ...]:
     grouped: dict[tuple[str, str, str | None], list[str]] = {}
+    pattern_texts: set[str] = set()
     for task_id in cg.TRAINING_TASK_ORDER:
         for record in cg.build_split_records("training", task_id, cg.CORPUS_RECORDS_PER_FAMILY["large"]):
             grouped.setdefault((record.task_id, record.template_id, record.style), []).append(record.prompt)
+            add_record_prompt_pattern(pattern_texts, record)
+    for condition in cg.CONDITIONS:
+        for record in cg.build_training_corpus(condition, seed=0, state_mask=0, corpus_size="large"):
+            grouped.setdefault((record.task_id, record.template_id, record.style), []).append(record.prompt)
+            add_record_prompt_pattern(pattern_texts, record)
     for probe in cg.build_evaluation_probe_pack():
         grouped.setdefault((probe.task_id, probe.template_id, probe.style), []).append(probe.prompt)
+        add_record_prompt_pattern(pattern_texts, probe)
     patterns: list[re.Pattern[str]] = []
+    patterns.extend(re.compile(pattern, re.IGNORECASE) for pattern in sorted(pattern_texts))
     for prompts in grouped.values():
         unique_prompts = sorted(set(prompts))
         if len(unique_prompts) < 2:
@@ -328,6 +336,44 @@ def phase8_scientific_prompt_patterns() -> tuple[re.Pattern[str], ...]:
         if pattern is not None:
             patterns.append(pattern)
     return tuple(patterns)
+
+
+def add_record_prompt_pattern(patterns: set[str], record: object) -> None:
+    pattern = record_prompt_surface_pattern(record)
+    if pattern is not None:
+        patterns.add(pattern)
+
+
+def record_prompt_surface_pattern(record: object) -> str | None:
+    prompt = getattr(record, "prompt", None)
+    if not isinstance(prompt, str):
+        return None
+    values: set[str] = set()
+    canonical_context = getattr(record, "canonical_context", None)
+    if isinstance(canonical_context, str):
+        context_data = json.loads(canonical_context)
+        _collect_string_leaves(context_data, values)
+        _collect_composite_prompt_values(context_data, values)
+    normalized_payload = getattr(record, "normalized_payload", None)
+    if normalized_payload is not None:
+        _collect_string_leaves(normalized_payload, values)
+    escaped = re.escape(prompt)
+    for value in sorted((value for value in values if len(value) >= 2), key=len, reverse=True):
+        escaped = escaped.replace(re.escape(value), ".+?")
+    if ".+?" not in escaped:
+        return None
+    return escaped
+
+
+def _collect_composite_prompt_values(value: object, values: set[str]) -> None:
+    if isinstance(value, dict):
+        for nested in value.values():
+            _collect_composite_prompt_values(nested, values)
+    elif isinstance(value, list):
+        if value and all(isinstance(item, str) for item in value):
+            values.add(", ".join(value))
+        for nested in value:
+            _collect_composite_prompt_values(nested, values)
 
 
 def generalized_prompt_pattern(left: str, right: str) -> re.Pattern[str] | None:
@@ -1062,7 +1108,11 @@ def validate_feasibility_root_artifacts(root: Path, *, require_passing: bool) ->
         raise ValueError("Summary protocol is not phase8_sequence_feasibility.")
     source_commit = validate_git_sha(manifest_data.get("source_commit"), "source_commit")
     validate_git_commit_exists(source_commit)
-    validate_source_provenance(manifest_data.get("source_provenance"), source_commit)
+    validate_source_provenance(
+        manifest_data.get("source_provenance"),
+        source_commit,
+        source_provenance_allowed_paths(manifest_data),
+    )
     if summary_data.get("source", {}).get("commit") != source_commit:
         raise ValueError("Summary source commit does not match manifest source_commit.")
     if summary_data.get("source", {}).get("ignored_inputs") != manifest_data["source_provenance"]["ignored_inputs"]:
@@ -1403,7 +1453,21 @@ def complete_predecessor_root_bindings(
         add(terminal_binding(Path(str(selection_data["selected_root"]))))
         for predecessor in selection_data["predecessor_roots"]:
             add(predecessor)
-    return completed
+    return sorted(completed, key=lambda binding: feasibility_root_number(Path(str(binding["path"]))))
+
+
+def source_provenance_allowed_paths(manifest_data: dict[str, object]) -> set[Path]:
+    predecessor_roots = manifest_data.get("predecessor_roots")
+    predecessor_selections = manifest_data.get("predecessor_selections")
+    if not isinstance(predecessor_roots, list) or not isinstance(predecessor_selections, list):
+        raise ValueError("Manifest predecessor bindings must be JSON lists.")
+    return source_clean_allowed_paths(
+        tuple(Path(require_canonical_path_string(binding.get("path"), "predecessor_root.path", ROOT_RE)) for binding in predecessor_roots),
+        tuple(
+            Path(require_canonical_path_string(binding.get("path"), "predecessor_selection.path", SELECTION_RE))
+            for binding in predecessor_selections
+        ),
+    )
 
 
 def predecessor_root_paths_from_selections(predecessor_selections: Sequence[Path]) -> tuple[Path, ...]:
@@ -1658,7 +1722,7 @@ def validate_git_commit_exists(commit: str) -> None:
         raise ValueError("Manifest source_commit does not exist as a commit in the CapKnow repository.")
 
 
-def validate_source_provenance(value: object, source_commit: str) -> None:
+def validate_source_provenance(value: object, source_commit: str, allowed_paths: set[Path]) -> None:
     if not isinstance(value, dict):
         raise ValueError("Manifest source_provenance must be a JSON object.")
     if value.get("commit") != source_commit:
@@ -1669,9 +1733,16 @@ def validate_source_provenance(value: object, source_commit: str) -> None:
     for line in status_lines:
         if not line.startswith("?? "):
             raise ValueError("Manifest source_provenance must not declare tracked or staged source changes.")
+        rel = line[3:]
+        rel_path = Path(rel)
+        candidate = (rel_path if rel_path.is_absolute() else REPO_ROOT / rel_path).resolve()
+        if candidate not in allowed_paths:
+            raise ValueError("Manifest source_provenance declares an unbound untracked input.")
     ignored_inputs = value.get("ignored_inputs")
     if not isinstance(ignored_inputs, list):
         raise ValueError("Manifest source_provenance ignored_inputs must be a JSON list.")
+    if ignored_inputs:
+        raise ValueError("Manifest source_provenance must not contain ignored executable inputs.")
     for index, row in enumerate(ignored_inputs):
         if not isinstance(row, dict):
             raise ValueError("Manifest source_provenance ignored_inputs entries must be JSON objects.")
