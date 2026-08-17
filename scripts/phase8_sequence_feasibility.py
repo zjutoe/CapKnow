@@ -367,8 +367,8 @@ def record_prompt_surface_pattern(record: object) -> str | None:
         _collect_string_leaves(normalized_payload, values)
     escaped = re.escape(prompt)
     for value in sorted((value for value in values if len(value) >= 2), key=len, reverse=True):
-        escaped = escaped.replace(re.escape(value), ".+?")
-    if ".+?" not in escaped:
+        escaped = escaped.replace(re.escape(value), ".*?")
+    if ".*?" not in escaped:
         return None
     return escaped
 
@@ -394,7 +394,7 @@ def generalized_prompt_pattern(left: str, right: str) -> re.Pattern[str] | None:
     literal_chars = 0
     for block in matcher.get_matching_blocks():
         if block.a > last_left or block.b > last_right:
-            parts.append(".+?")
+            parts.append(".*?")
         if block.size:
             literal = "".join(left_tokens[block.a : block.a + block.size])
             literal_chars += len(literal.strip())

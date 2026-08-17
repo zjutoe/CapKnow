@@ -911,6 +911,43 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     )
     with pytest.raises(ValueError):
         sf.validate_feasibility_records(tuple(contaminated_records))
+    empty_operand_cases = (
+        (
+            "SEARCH_CONDITION",
+            {"items": ["a", "b", "c"], "target": ""},
+            "search_condition__probe_a",
+            "explicit",
+        ),
+        (
+            "FILTER_CONDITION",
+            {"items": ["a", "b", "c"], "target": ""},
+            "filter_condition__probe_a",
+            "explicit",
+        ),
+        (
+            "MEMORY_FILTER",
+            {"memory": {"": ""}, "key": "", "items": ["", "other-value"]},
+            "memory_filter__train_explicit_a",
+            "train_explicit",
+        ),
+    )
+    empty_operand_prompts = [
+        cg.render_prompt(task_id, context, template_id, style)
+        for task_id, context, template_id, style in empty_operand_cases
+    ]
+    for prompt in empty_operand_prompts:
+        for contaminated in (
+            prompt,
+            f"Feasibility check: {prompt}",
+            f"{prompt} This is only a feasibility check.",
+        ):
+            with pytest.raises(ValueError):
+                sf.reject_scientific_markers(contaminated)
+    contaminated_records[0] = sf.FeasibilityRecord(
+        **{**contaminated_records[0].__dict__, "prompt": f"Feasibility check: {empty_operand_prompts[0]}"}
+    )
+    with pytest.raises(ValueError):
+        sf.validate_feasibility_records(tuple(contaminated_records))
 
 
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
