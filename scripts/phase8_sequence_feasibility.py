@@ -47,16 +47,22 @@ SELECTION_RE = re.compile(r"^feasibility_selection_(\d{3})\.json$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ARTIFACT_PARENT = REPO_ROOT / "artifacts" / "phase8_toy_lm_bridge"
 HEX_OPERAND_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9a-f]{16})(?![0-9A-Fa-f])", re.IGNORECASE)
+NAMED_VALUE_KEYS = ("red", "blue", "green", "silver")
 NAMED_VALUE_KEYS_BY_SPLIT = {
-    "train": ("red", "blue", "green", "silver"),
-    "eval": ("amber", "violet", "teal", "bronze"),
+    "train": NAMED_VALUE_KEYS,
+    "eval": NAMED_VALUE_KEYS,
 }
-NAMED_VALUE_KEY_RE = re.compile(r"\b(?:red|blue|green|silver|amber|violet|teal|bronze)\b", re.IGNORECASE)
 NAMED_VALUE_RE = re.compile(
-    r"\b(?:red|blue|green|silver|amber|violet|teal|bronze)-[te][0-9a-f]{8}\b",
+    r"\b(?:red|blue|green|silver)-[0-9a-f]{8}\b",
     re.IGNORECASE,
 )
-ARRAY_ITEM_RE = re.compile(r"\bs[te][0-9a-f]{8}\b", re.IGNORECASE)
+NAMED_FIELD_RE = re.compile(
+    r"\b(red|blue|green|silver)=((?:red|blue|green|silver)-[0-9a-f]{8})\b",
+    re.IGNORECASE,
+)
+ARRAY_ITEM_RE = re.compile(r"\bq[0-9a-f]{8}\b", re.IGNORECASE)
+BOOLEAN_STATEMENT_RE = re.compile(r"\b([0-9]{3})\s+(is at most|is greater than)\s+([0-9]{3})\b", re.IGNORECASE)
+PROMPT_PLACEHOLDER_RE = re.compile(r"\{[abc]\}")
 ACCEPTED_INDEPENDENT_REVIEW_VERDICT = "ACCEPT"
 
 SCIENTIFIC_MARKERS = (
@@ -107,58 +113,58 @@ GENERIC_JSON_MARKERS = frozenset({"true", "false", "null", "unable", "[]", "{}"}
 PROMPT_SURFACES: dict[str, dict[str, tuple[str, ...]]] = {
     "hex_copy": {
         "train": (
-            "Repeat exactly these sixteen hex digits labeled batch {a}: {b}",
-            "Copy only this hex code from note {a}: {b}",
-            "Answer with the following hex string after cue {a}: {b}",
-            "Transcribe the sixteen-character hex token numbered {a}: {b}",
+            "Copy these sixteen hex digits from batch {a}: {b}",
+            "Send only sixteen hex digits for ticket {a}: {b}",
+            "Write sixteen lowercase hex chars after tag {a}: {b}",
+            "Return the sixteen hex symbols at slot {a}: {b}",
         ),
         "eval": (
-            "Produce the 16-digit hex code shown after sign {a}: {b}",
-            "Write just the hex sequence beside marker {a}: {b}",
-            "Return only the shown lowercase hex entry {a}: {b}",
-            "Give the exact hex characters listed at slot {a}: {b}",
+            "Echo these sixteen hex digits from batch {a}: {b}",
+            "Give only sixteen hex digits for ticket {a}: {b}",
+            "Print sixteen lowercase hex chars after tag {a}: {b}",
+            "Output the sixteen hex symbols at slot {a}: {b}",
         ),
     },
     "named_value_json": {
         "train": (
-            "Respond with compact JSON string for name {a}; entries are {b}",
-            "Using the listed pairs, emit compact JSON string for {a}: {b}",
-            "Choose {a} and output its compact JSON string from pairs {b}",
-            "From these pairs answer as compact JSON string for {a}: {b}",
+            "Send JSON string for key {a}; fields {b}",
+            "Write JSON string for name {a}; roster {b}",
+            "Choose key {a}; reply with JSON string from {b}",
+            "For key {a}, emit JSON string using list {b}",
         ),
         "eval": (
-            "Write a compact JSON string for label {a} after reading pairs {b}",
-            "Give the JSON string associated with {a}; pairs {b}",
-            "Output compact JSON string matching {a} in this roster {b}",
-            "Find {a} among pairs {b} and reply as compact JSON string",
+            "Give JSON string for key {a}; fields {b}",
+            "Print JSON string for name {a}; roster {b}",
+            "Select key {a}; reply with JSON string from {b}",
+            "For key {a}, give JSON string using list {b}",
         ),
     },
     "boolean_json": {
         "train": (
             "Reply JSON bool for this comparison: {a} {b} {c}.",
-            "Convert the comparison to JSON bool: {a} {b} {c}.",
+            "Convert this comparison to JSON bool: {a} {b} {c}.",
             "For {a} {b} {c}, write only JSON bool.",
-            "Give JSON bool after checking: {a} {b} {c}.",
+            "Check {a} {b} {c} and return JSON bool.",
         ),
         "eval": (
-            "Write canonical JSON bool for: {a} {b} {c}.",
-            "Evaluate {a} {b} {c}; answer with JSON bool.",
-            "For the statement {a} {b} {c}, return JSON bool.",
-            "Decide {a} {b} {c} and emit JSON bool.",
+            "Write JSON bool for this comparison: {a} {b} {c}.",
+            "Produce this comparison as JSON bool: {a} {b} {c}.",
+            "For {a} {b} {c}, print only JSON bool.",
+            "Judge {a} {b} {c} and return JSON bool.",
         ),
     },
     "array_json": {
         "train": (
             "Return compact JSON array from chunks: {a}",
-            "Convert these chunks into a compact JSON array: {a}",
-            "Write a compact JSON array containing these chunks: {a}",
-            "Emit JSON array only for chunks: {a}",
+            "Write compact JSON array for pieces: {a}",
+            "Form JSON array using these chunks: {a}",
+            "Emit JSON array only from chunks: {a}",
         ),
         "eval": (
-            "Produce compact JSON array from pieces: {a}",
-            "Turn these pieces into compact JSON array: {a}",
-            "Answer with a compact JSON array holding these pieces: {a}",
-            "Give JSON array only for pieces: {a}",
+            "Output compact JSON array from chunks: {a}",
+            "Print compact JSON array for pieces: {a}",
+            "Make JSON array using these chunks: {a}",
+            "Give JSON array only from chunks: {a}",
         ),
     },
 }
@@ -266,6 +272,8 @@ def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
     overlap = train_semantic & eval_semantic
     if overlap:
         raise ValueError(f"Feasibility train/evaluation semantic values must be disjoint: {sorted(overlap)!r}.")
+    validate_paired_length_profiles(records)
+    validate_boolean_label_contract(records)
 
 
 def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
@@ -277,22 +285,92 @@ def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
         decoded = json.loads(record.answer)
         if not isinstance(decoded, str):
             raise ValueError("named_value_json answers must be JSON strings.")
+        if NAMED_VALUE_RE.fullmatch(decoded) is None:
+            raise ValueError("named_value_json answers must use the fixed held-out value grammar.")
         values.add(decoded.casefold())
-        values.update(value.casefold() for value in NAMED_VALUE_KEY_RE.findall(record.prompt))
         values.update(value.casefold() for value in NAMED_VALUE_RE.findall(prompt_and_answer))
+        roster = tuple((key.casefold(), value.casefold()) for key, value in NAMED_FIELD_RE.findall(record.prompt))
+        if roster:
+            values.add("named_roster:" + compact_json(roster))
     elif record.family == "array_json":
         decoded = json.loads(record.answer)
         if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
             raise ValueError("array_json answers must be JSON arrays of strings.")
         normalized = [item.casefold() for item in decoded]
+        if not all(ARRAY_ITEM_RE.fullmatch(item) for item in normalized):
+            raise ValueError("array_json answers must use the fixed held-out item grammar.")
         values.update(normalized)
-        values.add(compact_json(normalized))
+        values.add("array:" + compact_json(normalized))
         values.update(value.casefold() for value in ARRAY_ITEM_RE.findall(prompt_and_answer))
     elif record.family == "boolean_json":
-        values.update(re.findall(r"\b\d+\b", record.prompt))
+        statements = parsed_boolean_statements(record.prompt)
+        if not statements:
+            raise ValueError("boolean_json prompts must contain a supported complete comparison statement.")
+        values.update(f"boolean:{left}:{relation}:{right}" for left, relation, right in statements)
     else:
         raise ValueError(f"Unknown feasibility family: {record.family!r}.")
     return frozenset(values)
+
+
+def parsed_boolean_statements(text: str) -> tuple[tuple[int, str, int], ...]:
+    return tuple(
+        (int(match.group(1)), match.group(2).casefold(), int(match.group(3)))
+        for match in BOOLEAN_STATEMENT_RE.finditer(text)
+    )
+
+
+def boolean_statement_truth(left: int, relation: str, right: int) -> bool:
+    if relation == "is at most":
+        return left <= right
+    if relation == "is greater than":
+        return left > right
+    raise ValueError(f"Unsupported boolean_json relation: {relation!r}.")
+
+
+def validate_paired_length_profiles(records: Sequence[FeasibilityRecord]) -> None:
+    for family in {record.family for record in records}:
+        train = tuple(sorted((record for record in records if record.family == family and record.split == "train"), key=lambda r: r.index))
+        eval_ = tuple(sorted((record for record in records if record.family == family and record.split == "eval"), key=lambda r: r.index))
+        paired_count = min(len(train), len(eval_), EVAL_RECORDS_PER_FAMILY)
+        if paired_count == 0:
+            continue
+        train_prompt_lengths = tuple(len(record.prompt.encode("utf-8")) for record in train[:paired_count])
+        eval_prompt_lengths = tuple(len(record.prompt.encode("utf-8")) for record in eval_[:paired_count])
+        if train_prompt_lengths != eval_prompt_lengths:
+            raise ValueError(f"Feasibility paired prompt byte-length profile must match for {family}.")
+        train_answer_lengths = tuple(len(record.answer.encode("utf-8")) for record in train[:paired_count])
+        eval_answer_lengths = tuple(len(record.answer.encode("utf-8")) for record in eval_[:paired_count])
+        if train_answer_lengths != eval_answer_lengths:
+            raise ValueError(f"Feasibility paired answer byte-length profile must match for {family}.")
+
+
+def validate_boolean_label_contract(records: Sequence[FeasibilityRecord]) -> None:
+    boolean_records = tuple(record for record in records if record.family == "boolean_json")
+    if not boolean_records:
+        return
+    for record in boolean_records:
+        statements = parsed_boolean_statements(record.prompt)
+        if len(statements) != 1:
+            raise ValueError("boolean_json prompts must contain exactly one complete comparison statement.")
+        expected_answer = "true" if boolean_statement_truth(*statements[0]) else "false"
+        if record.answer != expected_answer:
+            raise ValueError("boolean_json answer must match deterministic comparison truth.")
+    for split, expected_count in (("train", TRAIN_RECORDS_PER_FAMILY), ("eval", EVAL_RECORDS_PER_FAMILY)):
+        split_records = tuple(record for record in boolean_records if record.split == split)
+        if len(split_records) != expected_count:
+            continue
+        if sum(record.answer == "true" for record in split_records) != len(split_records) // 2:
+            raise ValueError("boolean_json truth labels must be balanced overall within each split.")
+        by_template: dict[str, list[FeasibilityRecord]] = {}
+        for record in split_records:
+            by_template.setdefault(record.template_id, []).append(record)
+        if len(by_template) != 4:
+            raise ValueError("boolean_json must use four templates per split.")
+        for template_records in by_template.values():
+            true_count = sum(record.answer == "true" for record in template_records)
+            false_count = sum(record.answer == "false" for record in template_records)
+            if true_count != false_count:
+                raise ValueError("boolean_json truth labels must be balanced within each template.")
 
 
 def validate_prompt_surface_contract(family: str) -> None:
@@ -309,10 +387,19 @@ def validate_prompt_surface_contract(family: str) -> None:
         raise ValueError(f"Feasibility prompt surfaces for {family!r} must be unique within each split.")
     if set(train_surfaces) & set(eval_surfaces):
         raise ValueError(f"Feasibility prompt surface overlap between train and eval for {family!r}.")
+    for train_surface, eval_surface in zip(train_surfaces, eval_surfaces, strict=True):
+        if prompt_placeholder_sequence(train_surface) != prompt_placeholder_sequence(eval_surface):
+            raise ValueError(f"Feasibility prompt surfaces for {family!r} must have paired placeholder structure.")
+        if len(train_surface.encode("utf-8")) != len(eval_surface.encode("utf-8")):
+            raise ValueError(f"Feasibility prompt surfaces for {family!r} must have paired byte lengths.")
     for surface in (*train_surfaces, *eval_surfaces):
         reject_scientific_markers(surface)
         if "template" in surface.lower():
             raise ValueError("Feasibility prompt surfaces must not expose template markers.")
+
+
+def prompt_placeholder_sequence(surface: str) -> tuple[str, ...]:
+    return tuple(match.group(0) for match in PROMPT_PLACEHOLDER_RE.finditer(surface))
 
 
 @lru_cache(maxsize=1)
@@ -514,35 +601,29 @@ def _family_split(family: str, split: str, count: int) -> tuple[FeasibilityRecor
 
 def _make_record(family: str, split: str, operand_number: int, index: int) -> FeasibilityRecord:
     rng = random.Random(730000 + 10000 * FAMILIES.index(family) + operand_number)
-    split_code = "t" if split == "train" else "e"
     template_id = f"seq_{family}_{split}_{index % 4}"
     operand_id = f"seq_operand_{family}_{operand_number:05d}"
     surface = PROMPT_SURFACES[family][split][index % 4]
     if family == "hex_copy":
-        high_bit = 0 if split == "train" else 1 << 63
-        value = f"{high_bit | rng.getrandbits(63):016x}"
+        value = f"{rng.getrandbits(64):016x}"
         prompt = surface.format(a=index % 17, b=value)
         answer = value
         semantic_values = (value,)
     elif family == "named_value_json":
         keys = NAMED_VALUE_KEYS_BY_SPLIT[split]
         target = keys[index % len(keys)]
-        fields = {key: f"{key}-{split_code}{rng.getrandbits(32):08x}" for key in keys}
+        fields = {key: f"{key}-{rng.getrandbits(32):08x}" for key in keys}
         field_text = "; ".join(f"{key}={fields[key]}" for key in keys)
         prompt = surface.format(a=target, b=field_text)
         answer = compact_json(fields[target])
         semantic_values = tuple(fields[key] for key in keys)
     elif family == "boolean_json":
-        split_offset = 0 if split == "train" else 2000
-        left = split_offset + rng.randrange(1, 200)
-        right = split_offset + rng.randrange(1, 200)
-        truth = left <= right if index % 2 == 0 else left > right
-        relation = "is at most" if index % 2 == 0 else "is greater than"
+        left, relation, right, truth = make_boolean_statement(rng, index)
         prompt = surface.format(a=left, b=relation, c=right)
         answer = "true" if truth else "false"
-        semantic_values = (str(left), str(right))
+        semantic_values = (f"{left} {relation} {right}",)
     elif family == "array_json":
-        items = [f"s{split_code}{rng.getrandbits(32):08x}" for _ in range(1 + index % 4)]
+        items = [f"q{rng.getrandbits(32):08x}" for _ in range(1 + index % 4)]
         prompt = surface.format(a=" | ".join(items))
         answer = compact_json(items)
         semantic_values = (*items, answer)
@@ -558,6 +639,19 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
         answer=answer,
         semantic_values=semantic_values,
     )
+
+
+def make_boolean_statement(rng: random.Random, index: int) -> tuple[int, str, int, bool]:
+    template_position = index // 4
+    truth = template_position % 2 == 0
+    relation = "is at most" if (template_position // 2) % 2 == 0 else "is greater than"
+    low = rng.randrange(100, 900)
+    high = low + rng.randrange(1, 100)
+    if relation == "is at most":
+        left, right = (low, high) if truth else (high, low)
+    else:
+        left, right = (high, low) if truth else (low, high)
+    return left, relation, right, truth
 
 
 def grouped_records() -> dict[str, dict[str, tuple[FeasibilityRecord, ...]]]:
