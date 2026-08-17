@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from functools import lru_cache
 from hashlib import sha256
@@ -183,6 +183,14 @@ class SourceSnapshot:
     ignored_inputs: tuple[dict[str, object], ...]
 
 
+@dataclass
+class FeasibilityValidationContext:
+    active_roots: set[Path] = field(default_factory=set)
+    validated_roots: set[tuple[Path, bool]] = field(default_factory=set)
+    inventory_bound_paths: dict[Path, set[Path]] = field(default_factory=dict)
+    selection_records: dict[Path, tuple[dict[str, object], dict[str, tuple[str, str, str]]]] = field(default_factory=dict)
+
+
 class SourceChangedError(RuntimeError):
     pass
 
@@ -208,7 +216,7 @@ def reject_scientific_markers(text: str) -> None:
         if marker.casefold() in lower_text:
             raise ValueError(f"Feasibility text contains forbidden Phase 8 scientific identity marker: {marker!r}.")
     for pattern in phase8_scientific_prompt_patterns():
-        if pattern.fullmatch(text):
+        if pattern.search(text):
             raise ValueError("Feasibility text matches a forbidden Phase 8 scientific prompt template.")
 
 
@@ -696,6 +704,7 @@ def validate_new_root(
     predecessor_roots: Sequence[Path] = (),
     predecessor_selections: Sequence[Path] = (),
 ) -> None:
+    context = FeasibilityValidationContext()
     require_canonical_path_string(str(root), "root", ROOT_RE)
     require_artifact_location(root, "root", ROOT_RE)
     root_number = feasibility_root_number(root)
@@ -705,10 +714,10 @@ def validate_new_root(
         if direct_numbers and predecessor_number <= direct_numbers[-1]:
             raise ValueError("Feasibility predecessor roots must be in strictly ascending root-number order.")
         direct_numbers.append(predecessor_number)
-        terminal_binding(predecessor_root)
+        terminal_binding(predecessor_root, context=context)
     selected_numbers: list[int] = []
     for selection in predecessor_selections:
-        data = validate_selection_record(selection)
+        data = validate_selection_record(selection, context=context)
         selected_numbers.append(feasibility_root_number(Path(str(data["selected_root"]))))
     expected_previous_numbers = list(range(1, root_number))
     observed_numbers = sorted({*direct_numbers, *selected_numbers})
@@ -756,6 +765,10 @@ def reject_existing_symlink_component(path: Path, field_name: str) -> None:
         current = current / part
         if current.is_symlink():
             raise ValueError(f"{field_name} must not contain symlink path components.")
+
+
+def validation_context(context: FeasibilityValidationContext | None = None) -> FeasibilityValidationContext:
+    return context if context is not None else FeasibilityValidationContext()
 
 
 def validate_source_clean(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> SourceSnapshot:
@@ -863,19 +876,37 @@ def is_active_output_status_line(line: str, active_output_root: Path | None) -> 
     return candidate_resolved == active_resolved or active_resolved in candidate_resolved.parents
 
 
-def source_clean_allowed_paths(predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> set[Path]:
+def source_clean_allowed_paths(
+    predecessor_roots: Sequence[Path],
+    predecessor_selections: Sequence[Path],
+    *,
+    context: FeasibilityValidationContext | None = None,
+) -> set[Path]:
+    context = validation_context(context)
     allowed: set[Path] = set()
-    for selection in predecessor_selection_paths_from_selections(predecessor_selections):
+    for selection in predecessor_selection_paths_from_selections(predecessor_selections, context=context):
         allowed.add(selection.resolve())
-    for predecessor_root in (*predecessor_roots, *predecessor_root_paths_from_selections(predecessor_selections)):
-        allowed.update(inventory_bound_root_paths(predecessor_root))
+    for predecessor_root in (
+        *predecessor_roots,
+        *predecessor_root_paths_from_selections(predecessor_selections, context=context),
+    ):
+        allowed.update(inventory_bound_root_paths(predecessor_root, context=context))
     return allowed
 
 
-def inventory_bound_root_paths(root: Path) -> set[Path]:
+def inventory_bound_root_paths(
+    root: Path,
+    *,
+    context: FeasibilityValidationContext | None = None,
+) -> set[Path]:
+    context = validation_context(context)
     require_canonical_path_string(str(root), "predecessor_root.path", ROOT_RE)
     require_artifact_location(root, "predecessor_root.path", ROOT_RE)
-    validate_feasibility_root_artifacts(root, require_passing=False)
+    resolved_root = root.resolve()
+    cached = context.inventory_bound_paths.get(resolved_root)
+    if cached is not None:
+        return set(cached)
+    validate_feasibility_root_artifacts(root, require_passing=False, context=context)
     terminal, _terminal_data, manifest, _manifest_sha = load_terminal_binding(root)
     manifest_data = json.loads(manifest.read_text())
     file_inventory = manifest_data.get("file_inventory")
@@ -908,6 +939,7 @@ def inventory_bound_root_paths(root: Path) -> set[Path]:
         if file_sha256(candidate) != expected_sha:
             raise ValueError("Predecessor manifest file_inventory checksum mismatch.")
         allowed.add(candidate)
+    context.inventory_bound_paths[resolved_root] = set(allowed)
     return allowed
 
 
@@ -1044,10 +1076,14 @@ def write_terminal(
     write_json(root / f"{terminal_status}.json", terminal)
 
 
-def terminal_binding(root: Path) -> dict[str, object]:
+def terminal_binding(
+    root: Path,
+    *,
+    context: FeasibilityValidationContext | None = None,
+) -> dict[str, object]:
     require_canonical_path_string(str(root), "predecessor_root.path", ROOT_RE)
     require_artifact_location(root, "predecessor_root.path", ROOT_RE)
-    validate_feasibility_root_artifacts(root, require_passing=False)
+    validate_feasibility_root_artifacts(root, require_passing=False, context=context)
     terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
     return {
         "path": str(root),
@@ -1089,7 +1125,38 @@ def load_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, st
     return terminal, terminal_data, manifest, manifest_sha
 
 
-def validate_feasibility_root_artifacts(root: Path, *, require_passing: bool) -> None:
+def validate_feasibility_root_artifacts(
+    root: Path,
+    *,
+    require_passing: bool,
+    context: FeasibilityValidationContext | None = None,
+) -> None:
+    context = validation_context(context)
+    require_artifact_location(root, "selected_root" if require_passing else "predecessor_root.path", ROOT_RE)
+    if not root.is_dir():
+        raise ValueError(f"Feasibility root is not a directory: {root}")
+    resolved_root = root.resolve()
+    cache_key = (resolved_root, require_passing)
+    if cache_key in context.validated_roots or (not require_passing and (resolved_root, True) in context.validated_roots):
+        return
+    if resolved_root in context.active_roots:
+        raise ValueError(f"Feasibility root lineage contains a cycle at {root}.")
+    context.active_roots.add(resolved_root)
+    try:
+        _validate_feasibility_root_artifacts(root, require_passing=require_passing, context=context)
+    finally:
+        context.active_roots.remove(resolved_root)
+    context.validated_roots.add(cache_key)
+    if require_passing:
+        context.validated_roots.add((resolved_root, False))
+
+
+def _validate_feasibility_root_artifacts(
+    root: Path,
+    *,
+    require_passing: bool,
+    context: FeasibilityValidationContext,
+) -> None:
     require_artifact_location(root, "selected_root" if require_passing else "predecessor_root.path", ROOT_RE)
     if not root.is_dir():
         raise ValueError(f"Feasibility root is not a directory: {root}")
@@ -1111,7 +1178,7 @@ def validate_feasibility_root_artifacts(root: Path, *, require_passing: bool) ->
     validate_source_provenance(
         manifest_data.get("source_provenance"),
         source_commit,
-        source_provenance_allowed_paths(manifest_data),
+        source_provenance_allowed_paths(manifest_data, context=context),
     )
     if summary_data.get("source", {}).get("commit") != source_commit:
         raise ValueError("Summary source commit does not match manifest source_commit.")
@@ -1432,6 +1499,7 @@ def complete_predecessor_root_bindings(
     predecessor_roots: Sequence[Path],
     predecessor_selections: Sequence[Path],
 ) -> list[dict[str, object]]:
+    context = FeasibilityValidationContext()
     completed: list[dict[str, object]] = []
     binding_map: dict[str, tuple[str, str, str]] = {}
 
@@ -1447,16 +1515,21 @@ def complete_predecessor_root_bindings(
         completed.append(binding)
 
     for root in predecessor_roots:
-        add(terminal_binding(root))
+        add(terminal_binding(root, context=context))
     for selection_path in predecessor_selections:
-        selection_data = validate_selection_record(selection_path)
-        add(terminal_binding(Path(str(selection_data["selected_root"]))))
+        selection_data = validate_selection_record(selection_path, context=context)
+        add(terminal_binding(Path(str(selection_data["selected_root"])), context=context))
         for predecessor in selection_data["predecessor_roots"]:
             add(predecessor)
     return sorted(completed, key=lambda binding: feasibility_root_number(Path(str(binding["path"]))))
 
 
-def source_provenance_allowed_paths(manifest_data: dict[str, object]) -> set[Path]:
+def source_provenance_allowed_paths(
+    manifest_data: dict[str, object],
+    *,
+    context: FeasibilityValidationContext | None = None,
+) -> set[Path]:
+    context = validation_context(context)
     predecessor_roots = manifest_data.get("predecessor_roots")
     predecessor_selections = manifest_data.get("predecessor_selections")
     if not isinstance(predecessor_roots, list) or not isinstance(predecessor_selections, list):
@@ -1467,29 +1540,45 @@ def source_provenance_allowed_paths(manifest_data: dict[str, object]) -> set[Pat
             Path(require_canonical_path_string(binding.get("path"), "predecessor_selection.path", SELECTION_RE))
             for binding in predecessor_selections
         ),
+        context=context,
     )
 
 
-def predecessor_root_paths_from_selections(predecessor_selections: Sequence[Path]) -> tuple[Path, ...]:
+def predecessor_root_paths_from_selections(
+    predecessor_selections: Sequence[Path],
+    *,
+    context: FeasibilityValidationContext | None = None,
+) -> tuple[Path, ...]:
+    context = validation_context(context)
     paths: list[Path] = []
     for selection_path in predecessor_selections:
-        selection_data = validate_selection_record(selection_path)
+        selection_data = validate_selection_record(selection_path, context=context)
         paths.append(Path(str(selection_data["selected_root"])))
         paths.extend(Path(str(predecessor["path"])) for predecessor in selection_data["predecessor_roots"])
     return tuple(paths)
 
 
-def predecessor_selection_paths_from_selections(predecessor_selections: Sequence[Path]) -> tuple[Path, ...]:
+def predecessor_selection_paths_from_selections(
+    predecessor_selections: Sequence[Path],
+    *,
+    context: FeasibilityValidationContext | None = None,
+) -> tuple[Path, ...]:
+    context = validation_context(context)
     paths: list[Path] = []
     for selection_path in predecessor_selections:
-        selection_data = validate_selection_record(selection_path)
+        selection_data = validate_selection_record(selection_path, context=context)
         paths.append(selection_path)
         paths.extend(Path(str(predecessor["path"])) for predecessor in selection_data["predecessor_selections"])
     return tuple(paths)
 
 
-def validate_selection_record(path: Path) -> dict[str, object]:
-    data, _root_binding_map = _validate_selection_record(path, seen=set())
+def validate_selection_record(
+    path: Path,
+    *,
+    context: FeasibilityValidationContext | None = None,
+) -> dict[str, object]:
+    context = validation_context(context)
+    data, _root_binding_map = _validate_selection_record(path, seen=set(), context=context)
     return data
 
 
@@ -1497,6 +1586,7 @@ def _validate_selection_record(
     path: Path,
     *,
     seen: set[Path],
+    context: FeasibilityValidationContext,
 ) -> tuple[dict[str, object], dict[str, tuple[str, str, str]]]:
     current_number = selection_record_number(path)
     require_canonical_path_string(str(path), "selection_record.path", SELECTION_RE)
@@ -1506,6 +1596,9 @@ def _validate_selection_record(
     resolved = path.resolve()
     if resolved in seen:
         raise ValueError(f"Selection-record lineage contains a cycle at {path}.")
+    cached = context.selection_records.get(resolved)
+    if cached is not None:
+        return cached
     seen.add(resolved)
     data = json.loads(path.read_text())
     required = {
@@ -1527,7 +1620,7 @@ def _validate_selection_record(
     selected_manifest_sha = require_exact_str(data["selected_manifest_sha256"], "selected_manifest_sha256")
     source_commit = validate_git_sha(data["source_commit"], "source_commit")
     root = Path(selected_root)
-    validate_feasibility_root_artifacts(root, require_passing=True)
+    validate_feasibility_root_artifacts(root, require_passing=True, context=context)
     terminal, terminal_data, manifest, manifest_sha = load_terminal_binding(root)
     if manifest_sha != selected_manifest_sha:
         raise ValueError("Selection record manifest checksum does not match selected root.")
@@ -1584,10 +1677,14 @@ def _validate_selection_record(
     for predecessor_path, predecessor_sha in predecessor_selection_bindings:
         if file_sha256(predecessor_path) != predecessor_sha:
             raise ValueError("Predecessor selection checksum mismatch.")
-        predecessor_data, predecessor_validated_roots = _validate_selection_record(predecessor_path, seen=seen)
+        predecessor_data, predecessor_validated_roots = _validate_selection_record(
+            predecessor_path,
+            seen=seen,
+            context=context,
+        )
         predecessor_selected_root = Path(str(predecessor_data["selected_root"]))
         predecessor_root_numbers.append(feasibility_root_number(predecessor_selected_root))
-        add_root_binding(expected_root_bindings, terminal_binding(predecessor_selected_root))
+        add_root_binding(expected_root_bindings, terminal_binding(predecessor_selected_root, context=context))
         for predecessor_root_key, predecessor_root_binding in predecessor_validated_roots.items():
             terminal_state, terminal_sha, manifest_sha = predecessor_root_binding
             add_root_binding(
@@ -1616,8 +1713,10 @@ def _validate_selection_record(
             f"Selection record must use next numbered selection feasibility_selection_{expected_selection_number:03d}.json; "
             f"got {path.name!r}."
         )
+    result = (data, predecessor_root_bindings)
+    context.selection_records[resolved] = result
     seen.remove(resolved)
-    return data, predecessor_root_bindings
+    return result
 
 
 def selection_record_number(path: Path) -> int:

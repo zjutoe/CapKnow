@@ -876,6 +876,18 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         sf.reject_scientific_markers(composition_prompt)
     with pytest.raises(ValueError):
         sf.reject_scientific_markers(composition_prompt.swapcase())
+    for contaminated in (
+        f"Feasibility check: {composition_prompt}",
+        f"{composition_prompt} This is only a feasibility check.",
+    ):
+        with pytest.raises(ValueError):
+            sf.reject_scientific_markers(contaminated)
+    contaminated_records = list(groups["hex_copy"]["train"])
+    contaminated_records[0] = sf.FeasibilityRecord(
+        **{**contaminated_records[0].__dict__, "prompt": f"Feasibility check: {composition_prompt}"}
+    )
+    with pytest.raises(ValueError):
+        sf.validate_feasibility_records(tuple(contaminated_records))
 
 
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
@@ -1179,7 +1191,7 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(
         sf.validate_new_root(artifact_parent / "feasibility_003", (second_predecessor, predecessor), ())
     selection = artifact_parent / "feasibility_selection_001.json"
     selection.write_text("{}\n")
-    monkeypatch.setattr(sf, "validate_selection_record", lambda path: {"selected_root": str(predecessor)})
+    monkeypatch.setattr(sf, "validate_selection_record", lambda path, **kwargs: {"selected_root": str(predecessor)})
     sf.validate_new_root(artifact_parent / "feasibility_003", (second_predecessor,), (selection,))
 
     with pytest.raises(FileExistsError, match="overwrite"):
@@ -1515,6 +1527,50 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
         cells=cells,
     )
     assert sf.validate_selection_record(retry_selection)["selected_root"] == str(retry_root)
+
+    parent = set_parent("root_validation_cache")
+    roots: list[Path] = []
+    for number in range(1, 9):
+        root = parent / f"feasibility_{number:03d}"
+        _write_feasibility_root(root, "FAILED", [], predecessor_roots=tuple(roots))
+        roots.append(root)
+    root_validation_calls: list[Path] = []
+    original_validate_root_artifacts = sf._validate_feasibility_root_artifacts
+
+    def counted_validate_root_artifacts(
+        root: Path,
+        *,
+        require_passing: bool,
+        context: object,
+    ) -> None:
+        root_validation_calls.append(root.resolve())
+        original_validate_root_artifacts(root, require_passing=require_passing, context=context)
+
+    monkeypatch.setattr(sf, "_validate_feasibility_root_artifacts", counted_validate_root_artifacts)
+    sf.validate_feasibility_root_artifacts(roots[-1], require_passing=False)
+    assert len(root_validation_calls) <= len(roots)
+    assert len(set(root_validation_calls)) == len(root_validation_calls)
+
+    parent = set_parent("root_validation_cycle")
+    cyclic_root = parent / "feasibility_001"
+    _write_feasibility_root(cyclic_root, "FAILED", [])
+    manifest = cyclic_root / "manifest.json"
+    failed = cyclic_root / "FAILED.json"
+    manifest_data = json.loads(manifest.read_text())
+    manifest_data["predecessor_roots"] = [
+        {
+            "path": str(cyclic_root),
+            "terminal_state": "FAILED",
+            "terminal_sha256": "0" * 64,
+            "manifest_sha256": "0" * 64,
+        }
+    ]
+    sf.write_json(manifest, manifest_data)
+    failed_data = json.loads(failed.read_text())
+    failed_data["manifest_sha256"] = sf.file_sha256(manifest)
+    sf.write_json(failed, failed_data)
+    with pytest.raises(ValueError, match="lineage contains a cycle"):
+        sf.validate_feasibility_root_artifacts(cyclic_root, require_passing=False)
 
     outside_selection = tmp_path / "feasibility_selection_001.json"
     outside_selection.write_text(selection.read_text())
