@@ -177,6 +177,13 @@ class FeasibilityRecord:
 
 
 @dataclass(frozen=True)
+class PromptSurfaceSeed:
+    prompt: str
+    canonical_context: str
+    normalized_payload: object
+
+
+@dataclass(frozen=True)
 class SourceSnapshot:
     commit: str
     status_lines: tuple[str, ...]
@@ -334,6 +341,7 @@ def phase8_scientific_prompt_patterns() -> tuple[re.Pattern[str], ...]:
     for probe in cg.build_evaluation_probe_pack():
         grouped.setdefault((probe.task_id, probe.template_id, probe.style), []).append(probe.prompt)
         add_record_prompt_pattern(pattern_texts, probe)
+    add_renderer_prompt_patterns(grouped, pattern_texts)
     patterns: list[re.Pattern[str]] = []
     patterns.extend(re.compile(pattern, re.IGNORECASE | re.DOTALL) for pattern in sorted(pattern_texts))
     for prompts in grouped.values():
@@ -344,6 +352,57 @@ def phase8_scientific_prompt_patterns() -> tuple[re.Pattern[str], ...]:
         if pattern is not None:
             patterns.append(pattern)
     return tuple(patterns)
+
+
+def add_renderer_prompt_patterns(
+    grouped: dict[tuple[str, str, str | None], list[str]],
+    pattern_texts: set[str],
+) -> None:
+    for task_id in cg.TASK_ORDER:
+        for style in renderer_prompt_styles(task_id):
+            for suffix in ("a", "b", "c", "d"):
+                template_id = renderer_template_id(task_id, style, suffix)
+                for context in renderer_prompt_contexts(task_id):
+                    prompt = cg.render_prompt(task_id, context, template_id, style)
+                    grouped.setdefault((task_id, template_id, style), []).append(prompt)
+                    add_record_prompt_pattern(
+                        pattern_texts,
+                        PromptSurfaceSeed(
+                            prompt=prompt,
+                            canonical_context=cg.canonical_context_bytes(context).decode("utf-8"),
+                            normalized_payload=cg.normalized_payload_tuple(task_id, context),
+                        ),
+                    )
+
+
+def renderer_prompt_styles(task_id: str) -> tuple[str, ...]:
+    if task_id in {"MEMORY", "SEARCH", "FILTER", "CONDITION"}:
+        return ("train", "neutral")
+    if task_id in {"MEMORY_FILTER", "FILTER_CONDITION", "SEARCH_CONDITION"}:
+        return ("train_explicit", "train_indirect", "explicit", "indirect", "generic")
+    if task_id == "MEMORY_SEARCH":
+        return ("explicit", "indirect", "generic")
+    raise AssertionError(f"Unhandled Phase 8 task: {task_id!r}")
+
+
+def renderer_template_id(task_id: str, style: str, suffix: str) -> str:
+    if style == "train":
+        return f"{task_id.lower()}__train_{suffix}"
+    if style == "neutral":
+        return f"neutral_eval__neutral_{suffix}"
+    return f"{task_id.lower()}__{style}_{suffix}"
+
+
+def renderer_prompt_contexts(task_id: str) -> tuple[dict[str, object], ...]:
+    if task_id == "MEMORY":
+        return ({"memory": {"alpha": "bravo"}, "key": "alpha"},)
+    if task_id in {"SEARCH", "FILTER", "FILTER_CONDITION", "SEARCH_CONDITION"}:
+        return ({"items": ["alpha", "bravo", "charlie"], "target": "bravo"},)
+    if task_id == "CONDITION":
+        return ({"condition": True}, {"condition": False})
+    if task_id in {"MEMORY_FILTER", "MEMORY_SEARCH"}:
+        return ({"memory": {"alpha": "bravo"}, "key": "alpha", "items": ["bravo", "charlie"]},)
+    raise AssertionError(f"Unhandled Phase 8 task: {task_id!r}")
 
 
 def add_record_prompt_pattern(patterns: set[str], record: object) -> None:

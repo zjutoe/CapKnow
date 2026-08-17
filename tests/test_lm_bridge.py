@@ -948,6 +948,53 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     )
     with pytest.raises(ValueError):
         sf.validate_feasibility_records(tuple(contaminated_records))
+    condition_counterfactual_prompts = (
+        cg.render_prompt("CONDITION", {"condition": True}, "condition__train_b", "train"),
+        cg.render_prompt("CONDITION", {"condition": False}, "condition__train_c", "train"),
+        cg.render_prompt("CONDITION", {"condition": False}, "neutral_eval__neutral_a", "neutral"),
+    )
+    generic_memory_search_prompts = (
+        cg.render_prompt(
+            "MEMORY_SEARCH",
+            {"memory": {"alpha": "bravo"}, "key": "alpha", "items": ["bravo", "charlie"]},
+            "memory_search__generic_a",
+            "train",
+        ),
+        cg.render_prompt(
+            "MEMORY_SEARCH",
+            {"memory": {"": ""}, "key": "", "items": [""]},
+            "memory_search__generic_a",
+            "train",
+        ),
+        cg.render_prompt(
+            "MEMORY_SEARCH",
+            {"memory": {"novel-key": "novel\nvalue"}, "key": "novel-key", "items": ["novel\nvalue"]},
+            "memory_search__generic_a",
+            "train",
+        ),
+    )
+    for prompt in (*condition_counterfactual_prompts, *generic_memory_search_prompts):
+        for contaminated in (prompt, f"Feasibility check: {prompt}", f"{prompt} This is only a feasibility check."):
+            with pytest.raises(ValueError):
+                sf.reject_scientific_markers(contaminated)
+    condition_contaminated_records = list(groups["hex_copy"]["train"])
+    condition_contaminated_records[0] = sf.FeasibilityRecord(
+        **{
+            **condition_contaminated_records[0].__dict__,
+            "prompt": f"Feasibility check: {condition_counterfactual_prompts[0]}",
+        }
+    )
+    with pytest.raises(ValueError):
+        sf.validate_feasibility_records(tuple(condition_contaminated_records))
+    memory_search_contaminated_records = list(groups["hex_copy"]["train"])
+    memory_search_contaminated_records[0] = sf.FeasibilityRecord(
+        **{
+            **memory_search_contaminated_records[0].__dict__,
+            "prompt": f"Feasibility check: {generic_memory_search_prompts[0]}",
+        }
+    )
+    with pytest.raises(ValueError):
+        sf.validate_feasibility_records(tuple(memory_search_contaminated_records))
 
 
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
