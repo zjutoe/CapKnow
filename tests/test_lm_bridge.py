@@ -888,6 +888,29 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     )
     with pytest.raises(ValueError):
         sf.validate_feasibility_records(tuple(contaminated_records))
+    multiline_context = {
+        "memory": {"novel-key": "novel\nvalue"},
+        "key": "novel-key",
+        "items": ["novel\nvalue", "other-value"],
+    }
+    multiline_prompt = cg.render_prompt(
+        "MEMORY_FILTER",
+        multiline_context,
+        "memory_filter__train_explicit_a",
+        "train_explicit",
+    )
+    for contaminated in (
+        multiline_prompt,
+        f"Feasibility check: {multiline_prompt}",
+        f"{multiline_prompt}\nThis is only a feasibility check.",
+    ):
+        with pytest.raises(ValueError):
+            sf.reject_scientific_markers(contaminated)
+    contaminated_records[0] = sf.FeasibilityRecord(
+        **{**contaminated_records[0].__dict__, "prompt": f"Feasibility check: {multiline_prompt}"}
+    )
+    with pytest.raises(ValueError):
+        sf.validate_feasibility_records(tuple(contaminated_records))
 
 
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:

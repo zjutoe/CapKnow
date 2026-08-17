@@ -335,7 +335,7 @@ def phase8_scientific_prompt_patterns() -> tuple[re.Pattern[str], ...]:
         grouped.setdefault((probe.task_id, probe.template_id, probe.style), []).append(probe.prompt)
         add_record_prompt_pattern(pattern_texts, probe)
     patterns: list[re.Pattern[str]] = []
-    patterns.extend(re.compile(pattern, re.IGNORECASE) for pattern in sorted(pattern_texts))
+    patterns.extend(re.compile(pattern, re.IGNORECASE | re.DOTALL) for pattern in sorted(pattern_texts))
     for prompts in grouped.values():
         unique_prompts = sorted(set(prompts))
         if len(unique_prompts) < 2:
@@ -403,7 +403,7 @@ def generalized_prompt_pattern(left: str, right: str) -> re.Pattern[str] | None:
         last_right = block.b + block.size
     if literal_chars < 24 or not parts:
         return None
-    return re.compile("".join(parts), re.IGNORECASE)
+    return re.compile("".join(parts), re.IGNORECASE | re.DOTALL)
 
 
 def _add_phase8_record_markers(markers: set[str], record: object) -> None:
