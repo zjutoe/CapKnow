@@ -664,38 +664,41 @@ def _write_feasibility_root(
     cells: list[dict[str, object]],
     predecessor_roots: tuple[Path, ...] = (),
     predecessor_selections: tuple[Path, ...] = (),
+    *,
+    lightweight: bool = False,
 ) -> tuple[Path, Path]:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     root.mkdir(parents=True)
+    record_groups = None if lightweight else sf.grouped_records()
     for cell in cells:
         generations = root / str(cell["generations_path"])
         checkpoint = root / str(cell["checkpoint_path"])
         generations.parent.mkdir(parents=True, exist_ok=True)
-        generations.write_text(
-            "\n".join(
-                json.dumps(
-                    {
-                        "index": index,
-                        "generated": "ok" if index < int(cell["exact_matches"]) else "miss",
-                        "raw_token_ids": [1, 2],
-                        "exact_match": index < int(cell["exact_matches"]),
-                    }
+        if lightweight:
+            generations.write_text("{}\n")
+            checkpoint.write_bytes(b"checkpoint")
+        else:
+            assert record_groups is not None
+            records = record_groups[str(cell["family"])]["eval"]
+            tokenizer = ByteTokenizer()
+            generations.write_text(
+                "\n".join(
+                    json.dumps(_generation_row(record, tokenizer, exact_match=index < int(cell["exact_matches"])))
+                    for index, record in enumerate(records[: int(cell["eval_count"])])
                 )
-                for index in range(int(cell["eval_count"]))
+                + "\n"
             )
-            + "\n"
-        )
-        model = build_model(str(cell["model_size"]))
-        save_checkpoint(
-            str(checkpoint),
-            model,
-            metadata={
-                "family": cell["family"],
-                "model_size": cell["model_size"],
-                "seed": cell["seed"],
-                "training_steps": sf.TRAINING_STEPS,
-            },
-        )
+            model = build_model(str(cell["model_size"]))
+            save_checkpoint(
+                str(checkpoint),
+                model,
+                metadata={
+                    "family": cell["family"],
+                    "model_size": cell["model_size"],
+                    "seed": cell["seed"],
+                    "training_steps": sf.TRAINING_STEPS,
+                },
+            )
     sf.write_terminal(
         root,
         status,
@@ -706,6 +709,24 @@ def _write_feasibility_root(
         source_snapshot=_source_snapshot(),
     )
     return root / "manifest.json", root / f"{status}.json"
+
+
+def _generation_row(record: object, tokenizer: ByteTokenizer, *, exact_match: bool) -> dict[str, object]:
+    generated = record.answer if exact_match else "mismatch"
+    raw_token_ids = [*tokenizer.encode_evaluation_prefix(record.prompt), *tokenizer.encode_text(generated), EOS_ID]
+    return {
+        "family": record.family,
+        "index": record.index,
+        "template_id": record.template_id,
+        "operand_id": record.operand_id,
+        "prompt": record.prompt,
+        "expected": record.answer,
+        "generated": generated,
+        "raw_token_ids": raw_token_ids,
+        "invalid_generation": False,
+        "generation_error": None,
+        "exact_match": exact_match,
+    }
 
 
 def _write_selection(
@@ -834,6 +855,12 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
     for prompt in condition_prompts:
         with pytest.raises(ValueError):
             sf.reject_scientific_markers(prompt)
+        with pytest.raises(ValueError):
+            sf.reject_scientific_markers(prompt.lower())
+    with pytest.raises(ValueError):
+        sf.reject_scientific_markers(
+            "A table entry says newkey has stored value newvalue. Write the value for newkey in compact JSON."
+        )
 
 
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
@@ -904,6 +931,52 @@ def test_training_accuracy_counts_malformed_generations_as_incorrect() -> None:
     model = BadTrainingModel()
     assert training_accuracy(model, records, tokenizer, device=torch.device("cpu")) == 0.0
     assert model.training is True
+
+
+def test_checkpoint_replay_rejects_generation_rows_not_produced_by_checkpoint(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    cell = _passing_feasibility_cells()[0]
+    checkpoint = tmp_path / "checkpoint.pt"
+    save_checkpoint(
+        str(checkpoint),
+        build_model(str(cell["model_size"])),
+        metadata={
+            "family": cell["family"],
+            "model_size": cell["model_size"],
+            "seed": cell["seed"],
+            "training_steps": sf.TRAINING_STEPS,
+        },
+    )
+    tokenizer = ByteTokenizer()
+    rows = [
+        _generation_row(record, tokenizer, exact_match=index < int(cell["exact_matches"]))
+        for index, record in enumerate(sf.grouped_records()[str(cell["family"])]["eval"])
+    ]
+    with pytest.raises(ValueError, match="Checkpoint replay"):
+        sf.validate_checkpoint_replays_generations(checkpoint, cell, rows)
+
+
+def test_checkpoint_artifact_rejects_unloadable_checkpoint(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_bytes(b"not-a-checkpoint")
+    with pytest.raises(ValueError, match="Checkpoint artifact"):
+        sf.validate_checkpoint_artifact(checkpoint, _passing_feasibility_cells()[0])
+
+
+def test_generation_artifact_rejects_fabricated_exact_match_rows(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    cell = _passing_feasibility_cells()[0]
+    tokenizer = ByteTokenizer()
+    rows = [
+        _generation_row(record, tokenizer, exact_match=index < int(cell["exact_matches"]))
+        for index, record in enumerate(sf.grouped_records()[str(cell["family"])]["eval"])
+    ]
+    rows[0]["generated"] = "wrong"
+    generations = tmp_path / "generations.jsonl"
+    generations.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    with pytest.raises(ValueError, match="generated text|exact_match"):
+        sf.validate_generation_artifact(generations, cell)
 
 
 def test_feasibility_hex_semantic_overlap_is_case_insensitive() -> None:
@@ -1079,11 +1152,23 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(
         sf.validate_new_root(artifact_parent / "feasibility_003", (predecessor,), ())
     second_predecessor = artifact_parent / "feasibility_002"
     _write_feasibility_root(second_predecessor, "FAILED", [], predecessor_roots=(predecessor,))
-    with pytest.raises(ValueError, match="complete and continuous"):
+    with pytest.raises(ValueError, match="strictly ascending"):
         sf.validate_new_root(artifact_parent / "feasibility_003", (second_predecessor, predecessor), ())
+    selection = artifact_parent / "feasibility_selection_001.json"
+    selection.write_text("{}\n")
+    monkeypatch.setattr(sf, "validate_selection_record", lambda path: {"selected_root": str(predecessor)})
+    sf.validate_new_root(artifact_parent / "feasibility_003", (second_predecessor,), (selection,))
 
     with pytest.raises(FileExistsError, match="overwrite"):
         sf.validate_new_root(second_predecessor, (predecessor,), ())
+
+    symlink_parent = tmp_path / "symlink_artifacts" / "phase8_toy_lm_bridge"
+    symlink_parent.mkdir(parents=True)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", symlink_parent)
+    dangling = symlink_parent / "feasibility_001"
+    dangling.symlink_to(tmp_path / "missing-target", target_is_directory=True)
+    with pytest.raises((FileExistsError, ValueError), match="symlink|overwrite"):
+        sf.validate_new_root(dangling)
 
 
 def test_feasibility_failed_terminal_binds_manifest(tmp_path: Path) -> None:
@@ -1141,12 +1226,15 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     cells = _passing_feasibility_cells()
+    monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
     artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
     artifact_parent.mkdir(parents=True)
     monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
 
     selected_root = artifact_parent / "feasibility_001"
-    manifest, terminal = _write_feasibility_root(selected_root, "DONE", cells)
+    manifest, terminal = _write_feasibility_root(selected_root, "DONE", cells, lightweight=True)
     selection = artifact_parent / "feasibility_selection_001.json"
     _write_selection(selection, selected_root, manifest, [], [], cells=cells)
     inventory_files = [selected_root / row["path"] for row in json.loads(manifest.read_text())["file_inventory"]]
@@ -1283,6 +1371,33 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     cells = _passing_feasibility_cells()
+    original_write_feasibility_root = _write_feasibility_root
+
+    def lightweight_write_feasibility_root(
+        root: Path,
+        status: str,
+        cells: list[dict[str, object]],
+        predecessor_roots: tuple[Path, ...] = (),
+        predecessor_selections: tuple[Path, ...] = (),
+    ) -> tuple[Path, Path]:
+        return original_write_feasibility_root(
+            root,
+            status,
+            cells,
+            predecessor_roots,
+            predecessor_selections,
+            lightweight=True,
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_write_feasibility_root", lightweight_write_feasibility_root)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "save_checkpoint",
+        lambda path, model, metadata: Path(path).write_bytes(b"checkpoint"),
+    )
+    monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
 
     def set_parent(name: str) -> Path:
         parent = tmp_path / name / "artifacts" / "phase8_toy_lm_bridge"
@@ -1353,30 +1468,6 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     with pytest.raises(ValueError, match="file_inventory|checkpoint"):
         sf.validate_selection_record(bad_selection)
 
-    parent = set_parent("bad_generation_counts")
-    bad_root = parent / "feasibility_001"
-    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
-    generation = bad_root / str(cells[0]["generations_path"])
-    generation.write_text(json.dumps({"exact_match": True, "raw_token_ids": [1, 2]}) + "\n")
-    sf.write_terminal(bad_root, "DONE", cells, (), (), source_snapshot=_source_snapshot())
-    bad_manifest = bad_root / "manifest.json"
-    bad_selection = parent / "feasibility_selection_001.json"
-    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
-    with pytest.raises(ValueError, match="Generation artifact"):
-        sf.validate_selection_record(bad_selection)
-
-    parent = set_parent("bad_checkpoint_contents")
-    bad_root = parent / "feasibility_001"
-    bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
-    checkpoint = bad_root / str(cells[0]["checkpoint_path"])
-    checkpoint.write_bytes(b"not-a-checkpoint")
-    sf.write_terminal(bad_root, "DONE", cells, (), (), source_snapshot=_source_snapshot())
-    bad_manifest = bad_root / "manifest.json"
-    bad_selection = parent / "feasibility_selection_001.json"
-    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
-    with pytest.raises(ValueError, match="Checkpoint artifact"):
-        sf.validate_selection_record(bad_selection)
-
     parent = set_parent("symlink_inventory")
     bad_root = parent / "feasibility_001"
     bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
@@ -1445,6 +1536,27 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     with pytest.raises(ValueError, match="source_provenance"):
         sf.validate_selection_record(bad_selection)
 
+    parent = set_parent("dirty_source_provenance")
+    bad_root = parent / "feasibility_001"
+    _write_feasibility_root(bad_root, "DONE", cells)
+    sf.write_terminal(
+        bad_root,
+        "DONE",
+        cells,
+        (),
+        (),
+        source_snapshot=sf.SourceSnapshot(
+            commit=_test_source_commit(),
+            status_lines=(" M scripts/phase8_sequence_feasibility.py",),
+            ignored_inputs=(),
+        ),
+    )
+    bad_manifest = bad_root / "manifest.json"
+    bad_selection = parent / "feasibility_selection_001.json"
+    _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
+    with pytest.raises(ValueError, match="tracked or staged"):
+        sf.validate_selection_record(bad_selection)
+
     parent = set_parent("missing_source_commit")
     bad_root = parent / "feasibility_001"
     _write_feasibility_root(bad_root, "DONE", cells)
@@ -1481,6 +1593,16 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
     with pytest.raises(ValueError, match="pass_threshold"):
         sf.validate_selection_record(bad_selection)
+
+    parent = set_parent("failed_terminal_error_mismatch")
+    failed_root = parent / "feasibility_001"
+    _write_feasibility_root(failed_root, "FAILED", [])
+    failed_terminal = failed_root / "FAILED.json"
+    failed_data = json.loads(failed_terminal.read_text())
+    failed_data["error"] = "contradictory failure"
+    failed_terminal.write_text(json.dumps(failed_data, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="FAILED terminal error"):
+        sf.terminal_binding(failed_root)
 
     parent = set_parent("bad_parameter_count")
     bad_cells = [dict(cell) for cell in cells]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 from functools import lru_cache
 from hashlib import sha256
 import json
@@ -202,9 +203,13 @@ def reject_scientific_markers(text: str) -> None:
     for marker in SCIENTIFIC_PROMPT_SNIPPETS:
         if marker in text:
             raise ValueError(f"Feasibility text contains forbidden Phase 8 scientific prompt marker: {marker!r}.")
+    lower_text = text.casefold()
     for marker in phase8_scientific_identity_markers():
-        if marker in text:
+        if marker.casefold() in lower_text:
             raise ValueError(f"Feasibility text contains forbidden Phase 8 scientific identity marker: {marker!r}.")
+    for pattern in phase8_scientific_prompt_patterns():
+        if pattern.fullmatch(text):
+            raise ValueError("Feasibility text matches a forbidden Phase 8 scientific prompt template.")
 
 
 def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
@@ -304,6 +309,47 @@ def phase8_scientific_identity_markers() -> frozenset[str]:
     for probe in cg.build_evaluation_probe_pack():
         _add_phase8_record_markers(markers, probe)
     return frozenset(markers)
+
+
+@lru_cache(maxsize=1)
+def phase8_scientific_prompt_patterns() -> tuple[re.Pattern[str], ...]:
+    grouped: dict[tuple[str, str, str | None], list[str]] = {}
+    for task_id in cg.TRAINING_TASK_ORDER:
+        for record in cg.build_split_records("training", task_id, cg.CORPUS_RECORDS_PER_FAMILY["large"]):
+            grouped.setdefault((record.task_id, record.template_id, record.style), []).append(record.prompt)
+    for probe in cg.build_evaluation_probe_pack():
+        grouped.setdefault((probe.task_id, probe.template_id, probe.style), []).append(probe.prompt)
+    patterns: list[re.Pattern[str]] = []
+    for prompts in grouped.values():
+        unique_prompts = sorted(set(prompts))
+        if len(unique_prompts) < 2:
+            continue
+        pattern = generalized_prompt_pattern(unique_prompts[0], unique_prompts[-1])
+        if pattern is not None:
+            patterns.append(pattern)
+    return tuple(patterns)
+
+
+def generalized_prompt_pattern(left: str, right: str) -> re.Pattern[str] | None:
+    left_tokens = re.findall(r"\s+|[^\s]+", left)
+    right_tokens = re.findall(r"\s+|[^\s]+", right)
+    matcher = SequenceMatcher(a=left_tokens, b=right_tokens, autojunk=False)
+    parts: list[str] = []
+    last_left = 0
+    last_right = 0
+    literal_chars = 0
+    for block in matcher.get_matching_blocks():
+        if block.a > last_left or block.b > last_right:
+            parts.append(".+?")
+        if block.size:
+            literal = "".join(left_tokens[block.a : block.a + block.size])
+            literal_chars += len(literal.strip())
+            parts.append(re.escape(literal))
+        last_left = block.a + block.size
+        last_right = block.b + block.size
+    if literal_chars < 24 or not parts:
+        return None
+    return re.compile("".join(parts), re.IGNORECASE)
 
 
 def _add_phase8_record_markers(markers: set[str], record: object) -> None:
@@ -607,17 +653,23 @@ def validate_new_root(
     require_canonical_path_string(str(root), "root", ROOT_RE)
     require_artifact_location(root, "root", ROOT_RE)
     root_number = feasibility_root_number(root)
-    previous_numbers = [feasibility_root_number(path) for path in predecessor_roots]
+    direct_numbers: list[int] = []
     for predecessor_root in predecessor_roots:
+        predecessor_number = feasibility_root_number(predecessor_root)
+        if direct_numbers and predecessor_number <= direct_numbers[-1]:
+            raise ValueError("Feasibility predecessor roots must be in strictly ascending root-number order.")
+        direct_numbers.append(predecessor_number)
         terminal_binding(predecessor_root)
+    selected_numbers: list[int] = []
     for selection in predecessor_selections:
         data = validate_selection_record(selection)
-        previous_numbers.append(feasibility_root_number(Path(str(data["selected_root"]))))
+        selected_numbers.append(feasibility_root_number(Path(str(data["selected_root"]))))
     expected_previous_numbers = list(range(1, root_number))
-    if previous_numbers != expected_previous_numbers:
+    observed_numbers = sorted({*direct_numbers, *selected_numbers})
+    if observed_numbers != expected_previous_numbers:
         raise ValueError(
             f"Feasibility predecessor roots must be complete and continuous before {root.name!r}; "
-            f"expected {expected_previous_numbers!r}, got {previous_numbers!r}."
+            f"expected {expected_previous_numbers!r}, got {observed_numbers!r}."
         )
     expected_number = len(expected_previous_numbers) + 1
     if root_number != expected_number:
@@ -625,7 +677,7 @@ def validate_new_root(
             f"Feasibility root must use the next numbered root feasibility_{expected_number:03d}; "
             f"got {root.name!r}."
         )
-    if root.exists():
+    if root.exists() or root.is_symlink():
         raise FileExistsError(f"Refusing to overwrite existing feasibility root: {root}")
 
 
@@ -656,7 +708,7 @@ def reject_existing_symlink_component(path: Path, field_name: str) -> None:
     current = Path(absolute.anchor)
     for part in absolute.parts[1:]:
         current = current / part
-        if current.exists() and current.is_symlink():
+        if current.is_symlink():
             raise ValueError(f"{field_name} must not contain symlink path components.")
 
 
@@ -984,6 +1036,10 @@ def load_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, st
         raise ValueError("Terminal marker manifest_path must be manifest.json.")
     if terminal_data.get("pass_threshold") != PASS_THRESHOLD:
         raise ValueError("Terminal marker pass_threshold does not match the frozen threshold.")
+    if terminal.stem == "DONE" and "error" in terminal_data:
+        raise ValueError("DONE terminal marker must not contain an error field.")
+    if terminal.stem == "FAILED" and terminal_data.get("error") != manifest_data.get("failure"):
+        raise ValueError("FAILED terminal error does not match manifest failure.")
     return terminal, terminal_data, manifest, manifest_sha
 
 
@@ -1045,8 +1101,10 @@ def validate_feasibility_root_artifacts(root: Path, *, require_passing: bool) ->
             raise ValueError("Feasibility cell generations artifact is missing.")
         if not (root / checkpoint_path).is_file():
             raise ValueError("Feasibility cell checkpoint artifact is missing.")
-        validate_generation_artifact(root / generations_path, cell)
+        generation_rows = validate_generation_artifact(root / generations_path, cell)
         validate_checkpoint_artifact(root / checkpoint_path, cell)
+        if require_passing:
+            validate_checkpoint_replays_generations(root / checkpoint_path, cell, generation_rows)
 
 
 def validate_cell_artifact_schema(cells: object, *, require_pass: bool) -> None:
@@ -1129,10 +1187,13 @@ def validate_summary_aggregates(
             raise ValueError(f"Summary aggregate {key} does not match manifest cells.")
 
 
-def validate_generation_artifact(path: Path, cell: dict[str, object]) -> None:
+def validate_generation_artifact(path: Path, cell: dict[str, object]) -> list[dict[str, object]]:
+    family = require_exact_str(cell.get("family"), "family")
     expected_count = require_exact_int(cell.get("eval_count"), "eval_count")
     expected_matches = require_exact_int(cell.get("exact_matches"), "exact_matches")
     rows: list[dict[str, object]] = []
+    eval_records = grouped_records()[family]["eval"]
+    tokenizer = ByteTokenizer()
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             stripped = line.strip()
@@ -1147,12 +1208,51 @@ def validate_generation_artifact(path: Path, cell: dict[str, object]) -> None:
             raw_token_ids = row.get("raw_token_ids")
             if not isinstance(raw_token_ids, list) or not all(type(token) is int for token in raw_token_ids):
                 raise ValueError("Generation artifact rows must retain raw_token_ids as JSON integers.")
+            if len(rows) >= len(eval_records):
+                raise ValueError("Generation artifact contains more rows than the frozen evaluation split.")
+            record = eval_records[len(rows)]
+            if row.get("family") != record.family:
+                raise ValueError("Generation artifact row family does not match the frozen evaluation record.")
+            if row.get("index") != record.index:
+                raise ValueError("Generation artifact row index does not match the frozen evaluation record.")
+            if row.get("template_id") != record.template_id:
+                raise ValueError("Generation artifact row template_id does not match the frozen evaluation record.")
+            if row.get("operand_id") != record.operand_id:
+                raise ValueError("Generation artifact row operand_id does not match the frozen evaluation record.")
+            if row.get("prompt") != record.prompt:
+                raise ValueError("Generation artifact row prompt does not match the frozen evaluation record.")
+            if row.get("expected") != record.answer:
+                raise ValueError("Generation artifact row expected answer does not match the frozen evaluation record.")
+            decoded_error = None
+            try:
+                decoded = tokenizer.decode_generated_response(raw_token_ids)
+            except (UnicodeDecodeError, ValueError) as exc:
+                decoded = None
+                decoded_error = f"{type(exc).__name__}: {exc}"
+            invalid_generation = row.get("invalid_generation")
+            if type(invalid_generation) is not bool:
+                raise ValueError("Generation artifact invalid_generation values must be JSON booleans.")
+            if invalid_generation != (decoded_error is not None):
+                raise ValueError("Generation artifact invalid_generation does not match raw_token_ids decoding.")
+            if decoded_error is not None:
+                if row.get("generated") is not None:
+                    raise ValueError("Invalid generation rows must record generated as null.")
+                if not isinstance(row.get("generation_error"), str):
+                    raise ValueError("Invalid generation rows must retain a generation_error string.")
+            else:
+                if row.get("generated") != decoded:
+                    raise ValueError("Generation artifact generated text does not match raw_token_ids decoding.")
+                if row.get("generation_error") is not None:
+                    raise ValueError("Valid generation rows must record generation_error as null.")
+            if exact_match != (decoded == record.answer):
+                raise ValueError("Generation artifact exact_match does not match generated-vs-expected semantics.")
             rows.append(row)
     if len(rows) != expected_count:
         raise ValueError("Generation artifact row count does not match cell eval_count.")
     actual_matches = sum(1 for row in rows if row["exact_match"] is True)
     if actual_matches != expected_matches:
         raise ValueError("Generation artifact exact_match count does not match cell exact_matches.")
+    return rows
 
 
 def validate_checkpoint_artifact(path: Path, cell: dict[str, object]) -> None:
@@ -1161,7 +1261,7 @@ def validate_checkpoint_artifact(path: Path, cell: dict[str, object]) -> None:
     seed = require_exact_int(cell.get("seed"), "seed")
     parameter_count = require_exact_int(cell.get("parameter_count"), "parameter_count")
     try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     except Exception as exc:
         raise ValueError(f"Checkpoint artifact is not a loadable PyTorch checkpoint: {exc}") from exc
     if not isinstance(checkpoint, dict):
@@ -1193,6 +1293,31 @@ def validate_checkpoint_artifact(path: Path, cell: dict[str, object]) -> None:
         tensor = state[key]
         if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != tuple(expected_tensor.shape):
             raise ValueError("Checkpoint state_dict tensor shapes do not match the frozen model.")
+
+
+def validate_checkpoint_replays_generations(
+    path: Path,
+    cell: dict[str, object],
+    generation_rows: Sequence[dict[str, object]],
+) -> None:
+    family = require_exact_str(cell.get("family"), "family")
+    model_size = require_exact_str(cell.get("model_size"), "model_size")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    model = build_model(model_size)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+    tokenizer = ByteTokenizer()
+    records = grouped_records()[family]["eval"]
+    with torch.no_grad():
+        for record, row in zip(records, generation_rows, strict=True):
+            prefix = tokenizer.encode_evaluation_prefix(record.prompt)
+            prefix_tensor = torch.tensor([prefix], dtype=torch.long, device=device)
+            generated = model.greedy_decode(prefix_tensor)
+            full_ids = [int(token) for token in generated[0].detach().cpu().tolist()]
+            if row.get("raw_token_ids") != full_ids:
+                raise ValueError("Checkpoint replay does not reproduce retained generation raw_token_ids.")
 
 
 def selection_binding(path: Path) -> dict[str, object]:
@@ -1541,6 +1666,9 @@ def validate_source_provenance(value: object, source_commit: str) -> None:
     status_lines = value.get("status_lines")
     if not isinstance(status_lines, list) or not all(isinstance(line, str) for line in status_lines):
         raise ValueError("Manifest source_provenance status_lines must be a JSON string list.")
+    for line in status_lines:
+        if not line.startswith("?? "):
+            raise ValueError("Manifest source_provenance must not declare tracked or staged source changes.")
     ignored_inputs = value.get("ignored_inputs")
     if not isinstance(ignored_inputs, list):
         raise ValueError("Manifest source_provenance ignored_inputs must be a JSON list.")

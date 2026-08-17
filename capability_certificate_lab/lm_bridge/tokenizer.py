@@ -151,6 +151,8 @@ class ByteTokenizer:
         sep_index = unpadded.index(SEP_ID)
         if sep_index == 0:
             raise ValueError("SEP must follow prompt bytes.")
+        if mode == "generated" and len(unpadded[sep_index + 1 :]) > MAX_GENERATED_TOKENS:
+            raise ValueError("Generated response exceeds the fixed 64-token completion window.")
 
         eos_count = unpadded.count(EOS_ID)
         if mode == "training":
