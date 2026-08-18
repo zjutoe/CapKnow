@@ -938,21 +938,33 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
                 for value in generated_values
             )
         if family == "boolean_json":
-            number_sets = {}
+            operand_sets = {}
             for split_name in ("train", "eval"):
-                split_numbers = {
-                    number
+                split_operands = [
+                    match.group(0).casefold()
                     for record in splits[split_name]
-                    for statement in sf.parsed_boolean_statements(record.prompt)
-                    for number in (statement[0], statement[2])
-                }
-                assert min(split_numbers) >= 100
-                assert max(split_numbers) < 1000
-                number_sets[split_name] = split_numbers
+                    for match in sf.BOOLEAN_OPERAND_RE.finditer(record.prompt)
+                ]
+                assert len(split_operands) == len(splits[split_name])
+                assert all(re.fullmatch(r"(?:affirm|reject)-[0-9a-f]{16}", operand) for operand in split_operands)
+                assert {operand.split("-", 1)[0] for operand in split_operands} == set(sf.BOOLEAN_LABELS)
+                assert len({len(operand.encode("utf-8")) for operand in split_operands}) == 1
+                assert not any(
+                    phrase in record.prompt
+                    for record in splits[split_name]
+                    for phrase in ("is at most", "is greater than", "comparison")
+                )
+                operand_sets[split_name] = set(split_operands)
                 for template_id in {record.template_id for record in splits[split_name]}:
                     template_answers = [record.answer for record in splits[split_name] if record.template_id == template_id]
+                    template_labels = [
+                        sf.parsed_boolean_operands(record.prompt)[0][0]
+                        for record in splits[split_name]
+                        if record.template_id == template_id
+                    ]
                     assert template_answers.count("true") == template_answers.count("false")
-            assert number_sets["train"] & number_sets["eval"]
+                    assert template_labels.count("affirm") == template_labels.count("reject")
+            assert operand_sets["train"].isdisjoint(operand_sets["eval"])
         if family == "array_json":
             items = [
                 value
@@ -1179,6 +1191,80 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
         sf.validate_feasibility_records(tuple(memory_search_contaminated_records))
 
 
+def test_feasibility_named_value_template_target_balance_and_coupled_tamper_rejection() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    records = list(sf.build_family_records("named_value_json"))
+
+    for split_name, expected_count in (("train", sf.TRAIN_RECORDS_PER_FAMILY), ("eval", sf.EVAL_RECORDS_PER_FAMILY)):
+        split_records = [record for record in records if record.split == split_name]
+        counts: dict[tuple[str, str], int] = {}
+        for record in split_records:
+            key = (record.template_id, sf.named_value_target_key(record))
+            counts[key] = counts.get(key, 0) + 1
+        assert len(counts) == 16
+        assert set(counts.values()) == {expected_count // 16}
+
+    coupled_records = []
+    for record in records:
+        fields = {key.casefold(): value.casefold() for key, value in sf.NAMED_FIELD_RE.findall(record.prompt)}
+        target = sf.NAMED_VALUE_KEYS[record.index % len(sf.NAMED_VALUE_KEYS)]
+        prompt = re.sub(
+            r"\b(key|name)\s+(red|blue|green|silver)\b",
+            lambda match: f"{match.group(1)} {target}",
+            record.prompt,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        coupled_records.append(
+            sf.FeasibilityRecord(
+                **{
+                    **record.__dict__,
+                    "prompt": prompt,
+                    "answer": sf.compact_json(fields[target]),
+                }
+            )
+        )
+
+    with pytest.raises(ValueError, match="template×target-key coverage"):
+        sf.validate_feasibility_records(tuple(coupled_records))
+
+
+def test_feasibility_array_template_count_balance_and_coupled_tamper_rejection() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    records = list(sf.build_family_records("array_json"))
+
+    for split_name, expected_count in (("train", sf.TRAIN_RECORDS_PER_FAMILY), ("eval", sf.EVAL_RECORDS_PER_FAMILY)):
+        split_records = [record for record in records if record.split == split_name]
+        counts: dict[tuple[str, int], int] = {}
+        for record in split_records:
+            key = (record.template_id, sf.array_item_count(record))
+            counts[key] = counts.get(key, 0) + 1
+        assert len(counts) == 16
+        assert set(counts.values()) == {expected_count // 16}
+
+    coupled_records = []
+    for record in records:
+        target_count = 1 + record.index % 4
+        items = [value.casefold() for value in sf.ARRAY_ITEM_RE.findall(record.prompt)[:target_count]]
+        offset = 0x70000000 if record.split == "train" else 0x90000000
+        while len(items) < target_count:
+            items.append(f"q{offset + record.index * 4 + len(items):08x}")
+        surface = sf.PROMPT_SURFACES["array_json"][record.split][record.index % 4]
+        coupled_records.append(
+            sf.FeasibilityRecord(
+                **{
+                    **record.__dict__,
+                    "prompt": surface.format(a=" | ".join(items)),
+                    "answer": sf.compact_json(items),
+                    "semantic_values": (*items, sf.compact_json(items)),
+                }
+            )
+        )
+
+    with pytest.raises(ValueError, match="template×item-count coverage"):
+        sf.validate_feasibility_records(tuple(coupled_records))
+
+
 def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     records = list(sf.build_family_records("named_value_json"))
@@ -1200,18 +1286,18 @@ def test_feasibility_semantic_train_eval_overlap_is_rejected_from_raw_prompt() -
         sf.validate_feasibility_records(tuple(records))
 
 
-def test_feasibility_boolean_statement_overlap_is_rejected_from_raw_prompt() -> None:
+def test_feasibility_boolean_operand_overlap_is_rejected_from_raw_prompt() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     records = list(sf.build_family_records("boolean_json"))
-    train_statement = sf.BOOLEAN_STATEMENT_RE.search(
+    train_operand = sf.BOOLEAN_OPERAND_RE.search(
         next(record.prompt for record in records if record.split == "train")
     )
-    assert train_statement is not None
+    assert train_operand is not None
     eval_index = next(index for index, record in enumerate(records) if record.split == "eval")
     records[eval_index] = sf.FeasibilityRecord(
         **{
             **records[eval_index].__dict__,
-            "prompt": f"{records[eval_index].prompt} repeated statement {train_statement.group(0)}",
+            "prompt": f"{records[eval_index].prompt} repeated mark {train_operand.group(0)}",
             "semantic_values": (),
         }
     )
@@ -1352,7 +1438,10 @@ def test_feasibility_named_and_array_semantic_overlap_is_case_insensitive() -> N
         index=0,
         template_id="named-train-surface",
         operand_id="named-train-value",
-        prompt="choose red-deadbeef from fields red=red-deadbeef",
+        prompt=(
+            "choose key red; fields "
+            "red=red-deadbeef; blue=blue-00000000; green=green-00000000; silver=silver-00000000"
+        ),
         answer=json.dumps("red-deadbeef"),
     )
     named_eval = sf.FeasibilityRecord(
@@ -1361,7 +1450,10 @@ def test_feasibility_named_and_array_semantic_overlap_is_case_insensitive() -> N
         index=0,
         template_id="named-eval-surface",
         operand_id="named-eval-value",
-        prompt="choose RED-DEADBEEF from fields RED=RED-DEADBEEF",
+        prompt=(
+            "select key RED; fields "
+            "RED=RED-DEADBEEF; BLUE=BLUE-00000000; GREEN=GREEN-00000000; SILVER=SILVER-00000000"
+        ),
         answer=json.dumps("RED-DEADBEEF"),
     )
     assert "red-deadbeef" in sf.semantic_values_for_record(named_eval)

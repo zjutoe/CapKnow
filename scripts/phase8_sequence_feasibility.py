@@ -61,7 +61,10 @@ NAMED_FIELD_RE = re.compile(
     re.IGNORECASE,
 )
 ARRAY_ITEM_RE = re.compile(r"\bq[0-9a-f]{8}\b", re.IGNORECASE)
-BOOLEAN_STATEMENT_RE = re.compile(r"\b([0-9]{3})\s+(is at most|is greater than)\s+([0-9]{3})\b", re.IGNORECASE)
+BOOLEAN_LABELS = ("affirm", "reject")
+BOOLEAN_LABEL_TRUTH = {"affirm": True, "reject": False}
+BOOLEAN_OPERAND_RE = re.compile(r"\b(affirm|reject)-([0-9a-f]{16})\b", re.IGNORECASE)
+NAMED_TARGET_RE = re.compile(r"\b(?:key|name)\s+(red|blue|green|silver)\b", re.IGNORECASE)
 PROMPT_PLACEHOLDER_RE = re.compile(r"\{[abc]\}")
 ACCEPTED_INDEPENDENT_REVIEW_VERDICT = "ACCEPT"
 
@@ -141,16 +144,16 @@ PROMPT_SURFACES: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "boolean_json": {
         "train": (
-            "Reply JSON bool for this comparison: {a} {b} {c}.",
-            "Convert this comparison to JSON bool: {a} {b} {c}.",
-            "For {a} {b} {c}, write only JSON bool.",
-            "Check {a} {b} {c} and return JSON bool.",
+            "Reply JSON bool for lexical mark: {a}.",
+            "Convert lexical mark to JSON bool: {a}.",
+            "For lexical mark {a}, write JSON bool.",
+            "Check lexical mark {a} and return JSON bool.",
         ),
         "eval": (
-            "Write JSON bool for this comparison: {a} {b} {c}.",
-            "Produce this comparison as JSON bool: {a} {b} {c}.",
-            "For {a} {b} {c}, print only JSON bool.",
-            "Judge {a} {b} {c} and return JSON bool.",
+            "Write JSON bool for lexical mark: {a}.",
+            "Produce lexical mark as JSON bool: {a}.",
+            "For lexical mark {a}, print JSON bool.",
+            "Judge lexical mark {a} and return JSON bool.",
         ),
     },
     "array_json": {
@@ -274,6 +277,8 @@ def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
         raise ValueError(f"Feasibility train/evaluation semantic values must be disjoint: {sorted(overlap)!r}.")
     validate_paired_length_profiles(records)
     validate_boolean_label_contract(records)
+    validate_named_value_contract(records)
+    validate_array_count_contract(records)
 
 
 def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
@@ -303,28 +308,29 @@ def semantic_values_for_record(record: FeasibilityRecord) -> frozenset[str]:
         values.add("array:" + compact_json(normalized))
         values.update(value.casefold() for value in ARRAY_ITEM_RE.findall(prompt_and_answer))
     elif record.family == "boolean_json":
-        statements = parsed_boolean_statements(record.prompt)
-        if not statements:
-            raise ValueError("boolean_json prompts must contain a supported complete comparison statement.")
-        values.update(f"boolean:{left}:{relation}:{right}" for left, relation, right in statements)
+        operands = parsed_boolean_operands(record.prompt)
+        if not operands:
+            raise ValueError("boolean_json prompts must contain a supported lexical Boolean operand.")
+        values.update(f"boolean:{label}:{suffix}" for label, suffix in operands)
     else:
         raise ValueError(f"Unknown feasibility family: {record.family!r}.")
     return frozenset(values)
 
 
-def parsed_boolean_statements(text: str) -> tuple[tuple[int, str, int], ...]:
+def parsed_boolean_operands(text: str) -> tuple[tuple[str, str], ...]:
     return tuple(
-        (int(match.group(1)), match.group(2).casefold(), int(match.group(3)))
-        for match in BOOLEAN_STATEMENT_RE.finditer(text)
+        (match.group(1).casefold(), match.group(2).casefold())
+        for match in BOOLEAN_OPERAND_RE.finditer(text)
     )
 
 
-def boolean_statement_truth(left: int, relation: str, right: int) -> bool:
-    if relation == "is at most":
-        return left <= right
-    if relation == "is greater than":
-        return left > right
-    raise ValueError(f"Unsupported boolean_json relation: {relation!r}.")
+def boolean_operand_truth(label: str, suffix: str) -> bool:
+    if not re.fullmatch(r"[0-9a-f]{16}", suffix):
+        raise ValueError(f"Unsupported boolean_json suffix: {suffix!r}.")
+    try:
+        return BOOLEAN_LABEL_TRUTH[label]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported boolean_json label: {label!r}.") from exc
 
 
 def validate_paired_length_profiles(records: Sequence[FeasibilityRecord]) -> None:
@@ -349,12 +355,12 @@ def validate_boolean_label_contract(records: Sequence[FeasibilityRecord]) -> Non
     if not boolean_records:
         return
     for record in boolean_records:
-        statements = parsed_boolean_statements(record.prompt)
-        if len(statements) != 1:
-            raise ValueError("boolean_json prompts must contain exactly one complete comparison statement.")
-        expected_answer = "true" if boolean_statement_truth(*statements[0]) else "false"
+        operands = parsed_boolean_operands(record.prompt)
+        if len(operands) != 1:
+            raise ValueError("boolean_json prompts must contain exactly one lexical Boolean operand.")
+        expected_answer = "true" if boolean_operand_truth(*operands[0]) else "false"
         if record.answer != expected_answer:
-            raise ValueError("boolean_json answer must match deterministic comparison truth.")
+            raise ValueError("boolean_json answer must match deterministic lexical label truth.")
     for split, expected_count in (("train", TRAIN_RECORDS_PER_FAMILY), ("eval", EVAL_RECORDS_PER_FAMILY)):
         split_records = tuple(record for record in boolean_records if record.split == split)
         if len(split_records) != expected_count:
@@ -371,6 +377,87 @@ def validate_boolean_label_contract(records: Sequence[FeasibilityRecord]) -> Non
             false_count = sum(record.answer == "false" for record in template_records)
             if true_count != false_count:
                 raise ValueError("boolean_json truth labels must be balanced within each template.")
+
+
+def validate_named_value_contract(records: Sequence[FeasibilityRecord]) -> None:
+    named_records = tuple(record for record in records if record.family == "named_value_json")
+    if not named_records:
+        return
+    target_by_record = {record: named_value_target_key(record) for record in named_records}
+    for split, expected_count in (("train", TRAIN_RECORDS_PER_FAMILY), ("eval", EVAL_RECORDS_PER_FAMILY)):
+        split_records = tuple(record for record in named_records if record.split == split)
+        if len(split_records) != expected_count:
+            continue
+        template_ids = tuple(sorted({record.template_id for record in split_records}))
+        if len(template_ids) != 4:
+            raise ValueError("named_value_json must use four templates per split.")
+        counts: dict[tuple[str, str], int] = {
+            (template_id, target): 0
+            for template_id in template_ids
+            for target in NAMED_VALUE_KEYS
+        }
+        for record in split_records:
+            counts[(record.template_id, target_by_record[record])] += 1
+        expected_cell_count = expected_count // (len(template_ids) * len(NAMED_VALUE_KEYS))
+        if any(count != expected_cell_count for count in counts.values()):
+            raise ValueError("named_value_json template×target-key coverage must be exactly balanced in full splits.")
+
+
+def named_value_target_key(record: FeasibilityRecord) -> str:
+    decoded = json.loads(record.answer)
+    if not isinstance(decoded, str):
+        raise ValueError("named_value_json answers must be JSON strings.")
+    target_matches = tuple(match.casefold() for match in NAMED_TARGET_RE.findall(record.prompt))
+    if len(target_matches) != 1:
+        raise ValueError("named_value_json prompts must contain exactly one target key.")
+    target = target_matches[0]
+    roster = tuple((key.casefold(), value.casefold()) for key, value in NAMED_FIELD_RE.findall(record.prompt))
+    if tuple(key for key, _value in roster) != NAMED_VALUE_KEYS:
+        raise ValueError("named_value_json roster must list red, blue, green, silver in order.")
+    fields = dict(roster)
+    for key, value in roster:
+        if not value.startswith(f"{key}-"):
+            raise ValueError("named_value_json field values must preserve their key prefix.")
+    if decoded.casefold() != fields[target]:
+        raise ValueError("named_value_json answer must match the requested target key.")
+    return target
+
+
+def validate_array_count_contract(records: Sequence[FeasibilityRecord]) -> None:
+    array_records = tuple(record for record in records if record.family == "array_json")
+    if not array_records:
+        return
+    count_by_record = {record: array_item_count(record) for record in array_records}
+    for split, expected_count in (("train", TRAIN_RECORDS_PER_FAMILY), ("eval", EVAL_RECORDS_PER_FAMILY)):
+        split_records = tuple(record for record in array_records if record.split == split)
+        if len(split_records) != expected_count:
+            continue
+        template_ids = tuple(sorted({record.template_id for record in split_records}))
+        if len(template_ids) != 4:
+            raise ValueError("array_json must use four templates per split.")
+        counts: dict[tuple[str, int], int] = {
+            (template_id, item_count): 0
+            for template_id in template_ids
+            for item_count in range(1, 5)
+        }
+        for record in split_records:
+            counts[(record.template_id, count_by_record[record])] += 1
+        expected_cell_count = expected_count // (len(template_ids) * 4)
+        if any(count != expected_cell_count for count in counts.values()):
+            raise ValueError("array_json template×item-count coverage must be exactly balanced in full splits.")
+
+
+def array_item_count(record: FeasibilityRecord) -> int:
+    decoded = json.loads(record.answer)
+    if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
+        raise ValueError("array_json answers must be JSON arrays of strings.")
+    answer_items = tuple(item.casefold() for item in decoded)
+    if len(answer_items) not in range(1, 5):
+        raise ValueError("array_json answers must contain one to four items.")
+    prompt_items = tuple(value.casefold() for value in ARRAY_ITEM_RE.findall(record.prompt))
+    if answer_items != prompt_items:
+        raise ValueError("array_json prompt items must exactly match answer items.")
+    return len(answer_items)
 
 
 def validate_prompt_surface_contract(family: str) -> None:
@@ -611,19 +698,19 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
         semantic_values = (value,)
     elif family == "named_value_json":
         keys = NAMED_VALUE_KEYS_BY_SPLIT[split]
-        target = keys[index % len(keys)]
+        target = keys[(index // 4) % len(keys)]
         fields = {key: f"{key}-{rng.getrandbits(32):08x}" for key in keys}
         field_text = "; ".join(f"{key}={fields[key]}" for key in keys)
         prompt = surface.format(a=target, b=field_text)
         answer = compact_json(fields[target])
         semantic_values = tuple(fields[key] for key in keys)
     elif family == "boolean_json":
-        left, relation, right, truth = make_boolean_statement(rng, index)
-        prompt = surface.format(a=left, b=relation, c=right)
+        operand, truth = make_boolean_operand(rng, operand_number, index)
+        prompt = surface.format(a=operand)
         answer = "true" if truth else "false"
-        semantic_values = (f"{left} {relation} {right}",)
+        semantic_values = (operand,)
     elif family == "array_json":
-        items = [f"q{rng.getrandbits(32):08x}" for _ in range(1 + index % 4)]
+        items = [f"q{rng.getrandbits(32):08x}" for _ in range(1 + (index // 4) % 4)]
         prompt = surface.format(a=" | ".join(items))
         answer = compact_json(items)
         semantic_values = (*items, answer)
@@ -641,17 +728,10 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
     )
 
 
-def make_boolean_statement(rng: random.Random, index: int) -> tuple[int, str, int, bool]:
-    template_position = index // 4
-    truth = template_position % 2 == 0
-    relation = "is at most" if (template_position // 2) % 2 == 0 else "is greater than"
-    low = rng.randrange(100, 900)
-    high = low + rng.randrange(1, 100)
-    if relation == "is at most":
-        left, right = (low, high) if truth else (high, low)
-    else:
-        left, right = (high, low) if truth else (low, high)
-    return left, relation, right, truth
+def make_boolean_operand(rng: random.Random, operand_number: int, index: int) -> tuple[str, bool]:
+    label = BOOLEAN_LABELS[(index // 4) % len(BOOLEAN_LABELS)]
+    suffix = f"{rng.getrandbits(44):011x}{operand_number:05x}"
+    return f"{label}-{suffix}", BOOLEAN_LABEL_TRUTH[label]
 
 
 def grouped_records() -> dict[str, dict[str, tuple[FeasibilityRecord, ...]]]:
