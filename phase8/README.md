@@ -29,7 +29,7 @@ working tree are not valid bindings.
      -> final-source feasibility selection -> resource benchmark/authorization
      -> formal shards
 
-010C feasibility FAIL -> 010C-D1 read-only/fixed-factor diagnostic -> main decision
+010C feasibility FAIL -> 010C-D1 non-selection/fixed-factor diagnostic -> main decision
 ```
 
 The post-010C feasibility decision is an early engineering gate. Because later tasks
