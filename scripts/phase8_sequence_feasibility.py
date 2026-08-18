@@ -354,13 +354,35 @@ def validate_boolean_label_contract(records: Sequence[FeasibilityRecord]) -> Non
     boolean_records = tuple(record for record in records if record.family == "boolean_json")
     if not boolean_records:
         return
+    operand_by_record: dict[FeasibilityRecord, tuple[str, str]] = {}
     for record in boolean_records:
         operands = parsed_boolean_operands(record.prompt)
         if len(operands) != 1:
             raise ValueError("boolean_json prompts must contain exactly one lexical Boolean operand.")
+        operand_by_record[record] = operands[0]
         expected_answer = "true" if boolean_operand_truth(*operands[0]) else "false"
         if record.answer != expected_answer:
             raise ValueError("boolean_json answer must match deterministic lexical label truth.")
+    for split in ("train", "eval"):
+        split_suffixes = [
+            operand_by_record[record][1]
+            for record in boolean_records
+            if record.split == split
+        ]
+        if len(set(split_suffixes)) != len(split_suffixes):
+            raise ValueError("boolean_json suffixes must be unique within each split.")
+    train_suffixes = {
+        operand_by_record[record][1]
+        for record in boolean_records
+        if record.split == "train"
+    }
+    eval_suffixes = {
+        operand_by_record[record][1]
+        for record in boolean_records
+        if record.split == "eval"
+    }
+    if train_suffixes & eval_suffixes:
+        raise ValueError("boolean_json train/evaluation suffixes must be disjoint independent of label.")
     for split, expected_count in (("train", TRAIN_RECORDS_PER_FAMILY), ("eval", EVAL_RECORDS_PER_FAMILY)):
         split_records = tuple(record for record in boolean_records if record.split == split)
         if len(split_records) != expected_count:
@@ -397,7 +419,13 @@ def validate_named_value_contract(records: Sequence[FeasibilityRecord]) -> None:
             for target in NAMED_VALUE_KEYS
         }
         for record in split_records:
-            counts[(record.template_id, target_by_record[record])] += 1
+            target = target_by_record[record]
+            surface_id = bound_prompt_surface_id(
+                record,
+                a=target,
+                b=named_value_field_text(record),
+            )
+            counts[(f"seq_named_value_json_{split}_{surface_id}", target)] += 1
         expected_cell_count = expected_count // (len(template_ids) * len(NAMED_VALUE_KEYS))
         if any(count != expected_cell_count for count in counts.values()):
             raise ValueError("named_value_json template×target-key coverage must be exactly balanced in full splits.")
@@ -423,6 +451,13 @@ def named_value_target_key(record: FeasibilityRecord) -> str:
     return target
 
 
+def named_value_field_text(record: FeasibilityRecord) -> str:
+    roster = tuple((key.casefold(), value.casefold()) for key, value in NAMED_FIELD_RE.findall(record.prompt))
+    if tuple(key for key, _value in roster) != NAMED_VALUE_KEYS:
+        raise ValueError("named_value_json roster must list red, blue, green, silver in order.")
+    return "; ".join(f"{key}={value}" for key, value in roster)
+
+
 def validate_array_count_contract(records: Sequence[FeasibilityRecord]) -> None:
     array_records = tuple(record for record in records if record.family == "array_json")
     if not array_records:
@@ -441,7 +476,10 @@ def validate_array_count_contract(records: Sequence[FeasibilityRecord]) -> None:
             for item_count in range(1, 5)
         }
         for record in split_records:
-            counts[(record.template_id, count_by_record[record])] += 1
+            item_count = count_by_record[record]
+            decoded = json.loads(record.answer)
+            surface_id = bound_prompt_surface_id(record, a=" | ".join(decoded))
+            counts[(f"seq_array_json_{split}_{surface_id}", item_count)] += 1
         expected_cell_count = expected_count // (len(template_ids) * 4)
         if any(count != expected_cell_count for count in counts.values()):
             raise ValueError("array_json template×item-count coverage must be exactly balanced in full splits.")
@@ -458,6 +496,25 @@ def array_item_count(record: FeasibilityRecord) -> int:
     if answer_items != prompt_items:
         raise ValueError("array_json prompt items must exactly match answer items.")
     return len(answer_items)
+
+
+def bound_prompt_surface_id(record: FeasibilityRecord, **format_values: str) -> int:
+    try:
+        surfaces = PROMPT_SURFACES[record.family][record.split]
+    except KeyError as exc:
+        raise ValueError("Feasibility records must use a known family and train/eval split.") from exc
+    matches = tuple(
+        surface_id
+        for surface_id, surface in enumerate(surfaces)
+        if surface.format(**format_values) == record.prompt
+    )
+    if len(matches) != 1:
+        raise ValueError("Feasibility prompt must match exactly one declared prompt surface.")
+    surface_id = matches[0]
+    expected_template_id = f"seq_{record.family}_{record.split}_{surface_id}"
+    if record.template_id != expected_template_id:
+        raise ValueError("Feasibility template_id must identify the actual prompt surface.")
+    return surface_id
 
 
 def validate_prompt_surface_contract(family: str) -> None:

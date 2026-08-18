@@ -939,6 +939,7 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
             )
         if family == "boolean_json":
             operand_sets = {}
+            suffix_sets = {}
             for split_name in ("train", "eval"):
                 split_operands = [
                     match.group(0).casefold()
@@ -955,6 +956,8 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
                     for phrase in ("is at most", "is greater than", "comparison")
                 )
                 operand_sets[split_name] = set(split_operands)
+                suffix_sets[split_name] = {operand.rsplit("-", 1)[1] for operand in split_operands}
+                assert len(suffix_sets[split_name]) == len(split_operands)
                 for template_id in {record.template_id for record in splits[split_name]}:
                     template_answers = [record.answer for record in splits[split_name] if record.template_id == template_id]
                     template_labels = [
@@ -965,6 +968,7 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
                     assert template_answers.count("true") == template_answers.count("false")
                     assert template_labels.count("affirm") == template_labels.count("reject")
             assert operand_sets["train"].isdisjoint(operand_sets["eval"])
+            assert suffix_sets["train"].isdisjoint(suffix_sets["eval"])
         if family == "array_json":
             items = [
                 value
@@ -1204,6 +1208,18 @@ def test_feasibility_named_value_template_target_balance_and_coupled_tamper_reje
         assert len(counts) == 16
         assert set(counts.values()) == {expected_count // 16}
 
+    surface_tampered = []
+    for record in records:
+        target = sf.named_value_target_key(record)
+        prompt = sf.PROMPT_SURFACES["named_value_json"][record.split][0].format(
+            a=target,
+            b=sf.named_value_field_text(record),
+        )
+        surface_tampered.append(sf.FeasibilityRecord(**{**record.__dict__, "prompt": prompt}))
+
+    with pytest.raises(ValueError, match="template_id must identify the actual prompt surface"):
+        sf.validate_feasibility_records(tuple(surface_tampered))
+
     coupled_records = []
     for record in records:
         fields = {key.casefold(): value.casefold() for key, value in sf.NAMED_FIELD_RE.findall(record.prompt)}
@@ -1241,6 +1257,15 @@ def test_feasibility_array_template_count_balance_and_coupled_tamper_rejection()
             counts[key] = counts.get(key, 0) + 1
         assert len(counts) == 16
         assert set(counts.values()) == {expected_count // 16}
+
+    surface_tampered = []
+    for record in records:
+        items = json.loads(record.answer)
+        prompt = sf.PROMPT_SURFACES["array_json"][record.split][0].format(a=" | ".join(items))
+        surface_tampered.append(sf.FeasibilityRecord(**{**record.__dict__, "prompt": prompt}))
+
+    with pytest.raises(ValueError, match="template_id must identify the actual prompt surface"):
+        sf.validate_feasibility_records(tuple(surface_tampered))
 
     coupled_records = []
     for record in records:
@@ -1303,6 +1328,34 @@ def test_feasibility_boolean_operand_overlap_is_rejected_from_raw_prompt() -> No
     )
 
     with pytest.raises(ValueError, match="semantic values"):
+        sf.validate_feasibility_records(tuple(records))
+
+
+def test_feasibility_boolean_suffix_reuse_under_opposite_label_is_rejected() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    records = list(sf.build_family_records("boolean_json"))
+    train_record = next(
+        record
+        for record in records
+        if record.split == "train" and sf.parsed_boolean_operands(record.prompt)[0][0] == "affirm"
+    )
+    train_suffix = sf.parsed_boolean_operands(train_record.prompt)[0][1]
+    eval_index = next(
+        index
+        for index, record in enumerate(records)
+        if record.split == "eval" and sf.parsed_boolean_operands(record.prompt)[0][0] == "reject"
+    )
+    eval_record = records[eval_index]
+    eval_operand = sf.BOOLEAN_OPERAND_RE.search(eval_record.prompt)
+    assert eval_operand is not None
+    records[eval_index] = sf.FeasibilityRecord(
+        **{
+            **eval_record.__dict__,
+            "prompt": eval_record.prompt.replace(eval_operand.group(0), f"reject-{train_suffix}"),
+        }
+    )
+
+    with pytest.raises(ValueError, match="suffixes must be disjoint independent of label"):
         sf.validate_feasibility_records(tuple(records))
 
 
