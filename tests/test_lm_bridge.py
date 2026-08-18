@@ -958,6 +958,15 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
                 operand_sets[split_name] = set(split_operands)
                 suffix_sets[split_name] = {operand.rsplit("-", 1)[1] for operand in split_operands}
                 assert len(suffix_sets[split_name]) == len(split_operands)
+                suffix_tails_by_label = {
+                    label: sorted(
+                        suffix[-1]
+                        for suffix in suffix_sets[split_name]
+                        if any(operand == f"{label}-{suffix}" for operand in split_operands)
+                    )
+                    for label in sf.BOOLEAN_LABELS
+                }
+                assert suffix_tails_by_label["affirm"] == suffix_tails_by_label["reject"]
                 for template_id in {record.template_id for record in splits[split_name]}:
                     template_answers = [record.answer for record in splits[split_name] if record.template_id == template_id]
                     template_labels = [
@@ -1357,6 +1366,25 @@ def test_feasibility_boolean_suffix_reuse_under_opposite_label_is_rejected() -> 
 
     with pytest.raises(ValueError, match="suffixes must be disjoint independent of label"):
         sf.validate_feasibility_records(tuple(records))
+
+
+@pytest.mark.parametrize("family", ("hex_copy", "boolean_json"))
+def test_feasibility_hex_and_boolean_prompt_surface_collapse_is_rejected(family: str) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    records = list(sf.build_family_records(family))
+    tampered = []
+    for record in records:
+        surface = sf.PROMPT_SURFACES[family][record.split][0]
+        if family == "hex_copy":
+            prompt = surface.format(a=record.index % 17, b=record.answer)
+        else:
+            operand = sf.BOOLEAN_OPERAND_RE.search(record.prompt)
+            assert operand is not None
+            prompt = surface.format(a=operand.group(0))
+        tampered.append(sf.FeasibilityRecord(**{**record.__dict__, "prompt": prompt}))
+
+    with pytest.raises(ValueError, match="template_id must identify the actual prompt surface"):
+        sf.validate_feasibility_records(tuple(tampered))
 
 
 def test_evaluate_model_retains_malformed_generations_as_invalid_mismatches() -> None:

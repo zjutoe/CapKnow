@@ -276,6 +276,7 @@ def validate_feasibility_records(records: Sequence[FeasibilityRecord]) -> None:
     if overlap:
         raise ValueError(f"Feasibility train/evaluation semantic values must be disjoint: {sorted(overlap)!r}.")
     validate_paired_length_profiles(records)
+    validate_hex_copy_contract(records)
     validate_boolean_label_contract(records)
     validate_named_value_contract(records)
     validate_array_count_contract(records)
@@ -360,6 +361,7 @@ def validate_boolean_label_contract(records: Sequence[FeasibilityRecord]) -> Non
         if len(operands) != 1:
             raise ValueError("boolean_json prompts must contain exactly one lexical Boolean operand.")
         operand_by_record[record] = operands[0]
+        bound_prompt_surface_id(record, a=f"{operands[0][0]}-{operands[0][1]}")
         expected_answer = "true" if boolean_operand_truth(*operands[0]) else "false"
         if record.answer != expected_answer:
             raise ValueError("boolean_json answer must match deterministic lexical label truth.")
@@ -401,11 +403,32 @@ def validate_boolean_label_contract(records: Sequence[FeasibilityRecord]) -> Non
                 raise ValueError("boolean_json truth labels must be balanced within each template.")
 
 
+def validate_hex_copy_contract(records: Sequence[FeasibilityRecord]) -> None:
+    for record in records:
+        if record.family != "hex_copy":
+            continue
+        prompt_values = tuple(value.casefold() for value in HEX_OPERAND_RE.findall(record.prompt))
+        if len(prompt_values) != 1:
+            raise ValueError("hex_copy prompts must contain exactly one sixteen-digit hex operand.")
+        value = prompt_values[0]
+        if record.answer != value:
+            raise ValueError("hex_copy answer must exactly match the prompt operand.")
+        bound_prompt_surface_id(record, a=str(record.index % 17), b=value)
+
+
 def validate_named_value_contract(records: Sequence[FeasibilityRecord]) -> None:
     named_records = tuple(record for record in records if record.family == "named_value_json")
     if not named_records:
         return
     target_by_record = {record: named_value_target_key(record) for record in named_records}
+    surface_by_record = {
+        record: bound_prompt_surface_id(
+            record,
+            a=target_by_record[record],
+            b=named_value_field_text(record),
+        )
+        for record in named_records
+    }
     for split, expected_count in (("train", TRAIN_RECORDS_PER_FAMILY), ("eval", EVAL_RECORDS_PER_FAMILY)):
         split_records = tuple(record for record in named_records if record.split == split)
         if len(split_records) != expected_count:
@@ -420,11 +443,7 @@ def validate_named_value_contract(records: Sequence[FeasibilityRecord]) -> None:
         }
         for record in split_records:
             target = target_by_record[record]
-            surface_id = bound_prompt_surface_id(
-                record,
-                a=target,
-                b=named_value_field_text(record),
-            )
+            surface_id = surface_by_record[record]
             counts[(f"seq_named_value_json_{split}_{surface_id}", target)] += 1
         expected_cell_count = expected_count // (len(template_ids) * len(NAMED_VALUE_KEYS))
         if any(count != expected_cell_count for count in counts.values()):
@@ -463,6 +482,10 @@ def validate_array_count_contract(records: Sequence[FeasibilityRecord]) -> None:
     if not array_records:
         return
     count_by_record = {record: array_item_count(record) for record in array_records}
+    surface_by_record = {
+        record: bound_prompt_surface_id(record, a=" | ".join(json.loads(record.answer)))
+        for record in array_records
+    }
     for split, expected_count in (("train", TRAIN_RECORDS_PER_FAMILY), ("eval", EVAL_RECORDS_PER_FAMILY)):
         split_records = tuple(record for record in array_records if record.split == split)
         if len(split_records) != expected_count:
@@ -477,8 +500,7 @@ def validate_array_count_contract(records: Sequence[FeasibilityRecord]) -> None:
         }
         for record in split_records:
             item_count = count_by_record[record]
-            decoded = json.loads(record.answer)
-            surface_id = bound_prompt_surface_id(record, a=" | ".join(decoded))
+            surface_id = surface_by_record[record]
             counts[(f"seq_array_json_{split}_{surface_id}", item_count)] += 1
         expected_cell_count = expected_count // (len(template_ids) * 4)
         if any(count != expected_cell_count for count in counts.values()):
@@ -762,7 +784,7 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
         answer = compact_json(fields[target])
         semantic_values = tuple(fields[key] for key in keys)
     elif family == "boolean_json":
-        operand, truth = make_boolean_operand(rng, operand_number, index)
+        operand, truth = make_boolean_operand(rng, index)
         prompt = surface.format(a=operand)
         answer = "true" if truth else "false"
         semantic_values = (operand,)
@@ -785,9 +807,10 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
     )
 
 
-def make_boolean_operand(rng: random.Random, operand_number: int, index: int) -> tuple[str, bool]:
+def make_boolean_operand(rng: random.Random, index: int) -> tuple[str, bool]:
     label = BOOLEAN_LABELS[(index // 4) % len(BOOLEAN_LABELS)]
-    suffix = f"{rng.getrandbits(44):011x}{operand_number:05x}"
+    balanced_tail = ((index // 8) * 4 + index % 4) % 16
+    suffix = f"{rng.getrandbits(60):015x}{balanced_tail:x}"
     return f"{label}-{suffix}", BOOLEAN_LABEL_TRUTH[label]
 
 
