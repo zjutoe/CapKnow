@@ -53,14 +53,14 @@ NAMED_VALUE_KEYS_BY_SPLIT = {
     "eval": NAMED_VALUE_KEYS,
 }
 NAMED_VALUE_RE = re.compile(
-    r"\b(?:red|blue|green|silver)-[0-9a-f]{8}\b",
+    r"\b(?:red|blue|green|silver)-[0-9a-f]{4}\b",
     re.IGNORECASE,
 )
 NAMED_FIELD_RE = re.compile(
-    r"\b(red|blue|green|silver)=((?:red|blue|green|silver)-[0-9a-f]{8})\b",
+    r"\b(red|blue|green|silver)=((?:red|blue|green|silver)-[0-9a-f]{4})\b",
     re.IGNORECASE,
 )
-ARRAY_ITEM_RE = re.compile(r"\bq[0-9a-f]{8}\b", re.IGNORECASE)
+ARRAY_ITEM_RE = re.compile(r"\bq[0-9a-f]{4}\b", re.IGNORECASE)
 BOOLEAN_LABELS = ("affirm", "reject")
 BOOLEAN_LABEL_TRUTH = {"affirm": True, "reject": False}
 BOOLEAN_OPERAND_RE = re.compile(r"\b(affirm|reject)-([0-9a-f]{16})\b", re.IGNORECASE)
@@ -767,15 +767,33 @@ def _maybe_add_marker(value: str, markers: set[str]) -> None:
 def build_family_records(family: str) -> tuple[FeasibilityRecord, ...]:
     if family not in FAMILIES:
         raise ValueError(f"Unknown feasibility family: {family!r}.")
-    return (*_family_split(family, "train", TRAIN_RECORDS_PER_FAMILY), *_family_split(family, "eval", EVAL_RECORDS_PER_FAMILY))
+    used_payload_suffixes: set[str] = set()
+    return (
+        *_family_split(family, "train", TRAIN_RECORDS_PER_FAMILY, used_payload_suffixes),
+        *_family_split(family, "eval", EVAL_RECORDS_PER_FAMILY, used_payload_suffixes),
+    )
 
 
-def _family_split(family: str, split: str, count: int) -> tuple[FeasibilityRecord, ...]:
+def _family_split(
+    family: str,
+    split: str,
+    count: int,
+    used_payload_suffixes: set[str],
+) -> tuple[FeasibilityRecord, ...]:
     base = 10_000 if split == "eval" else 0
-    return tuple(_make_record(family, split, base + index, index) for index in range(count))
+    return tuple(
+        _make_record(family, split, base + index, index, used_payload_suffixes)
+        for index in range(count)
+    )
 
 
-def _make_record(family: str, split: str, operand_number: int, index: int) -> FeasibilityRecord:
+def _make_record(
+    family: str,
+    split: str,
+    operand_number: int,
+    index: int,
+    used_payload_suffixes: set[str],
+) -> FeasibilityRecord:
     rng = random.Random(730000 + 10000 * FAMILIES.index(family) + operand_number)
     template_id = f"seq_{family}_{split}_{index % 4}"
     operand_id = f"seq_operand_{family}_{operand_number:05d}"
@@ -788,7 +806,7 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
     elif family == "named_value_json":
         keys = NAMED_VALUE_KEYS_BY_SPLIT[split]
         target = keys[(index // 4) % len(keys)]
-        fields = {key: f"{key}-{rng.getrandbits(32):08x}" for key in keys}
+        fields = {key: f"{key}-{make_unique_payload_suffix(rng, used_payload_suffixes)}" for key in keys}
         field_text = "; ".join(f"{key}={fields[key]}" for key in keys)
         prompt = surface.format(a=target, b=field_text)
         answer = compact_json(fields[target])
@@ -799,7 +817,10 @@ def _make_record(family: str, split: str, operand_number: int, index: int) -> Fe
         answer = "true" if truth else "false"
         semantic_values = (operand,)
     elif family == "array_json":
-        items = [f"q{rng.getrandbits(32):08x}" for _ in range(1 + (index // 4) % 4)]
+        items = [
+            f"q{make_unique_payload_suffix(rng, used_payload_suffixes)}"
+            for _ in range(1 + (index // 4) % 4)
+        ]
         prompt = surface.format(a=" | ".join(items))
         answer = compact_json(items)
         semantic_values = (*items, answer)
@@ -822,6 +843,14 @@ def make_boolean_operand(rng: random.Random, index: int) -> tuple[str, bool]:
     balanced_tail = ((index // 8) * 4 + index % 4) % 16
     suffix = f"{rng.getrandbits(60):015x}{balanced_tail:x}"
     return f"{label}-{suffix}", BOOLEAN_LABEL_TRUTH[label]
+
+
+def make_unique_payload_suffix(rng: random.Random, used_suffixes: set[str]) -> str:
+    while True:
+        suffix = f"{rng.getrandbits(16):04x}"
+        if suffix not in used_suffixes and not set(suffix) <= {"0", "1"}:
+            used_suffixes.add(suffix)
+            return suffix
 
 
 def grouped_records() -> dict[str, dict[str, tuple[FeasibilityRecord, ...]]]:

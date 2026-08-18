@@ -933,10 +933,24 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
                 for value in sf.NAMED_VALUE_RE.findall(f"{record.prompt}\n{record.answer}")
             ]
             assert generated_values
-            assert not any(
-                re.search(r"\b(?:red|blue|green|silver)-[te][0-9a-f]{8}\b", value, re.IGNORECASE)
+            assert all(
+                re.fullmatch(r"(?:red|blue|green|silver)-[0-9a-f]{4}", value, re.IGNORECASE)
                 for value in generated_values
             )
+            assert sf.NAMED_VALUE_RE.fullmatch("red-deadbeef") is None
+            suffixes_by_split = {
+                split_name: [
+                    value.rsplit("-", 1)[1].casefold()
+                    for record in splits[split_name]
+                    for _key, value in sf.NAMED_FIELD_RE.findall(record.prompt)
+                ]
+                for split_name in ("train", "eval")
+            }
+            assert len(set(suffixes_by_split["train"] + suffixes_by_split["eval"])) == sum(
+                len(suffixes) for suffixes in suffixes_by_split.values()
+            )
+            for suffixes in suffixes_by_split.values():
+                assert all({suffix[position] for suffix in suffixes} == set("0123456789abcdef") for position in range(4))
         if family == "boolean_json":
             operand_sets = {}
             suffix_sets = {}
@@ -985,8 +999,21 @@ def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_reject
                 for value in sf.ARRAY_ITEM_RE.findall(f"{record.prompt}\n{record.answer}")
             ]
             assert items
-            assert all(re.fullmatch(r"q[0-9a-f]{8}", value) for value in items)
-            assert not any(re.search(r"\bs[te][0-9a-f]{8}\b", f"{record.prompt}\n{record.answer}", re.IGNORECASE) for record in (*splits["train"], *splits["eval"]))
+            assert all(re.fullmatch(r"q[0-9a-f]{4}", value) for value in items)
+            assert sf.ARRAY_ITEM_RE.fullmatch("q0badcafe") is None
+            suffixes_by_split = {
+                split_name: [
+                    value[1:].casefold()
+                    for record in splits[split_name]
+                    for value in sf.ARRAY_ITEM_RE.findall(record.prompt)
+                ]
+                for split_name in ("train", "eval")
+            }
+            assert len(set(suffixes_by_split["train"] + suffixes_by_split["eval"])) == sum(
+                len(suffixes) for suffixes in suffixes_by_split.values()
+            )
+            for suffixes in suffixes_by_split.values():
+                assert all({suffix[position] for suffix in suffixes} == set("0123456789abcdef") for position in range(4))
         assert set(sf.PROMPT_SURFACES[family]["train"]).isdisjoint(sf.PROMPT_SURFACES[family]["eval"])
         for record in (*splits["train"], *splits["eval"]):
             sf.reject_scientific_markers(record.prompt)
@@ -1280,9 +1307,9 @@ def test_feasibility_array_template_count_balance_and_coupled_tamper_rejection()
     for record in records:
         target_count = 1 + record.index % 4
         items = [value.casefold() for value in sf.ARRAY_ITEM_RE.findall(record.prompt)[:target_count]]
-        offset = 0x70000000 if record.split == "train" else 0x90000000
+        offset = 0x4000 if record.split == "train" else 0xC000
         while len(items) < target_count:
-            items.append(f"q{offset + record.index * 4 + len(items):08x}")
+            items.append(f"q{offset + record.index * 4 + len(items):04x}")
         surface = sf.PROMPT_SURFACES["array_json"][record.split][record.index % 4]
         coupled_records.append(
             sf.FeasibilityRecord(
@@ -1535,6 +1562,33 @@ def test_feasibility_hex_semantic_overlap_is_case_insensitive() -> None:
 def test_feasibility_named_and_array_semantic_overlap_is_case_insensitive() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
 
+    legacy_named = sf.FeasibilityRecord(
+        family="named_value_json",
+        split="train",
+        index=0,
+        template_id="legacy-named-surface",
+        operand_id="legacy-named-value",
+        prompt=(
+            "choose key red; fields "
+            "red=red-deadbeef; blue=blue-00000000; green=green-00000000; silver=silver-00000000"
+        ),
+        answer=json.dumps("red-deadbeef"),
+    )
+    with pytest.raises(ValueError, match="fixed held-out value grammar"):
+        sf.semantic_values_for_record(legacy_named)
+
+    legacy_array = sf.FeasibilityRecord(
+        family="array_json",
+        split="train",
+        index=0,
+        template_id="legacy-array-surface",
+        operand_id="legacy-array-value",
+        prompt="chunks q0badcafe",
+        answer=json.dumps(["q0badcafe"]),
+    )
+    with pytest.raises(ValueError, match="fixed held-out item grammar"):
+        sf.semantic_values_for_record(legacy_array)
+
     named_train = sf.FeasibilityRecord(
         family="named_value_json",
         split="train",
@@ -1543,9 +1597,9 @@ def test_feasibility_named_and_array_semantic_overlap_is_case_insensitive() -> N
         operand_id="named-train-value",
         prompt=(
             "choose key red; fields "
-            "red=red-deadbeef; blue=blue-00000000; green=green-00000000; silver=silver-00000000"
+            "red=red-beef; blue=blue-2222; green=green-2a2a; silver=silver-3333"
         ),
-        answer=json.dumps("red-deadbeef"),
+        answer=json.dumps("red-beef"),
     )
     named_eval = sf.FeasibilityRecord(
         family="named_value_json",
@@ -1555,11 +1609,11 @@ def test_feasibility_named_and_array_semantic_overlap_is_case_insensitive() -> N
         operand_id="named-eval-value",
         prompt=(
             "select key RED; fields "
-            "RED=RED-DEADBEEF; BLUE=BLUE-00000000; GREEN=GREEN-00000000; SILVER=SILVER-00000000"
+            "RED=RED-BEEF; BLUE=BLUE-2222; GREEN=GREEN-2A2A; SILVER=SILVER-3333"
         ),
-        answer=json.dumps("RED-DEADBEEF"),
+        answer=json.dumps("RED-BEEF"),
     )
-    assert "red-deadbeef" in sf.semantic_values_for_record(named_eval)
+    assert "red-beef" in sf.semantic_values_for_record(named_eval)
     with pytest.raises(ValueError, match="semantic values"):
         sf.validate_feasibility_records((named_train, named_eval))
 
@@ -1569,8 +1623,8 @@ def test_feasibility_named_and_array_semantic_overlap_is_case_insensitive() -> N
         index=0,
         template_id="array-train-surface",
         operand_id="array-train-value",
-        prompt="chunks q0badcafe",
-        answer=json.dumps(["q0badcafe"]),
+        prompt="chunks q0bad",
+        answer=json.dumps(["q0bad"]),
     )
     array_eval = sf.FeasibilityRecord(
         family="array_json",
@@ -1578,10 +1632,10 @@ def test_feasibility_named_and_array_semantic_overlap_is_case_insensitive() -> N
         index=0,
         template_id="array-eval-surface",
         operand_id="array-eval-value",
-        prompt="pieces Q0BADCAFE",
-        answer=json.dumps(["Q0BADCAFE"]),
+        prompt="pieces Q0BAD",
+        answer=json.dumps(["Q0BAD"]),
     )
-    assert "q0badcafe" in sf.semantic_values_for_record(array_eval)
+    assert "q0bad" in sf.semantic_values_for_record(array_eval)
     with pytest.raises(ValueError, match="semantic values"):
         sf.validate_feasibility_records((array_train, array_eval))
 
