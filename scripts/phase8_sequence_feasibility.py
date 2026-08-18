@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import ctypes
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
+import errno
 from functools import lru_cache
 from hashlib import sha256
 import json
@@ -17,6 +19,7 @@ import random
 import re
 import subprocess
 import sys
+import time
 from typing import Callable, Iterable, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +30,7 @@ import torch
 
 from capability_certificate_lab.lm_bridge import corpus_generator as cg
 from capability_certificate_lab.lm_bridge.model import build_model
+from capability_certificate_lab.lm_bridge.model import transformer_config
 from capability_certificate_lab.lm_bridge.tokenizer import ByteTokenizer
 from capability_certificate_lab.lm_bridge.tokenizer import EOS_ID
 from capability_certificate_lab.lm_bridge.train import (
@@ -83,6 +87,11 @@ DIAGNOSTIC_INPUT_ROOT_NAME = "feasibility_004"
 DIAGNOSTIC_INPUT_SOURCE_COMMIT = "3cb75ad550c4357562c0d4d9a9b098bfb2cf66ea"
 DIAGNOSTIC_HANDOFF_PATH = "phase8/Task_010C_D1_Feasibility_Failure_Diagnostic.md"
 DIAGNOSTIC_REQUIRED_DEVICE = "cuda:0"
+DIAGNOSTIC_REQUIRED_ENV = {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    "PYTHONPATH": ".",
+}
 DIAGNOSTIC_INPUT_CHECKSUMS = {
     "manifest.json": "19cf2db4df6f6928d0afa7ab8aef8d891e944152e480541f5aaf8702565e8d00",
     "summary.json": "4eaf7b5742161ff6ea5612f7c53668ee71c38f598e18da27a375fafebb6dc506",
@@ -92,6 +101,10 @@ DIAGNOSTIC_CORE_BLOBS = {
     "capability_certificate_lab/lm_bridge/tokenizer.py": "79ded37d148d40b0ba4e501881f585d74e971798",
     "capability_certificate_lab/lm_bridge/model.py": "70e57d8ccea8773b99ec797634e3ea32fe0bb9bf",
     "capability_certificate_lab/lm_bridge/train.py": "fe2d6a901c96dc35a5e90b12996d6c01df2f2f56",
+}
+FROZEN_PARAMETER_COUNTS = {
+    "small": 149760,
+    "medium": 892672,
 }
 DIAGNOSTIC_RECORD_HASHES = {
     "named_train512": "9b55084d281a9420e12a1b6a35c3eb199abd74f4b766a14a833e6241c59564b8",
@@ -247,6 +260,10 @@ class FeasibilityValidationContext:
 
 
 class SourceChangedError(RuntimeError):
+    pass
+
+
+class DiagnosticPublicationError(RuntimeError):
     pass
 
 
@@ -972,9 +989,9 @@ def validate_cell_counts(cells: Sequence[dict[str, object]]) -> None:
 
 @lru_cache(maxsize=None)
 def expected_parameter_count(model_size: str) -> int:
-    if model_size not in MODEL_SIZES:
+    if model_size not in FROZEN_PARAMETER_COUNTS:
         raise ValueError(f"Unknown model_size for parameter_count validation: {model_size!r}.")
-    return build_model(model_size).parameter_count
+    return FROZEN_PARAMETER_COUNTS[model_size]
 
 
 def frozen_configuration() -> dict[str, object]:
@@ -1104,6 +1121,11 @@ def build_named_diagnostic_matrix() -> dict[str, list[dict[str, object]]]:
 def validate_named_diagnostic_matrix(matrix: dict[str, list[dict[str, object]]]) -> None:
     if tuple(matrix.keys()) != NAMED_DIAGNOSTIC_CELLS:
         raise ValueError("Named diagnostic matrix must contain the four frozen cells in canonical order.")
+    sets = diagnostic_record_sets()
+    expected_sources = {
+        "train": sets["named_train_first64"],
+        "eval": sets["named_eval64"],
+    }
     for cell, rows in matrix.items():
         if len(rows) != EVAL_RECORDS_PER_FAMILY:
             raise ValueError("Every Named diagnostic cell must contain exactly 64 rows.")
@@ -1121,8 +1143,27 @@ def validate_named_diagnostic_matrix(matrix: dict[str, list[dict[str, object]]])
                 raise ValueError("Seen-surface cells must render train surfaces.")
             if cell.startswith("held_surface") and surface_split != "eval":
                 raise ValueError("Held-surface cells must render eval surfaces.")
+            source_record = expected_sources[operand_split][row_index]
+            if row.get("operand_source_index") != source_record.index:
+                raise ValueError("Named diagnostic operand_source_index does not match the frozen source record.")
+            if row.get("operand_id") != source_record.operand_id:
+                raise ValueError("Named diagnostic operand_id does not match the frozen source record.")
+            if row.get("source_template_id") != source_record.template_id:
+                raise ValueError("Named diagnostic source_template_id does not match the frozen source record.")
+            if row.get("expected") != source_record.answer:
+                raise ValueError("Named diagnostic expected answer does not match the frozen source record.")
+            if row.get("target_key") != named_value_target_key(source_record):
+                raise ValueError("Named diagnostic target_key does not match the frozen source record.")
+            expected_roster = [{"key": key, "value": value} for key, value in named_roster(source_record)]
+            if row.get("roster") != expected_roster:
+                raise ValueError("Named diagnostic roster does not match the frozen source record.")
+            expected_prompt, expected_template_id = render_named_surface_from_operand(source_record, surface_split)
+            if row.get("prompt") != expected_prompt:
+                raise ValueError("Named diagnostic prompt does not match the frozen rendered surface/source pair.")
             target_key = require_exact_str(row.get("target_key"), "target_key")
             template_id = require_exact_str(row.get("template_id"), "template_id")
+            if template_id != expected_template_id:
+                raise ValueError("Named diagnostic template_id does not match the frozen rendered surface.")
             if template_id != f"seq_named_value_json_{surface_split}_{row['surface_index']}":
                 raise ValueError("Named diagnostic template_id must identify only the rendered surface.")
             counts[(template_id, target_key)] += 1
@@ -1212,8 +1253,8 @@ def generation_slice_metrics(prompt: str, expected: str, raw_token_ids: Sequence
         decoded = None
         decoded_error = f"{type(exc).__name__}: {exc}"
     has_eos = decoded_error is None and generation_slice.count(EOS_ID) == 1 and generation_slice[-1:] == (EOS_ID,)
-    hit_generation_cap = decoded_error is None and not has_eos and len(generation_slice) == ByteTokenizer.max_generated_tokens
-    hit_context_cap = decoded_error is None and not has_eos and len(full_ids) == ByteTokenizer.max_sequence_length
+    hit_generation_cap = not has_eos and len(generation_slice) == ByteTokenizer.max_generated_tokens
+    hit_context_cap = not has_eos and len(full_ids) == ByteTokenizer.max_sequence_length
     return {
         "generated": decoded,
         "generation_error": decoded_error,
@@ -1319,13 +1360,32 @@ def mean_value(total: float, count: int) -> dict[str, object]:
     return {"observation_count": count, "mean": None if count == 0 else total / count}
 
 
+def mean_from_rows(rows: Sequence[dict[str, object]], field_name: str) -> dict[str, object]:
+    values = [row[field_name] for row in rows if row.get(field_name) is not None]
+    if not all(type(value) in {int, float} and math.isfinite(float(value)) for value in values):
+        raise ValueError(f"Aggregate mean field {field_name} contains non-finite or non-numeric values.")
+    return mean_value(math.fsum(float(value) for value in values), len(values))
+
+
+def histogram_from_values(values: Iterable[object]) -> dict[str, object]:
+    observed = [value for value in values if value is not None]
+    return {
+        "observation_count": len(observed),
+        "histogram": {str(key): value for key, value in sorted(Counter(observed).items(), key=lambda item: str(item[0]))},
+    }
+
+
 def aggregate_named_rows(rows: Sequence[dict[str, object]]) -> dict[str, object]:
     exact = sum(1 for row in rows if row["exact_match"] is True)
     target_prefix_rows = [row for row in rows if row["target_prefix"] is True]
     suffix_num = sum(int(row["suffix_correct_positions"]) for row in target_prefix_rows)
     suffix_den = 4 * len(target_prefix_rows)
-    first_errors = [row["suffix_first_error"] for row in rows if row["suffix_first_error"] is not None]
+    template_target_exact: dict[str, dict[str, object]] = {}
+    for (template_id, target_key), group_count in sorted(Counter((row["template_id"], row["target_key"]) for row in rows).items()):
+        group_exact = sum(1 for row in rows if row["template_id"] == template_id and row["target_key"] == target_key and row["exact_match"] is True)
+        template_target_exact[f"{template_id}__{target_key}"] = count_rate(group_exact, group_count)
     return {
+        "row_count": len(rows),
         "exact_sequence_matches": count_rate(exact, len(rows)),
         "valid_json_string": count_rate(sum(1 for row in rows if row["valid_json_string"] is True), len(rows)),
         "valid_named_grammar": count_rate(sum(1 for row in rows if row["valid_named_grammar"] is True), len(rows)),
@@ -1333,20 +1393,57 @@ def aggregate_named_rows(rows: Sequence[dict[str, object]]) -> dict[str, object]
         "exact_target_value": count_rate(sum(1 for row in rows if row["exact_target_value"] is True), len(rows)),
         "exact_distractor_value": count_rate(sum(1 for row in rows if row["exact_distractor_value"] is True), len(rows)),
         "occurs_in_prompt": count_rate(sum(1 for row in rows if row["occurs_in_prompt"] is True), len(rows)),
+        "template_target_exact_matches": template_target_exact,
         "suffix_position_accuracy": count_rate(suffix_num, suffix_den),
-        "suffix_first_error_histogram": {
-            "observation_count": len(first_errors),
-            "histogram": {str(key): value for key, value in sorted(Counter(first_errors).items())},
-        },
+        "suffix_hamming_distance": mean_from_rows(rows, "suffix_hamming_distance"),
+        "suffix_edit_distance": mean_from_rows(rows, "suffix_edit_distance"),
+        "suffix_first_error_histogram": histogram_from_values(row["suffix_first_error"] for row in rows),
+        "has_eos": count_rate(sum(1 for row in rows if row["has_eos"] is True), len(rows)),
+        "generation_token_count_including_eos": mean_from_rows(rows, "generation_token_count_including_eos"),
+        "decoded_response_utf8_bytes": mean_from_rows(rows, "decoded_response_utf8_bytes"),
+        "hit_generation_cap": count_rate(sum(1 for row in rows if row["hit_generation_cap"] is True), len(rows)),
+        "hit_context_cap": count_rate(sum(1 for row in rows if row["hit_context_cap"] is True), len(rows)),
     }
 
 
 def aggregate_array_rows(rows: Sequence[dict[str, object]]) -> dict[str, object]:
+    item_count_exact: dict[str, dict[str, object]] = {}
+    for item_count, group_count in sorted(Counter(row["item_count"] for row in rows).items()):
+        group_exact = sum(1 for row in rows if row["item_count"] == item_count and row["exact_match"] is True)
+        item_count_exact[str(item_count)] = count_rate(group_exact, group_count)
+    template_item_exact: dict[str, dict[str, object]] = {}
+    for (template_id, item_count), group_count in sorted(Counter((row["template_id"], row["item_count"]) for row in rows).items()):
+        group_exact = sum(1 for row in rows if row["template_id"] == template_id and row["item_count"] == item_count and row["exact_match"] is True)
+        template_item_exact[f"{template_id}__items{item_count}"] = count_rate(group_exact, group_count)
+    expected_items = Counter(
+        item
+        for row in rows
+        for item in json.loads(require_exact_str(row["expected"], "array.expected"))
+    )
+    missing_items = Counter(item for row in rows for item in (row["missing_items"] or ()))
+    extra_items = Counter(item for row in rows for item in (row["extra_items"] or ()))
+    positional_den = sum(int(row["item_count"]) for row in rows if row["positional_exact_items"] is not None)
+    positional_num = sum(int(row["positional_exact_items"]) for row in rows if row["positional_exact_items"] is not None)
     return {
+        "row_count": len(rows),
         "greedy_exact_matches": count_rate(sum(1 for row in rows if row["exact_match"] is True), len(rows)),
         "valid_json_syntax": count_rate(sum(1 for row in rows if row["valid_json_syntax"] is True), len(rows)),
         "valid_array_schema": count_rate(sum(1 for row in rows if row["valid_array_schema"] is True), len(rows)),
         "correct_item_count": count_rate(sum(1 for row in rows if row["correct_item_count"] is True), len(rows)),
+        "item_count_exact_matches": item_count_exact,
+        "template_item_count_exact_matches": template_item_exact,
+        "positional_exact_items": count_rate(positional_num, positional_den),
+        "expected_item_counts": dict(sorted(expected_items.items())),
+        "missing_item_counts": dict(sorted(missing_items.items())),
+        "extra_item_counts": dict(sorted(extra_items.items())),
+        "response_hamming_distance": mean_from_rows(rows, "response_hamming_distance"),
+        "response_edit_distance": mean_from_rows(rows, "response_edit_distance"),
+        "response_first_error_histogram": histogram_from_values(row["response_first_error"] for row in rows),
+        "has_eos": count_rate(sum(1 for row in rows if row["has_eos"] is True), len(rows)),
+        "generation_token_count_including_eos": mean_from_rows(rows, "generation_token_count_including_eos"),
+        "decoded_response_utf8_bytes": mean_from_rows(rows, "decoded_response_utf8_bytes"),
+        "hit_generation_cap": count_rate(sum(1 for row in rows if row["hit_generation_cap"] is True), len(rows)),
+        "hit_context_cap": count_rate(sum(1 for row in rows if row["hit_context_cap"] is True), len(rows)),
     }
 
 
@@ -1415,7 +1512,7 @@ def teacher_forced_rows(
     aggregate = {
         "sequence_exact": count_rate(sum(1 for row in rows if row["sequence_exact"] is True), len(rows)),
         "token_accuracy": count_rate(total_correct, total_selected),
-        "loss": None if total_selected == 0 else total_nll / total_selected,
+        "loss": {"observation_count": total_selected, "mean": None if total_selected == 0 else total_nll / total_selected},
         "nll_numerator": total_nll,
         "selected_token_count": total_selected,
     }
@@ -1685,6 +1782,8 @@ def diagnostic_terminal_binding(root: Path) -> dict[str, object]:
         "terminal_sha256": file_sha256(terminal),
         "manifest_sha256": manifest_sha,
         "source_commit": terminal_data.get("source_commit"),
+        "configuration": terminal_data.get("configuration"),
+        "failure_classification": terminal_data.get("failure_classification"),
         "diagnostic_lineage": terminal_data.get("diagnostic_lineage", []),
     }
 
@@ -1704,7 +1803,18 @@ def load_diagnostic_terminal_binding(root: Path) -> tuple[Path, dict[str, object
     manifest_sha = file_sha256(manifest)
     terminal_data = json.loads(terminal.read_text())
     manifest_data = json.loads(manifest.read_text())
+    summary = root / "summary.json"
+    if not summary.is_file():
+        raise ValueError("Diagnostic root lacks summary.json.")
+    summary_data = json.loads(summary.read_text())
     for data_name, data in (("terminal", terminal_data), ("manifest", manifest_data)):
+        if data.get("artifact_class") != DIAGNOSTIC_ARTIFACT_CLASS:
+            raise ValueError(f"Diagnostic {data_name} artifact_class mismatch.")
+        if data.get("feasibility_selection_eligible") is not False:
+            raise ValueError(f"Diagnostic {data_name} must be non-selection.")
+        if data.get("task_010d_authorized") is not False:
+            raise ValueError(f"Diagnostic {data_name} must not authorize Task 010D.")
+    for data_name, data in (("summary", summary_data),):
         if data.get("artifact_class") != DIAGNOSTIC_ARTIFACT_CLASS:
             raise ValueError(f"Diagnostic {data_name} artifact_class mismatch.")
         if data.get("feasibility_selection_eligible") is not False:
@@ -1713,9 +1823,122 @@ def load_diagnostic_terminal_binding(root: Path) -> tuple[Path, dict[str, object
             raise ValueError(f"Diagnostic {data_name} must not authorize Task 010D.")
     if terminal_data.get("status") != terminal.stem or manifest_data.get("terminal_status") != terminal.stem:
         raise ValueError("Diagnostic terminal status mismatch.")
+    if terminal_data.get("manifest_path") != "manifest.json":
+        raise ValueError("Diagnostic terminal manifest_path must be manifest.json.")
     if terminal_data.get("manifest_sha256") != manifest_sha:
         raise ValueError("Diagnostic terminal does not bind manifest checksum.")
+    if terminal_data.get("diagnostic_lineage") != manifest_data.get("diagnostic_lineage"):
+        raise ValueError("Diagnostic terminal and manifest lineage mismatch.")
+    if terminal.stem == "DONE" and terminal_data.get("failure_classification") is not None:
+        raise ValueError("DONE diagnostic terminal must not carry a failure classification.")
+    if terminal.stem == "FAILED" and terminal_data.get("failure_classification") not in {"transient_infrastructure", "diagnostic_implementation_defect"}:
+        raise ValueError("FAILED diagnostic terminal must bind an allowed failure classification.")
+    expected_inventory = diagnostic_inventory(root)
+    file_inventory = manifest_data.get("file_inventory")
+    if file_inventory != expected_inventory:
+        raise ValueError("Diagnostic manifest file_inventory does not exactly match current root inventory.")
+    if terminal_data.get("file_inventory") != file_inventory:
+        raise ValueError("Diagnostic terminal does not bind the exact manifest inventory.")
+    shared_fields = (
+        "source_commit",
+        "source_provenance",
+        "exact_command",
+        "output_root",
+        "wall_time_seconds",
+        "deterministic_flags",
+        "handoff",
+        "input_root",
+        "configuration",
+        "environment",
+        "record_hashes",
+        "core_blobs",
+        "diagnostic_lineage",
+        "completed_scope",
+        "partial_scope",
+        "failure_classification",
+    )
+    for record_name, record in (("summary", summary_data), ("manifest", manifest_data), ("terminal", terminal_data)):
+        missing = [field_name for field_name in shared_fields if field_name not in record]
+        if missing:
+            raise ValueError(f"Diagnostic {record_name} is missing required provenance fields: {missing!r}.")
+    for field_name in shared_fields:
+        if summary_data.get(field_name) != manifest_data.get(field_name):
+            raise ValueError(f"Diagnostic summary and manifest disagree on {field_name}.")
+        if terminal_data.get(field_name) != manifest_data.get(field_name):
+            raise ValueError(f"Diagnostic terminal and manifest disagree on {field_name}.")
+    resolved_root = root.resolve()
+    seen_paths: set[str] = set()
+    for index, row in enumerate(file_inventory):
+        if not isinstance(row, dict):
+            raise ValueError("Diagnostic file_inventory entries must be JSON objects.")
+        rel_path = require_canonical_relative_path(row.get("path"), f"file_inventory[{index}].path")
+        if rel_path in seen_paths:
+            raise ValueError("Diagnostic file_inventory must not contain duplicate paths.")
+        seen_paths.add(rel_path)
+        raw_candidate = root / rel_path
+        if raw_candidate.is_symlink():
+            raise ValueError("Diagnostic file_inventory must not bind symlink files.")
+        candidate = raw_candidate.resolve()
+        if resolved_root not in candidate.parents:
+            raise ValueError("Diagnostic file_inventory path escapes its root.")
+        if not candidate.is_file():
+            raise ValueError("Diagnostic file_inventory path does not exist.")
+        if file_sha256(candidate) != row.get("sha256") or candidate.stat().st_size != row.get("bytes"):
+            raise ValueError("Diagnostic file_inventory checksum or byte count mismatch.")
+        require_exact_str(row.get("role"), f"file_inventory[{index}].role")
+    lineage = terminal_data.get("diagnostic_lineage")
+    if not isinstance(lineage, list):
+        raise ValueError("Diagnostic lineage must be a JSON list.")
+    lineage_paths: list[str] = []
+    for index, binding in enumerate(lineage):
+        if not isinstance(binding, dict):
+            raise ValueError("Diagnostic lineage entries must be JSON objects.")
+        lineage_path = require_exact_str(binding.get("path"), f"diagnostic_lineage[{index}].path")
+        if Path(lineage_path).resolve() == root.resolve():
+            raise ValueError("Diagnostic lineage contains a cycle.")
+        lineage_paths.append(lineage_path)
+        require_exact_str(binding.get("terminal_sha256"), f"diagnostic_lineage[{index}].terminal_sha256")
+        require_exact_str(binding.get("manifest_sha256"), f"diagnostic_lineage[{index}].manifest_sha256")
+    if len(lineage_paths) != len(set(lineage_paths)):
+        raise ValueError("Diagnostic lineage contains duplicate roots.")
     return terminal, terminal_data, manifest, manifest_sha
+
+
+def flattened_diagnostic_lineage(predecessor_diagnostic_roots: Sequence[Path]) -> list[dict[str, object]]:
+    lineage: list[dict[str, object]] = []
+    for predecessor in predecessor_diagnostic_roots:
+        binding = diagnostic_terminal_binding(predecessor)
+        expected_prior = lineage.copy()
+        if binding.get("diagnostic_lineage") != expected_prior:
+            raise ValueError("Diagnostic predecessor lineage is broken or forged.")
+        binding_without_nested = {key: value for key, value in binding.items() if key != "diagnostic_lineage"}
+        lineage.append(binding_without_nested)
+    paths = [str(binding["path"]) for binding in lineage]
+    if len(paths) != len(set(paths)):
+        raise ValueError("Diagnostic lineage contains a cycle.")
+    return lineage
+
+
+def diagnostic_preflight_bindings(input_root: Path, predecessor_diagnostic_roots: Sequence[Path]) -> dict[str, object]:
+    input_binding = {
+        relative_path: file_sha256(input_root / relative_path)
+        for relative_path in sorted(DIAGNOSTIC_INPUT_CHECKSUMS)
+    }
+    predecessor_bindings = [diagnostic_terminal_binding(root) for root in predecessor_diagnostic_roots]
+    return {
+        "input_root": str(input_root),
+        "input": input_binding,
+        "predecessors": predecessor_bindings,
+        "environment": current_environment_dict(),
+        "record_hashes": validate_diagnostic_record_hashes(),
+        "core_blobs": validate_diagnostic_core_blobs(),
+    }
+
+
+def verify_diagnostic_preflight_bindings(bindings: dict[str, object], input_root: Path, predecessor_diagnostic_roots: Sequence[Path]) -> None:
+    validate_diagnostic_input_root(input_root)
+    if bindings != diagnostic_preflight_bindings(input_root, predecessor_diagnostic_roots):
+        raise ValueError("Diagnostic input or predecessor binding changed after preflight.")
 
 
 def validate_new_diagnostic_root(
@@ -1728,6 +1951,18 @@ def validate_new_diagnostic_root(
     output_number = diagnostic_root_number(output_root)
     predecessor_numbers: list[int] = []
     lineage: list[dict[str, object]] = []
+    current_commit = current_source_commit()
+    frozen_configuration_value = {
+        "artifact_class": DIAGNOSTIC_ARTIFACT_CLASS,
+        "feasibility_selection_eligible": False,
+        "task_010d_authorized": False,
+        "named_cells": list(NAMED_DIAGNOSTIC_CELLS),
+        "array_new_training": diagnostic_array_training_plan(),
+        "diagnostic_steps": DIAGNOSTIC_STEPS,
+        "formal_training_steps": TRAINING_STEPS,
+        "pass_threshold": PASS_THRESHOLD,
+    }
+    predecessor_bindings: list[dict[str, object]] = []
     for predecessor in predecessor_diagnostic_roots:
         require_diagnostic_artifact_location(predecessor, "predecessor_diagnostic_root")
         number = diagnostic_root_number(predecessor)
@@ -1738,8 +1973,22 @@ def validate_new_diagnostic_root(
             raise ValueError("A prior DONE diagnostic root forbids later diagnostic roots.")
         predecessor_numbers.append(number)
         binding = diagnostic_terminal_binding(predecessor)
-        lineage.extend(binding.get("diagnostic_lineage", []))  # type: ignore[arg-type]
-        lineage.append(binding)
+        if binding.get("diagnostic_lineage") != lineage:
+            raise ValueError("Diagnostic predecessor lineage is broken or forged.")
+        if binding.get("configuration") != frozen_configuration_value:
+            raise ValueError("Diagnostic predecessor configuration mismatch.")
+        predecessor_source = require_exact_str(binding.get("source_commit"), "predecessor.source_commit")
+        if GIT_SHA_RE.fullmatch(predecessor_source) is None:
+            raise ValueError("Diagnostic predecessor source_commit must be a full lowercase Git SHA.")
+        predecessor_bindings.append(binding)
+        lineage.append({key: value for key, value in binding.items() if key != "diagnostic_lineage"})
+    if predecessor_bindings:
+        immediate = predecessor_bindings[-1]
+        failure_classification = immediate.get("failure_classification")
+        if failure_classification == "transient_infrastructure" and immediate.get("source_commit") != current_commit:
+            raise ValueError("Transient diagnostic retry must use the identical accepted source.")
+        if failure_classification == "diagnostic_implementation_defect" and immediate.get("source_commit") == current_commit:
+            raise ValueError("Implementation-defect diagnostic retry requires a newly reviewed repair source.")
     if predecessor_numbers != list(range(1, output_number)):
         raise ValueError("Diagnostic predecessor roots must be complete and continuous before the output root.")
     if output_root.exists() or output_root.is_symlink():
@@ -1755,10 +2004,14 @@ def validate_diagnostic_cli_contract(
     input_root: Path,
     output_root: Path,
     predecessor_diagnostic_roots: Sequence[Path],
+    raw_argv: Sequence[str] | None = None,
+    environ: dict[str, str] | None = None,
 ) -> None:
     if device != DIAGNOSTIC_REQUIRED_DEVICE:
         raise ValueError("diagnose-failure only supports device string cuda:0.")
-    expected_command = [
+    if raw_argv is not None and any(path.is_absolute() for path in (input_root, output_root, *predecessor_diagnostic_roots)):
+        raise ValueError("diagnose-failure authorized command requires canonical repository-relative artifact paths.")
+    expected_argv = [
         "scripts/phase8_sequence_feasibility.py",
         "diagnose-failure",
         "--device",
@@ -1769,10 +2022,44 @@ def validate_diagnostic_cli_contract(
         str(output_root),
     ]
     for predecessor in predecessor_diagnostic_roots:
-        expected_command.extend(["--predecessor-diagnostic-root", str(predecessor)])
+        expected_argv.extend(["--predecessor-diagnostic-root", str(predecessor)])
+    if raw_argv is not None:
+        if list(raw_argv) != expected_argv:
+            raise ValueError(f"diagnose-failure raw argv must exactly match the authorized command: {expected_argv!r}.")
+        actual_env = os.environ if environ is None else environ
+        for key, expected_value in DIAGNOSTIC_REQUIRED_ENV.items():
+            if actual_env.get(key) != expected_value:
+                raise ValueError(f"diagnose-failure environment {key} must exactly equal {expected_value!r}.")
     validate_new_diagnostic_root(input_root, output_root, predecessor_diagnostic_roots)
     if output_root.name == "feasibility_diagnostic_001" and predecessor_diagnostic_roots:
         raise ValueError("Initial diagnostic command must not include predecessor roots.")
+
+
+def diagnostic_exact_command(
+    output_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path],
+    *,
+    input_root: Path,
+) -> list[str]:
+    argv = [
+        "python",
+        "scripts/phase8_sequence_feasibility.py",
+        "diagnose-failure",
+        "--device",
+        DIAGNOSTIC_REQUIRED_DEVICE,
+        "--input-root",
+        str(input_root),
+        "--output-root",
+        str(output_root),
+    ]
+    for predecessor in predecessor_diagnostic_roots:
+        argv.extend(["--predecessor-diagnostic-root", str(predecessor)])
+    return [
+        "PYTHONDONTWRITEBYTECODE=1",
+        "CUBLAS_WORKSPACE_CONFIG=:4096:8",
+        "PYTHONPATH=.",
+        *argv,
+    ]
 
 
 def reused_feasibility_cell_binding(input_root: Path, family: str, model_size: str, seed: int) -> dict[str, object]:
@@ -1815,12 +2102,32 @@ def tensor_bytes(tensor: torch.Tensor) -> bytes:
     return tensor.detach().cpu().contiguous().numpy().tobytes()
 
 
+def optimizer_state_fingerprint(optimizer: torch.optim.Optimizer) -> str:
+    payload = json.dumps(_optimizer_state_payload(optimizer.state_dict()), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(payload).hexdigest()
+
+
+def _optimizer_state_payload(value: object) -> object:
+    if isinstance(value, torch.Tensor):
+        return {
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "sha256": sha256(tensor_bytes(value)).hexdigest(),
+        }
+    if isinstance(value, dict):
+        return {str(key): _optimizer_state_payload(nested) for key, nested in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_optimizer_state_payload(nested) for nested in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
 def compare_model_to_checkpoint_step1500(model: torch.nn.Module, checkpoint_path: Path, model_size: str) -> None:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    expected_model = build_model(model_size)
-    if checkpoint.get("config") != expected_model.config.__dict__:
+    if checkpoint.get("config") != transformer_config(model_size).__dict__:
         raise ValueError("Step-1500 equality gate config mismatch.")
-    if checkpoint.get("parameter_count") != expected_model.parameter_count:
+    if checkpoint.get("parameter_count") != expected_parameter_count(model_size):
         raise ValueError("Step-1500 equality gate parameter_count mismatch.")
     expected_state = checkpoint.get("model_state_dict")
     current_state = model.state_dict()
@@ -1871,7 +2178,10 @@ def train_array_small_3000_diagnostic(
     ):
         raise ValueError("Diagnostic 3000-step batch stream does not extend the frozen 1500-step stream.")
     final_loss = float("nan")
+    step1501_executed = False
     for step_index, batch in enumerate(batches, start=1):
+        if step_index == TRAINING_STEPS + 1:
+            step1501_executed = True
         batch_records = [TextRecord(train_records[index].prompt, train_records[index].answer) for index in batch]
         input_ids = encode_record_batch(batch_records, tokenizer).to(device)
         optimizer.zero_grad(set_to_none=True)
@@ -1885,7 +2195,7 @@ def train_array_small_3000_diagnostic(
             rng_state = random.getstate()
             torch_rng_state = torch.random.get_rng_state()
             cuda_rng_state = torch.cuda.get_rng_state(device)
-            optimizer_state_keys = tuple(optimizer.state_dict().keys())
+            optimizer_state = optimizer_state_fingerprint(optimizer)
             compare_model_to_checkpoint_step1500(model, frozen_step1500_checkpoint, "small")
             if random.getstate() != rng_state:
                 raise ValueError("Step-1500 equality snapshot changed Python RNG state.")
@@ -1893,8 +2203,8 @@ def train_array_small_3000_diagnostic(
                 raise ValueError("Step-1500 equality snapshot changed Torch RNG state.")
             if not torch.equal(torch.cuda.get_rng_state(device), cuda_rng_state):
                 raise ValueError("Step-1500 equality snapshot changed CUDA RNG state.")
-            if tuple(optimizer.state_dict().keys()) != optimizer_state_keys:
-                raise ValueError("Step-1500 equality snapshot changed optimizer state schema.")
+            if optimizer_state_fingerprint(optimizer) != optimizer_state:
+                raise ValueError("Step-1500 equality snapshot changed optimizer state.")
     save_checkpoint(
         str(checkpoint_path),
         model,
@@ -1907,9 +2217,12 @@ def train_array_small_3000_diagnostic(
             "seed": seed,
             "training_steps": DIAGNOSTIC_STEPS,
             "training_loss": final_loss,
+            "step1501_executed": step1501_executed,
         },
     )
-    return {"final_loss": final_loss, "checkpoint_path": str(checkpoint_path)}
+    if not step1501_executed:
+        raise ValueError("Diagnostic 3000-step training did not prove execution of step 1501.")
+    return {"final_loss": final_loss, "checkpoint_path": str(checkpoint_path), "step1501_executed": True}
 
 
 def diagnostic_inventory(root: Path) -> list[dict[str, object]]:
@@ -1924,25 +2237,171 @@ def diagnostic_inventory(root: Path) -> list[dict[str, object]]:
     return rows
 
 
+def expected_done_diagnostic_paths() -> set[str]:
+    paths = {"named_diagnostic_matrix.jsonl", "array_training_plan.json", "summary.json", "manifest.json", "DONE.json"}
+    for seed in SEEDS:
+        for cell in NAMED_DIAGNOSTIC_CELLS:
+            prefix = f"named_value_json__medium__seed{seed}__{cell}"
+            paths.add(f"{prefix}/generations.jsonl")
+            paths.add(f"{prefix}/metrics.json")
+    for model_size in MODEL_SIZES:
+        for seed in SEEDS:
+            prefix = f"array_json__{model_size}__1500__seed{seed}__reused"
+            paths.add(f"{prefix}/greedy_metrics_rows.jsonl")
+            paths.add(f"{prefix}/teacher_forced_train_rows.jsonl")
+            paths.add(f"{prefix}/teacher_forced_eval_rows.jsonl")
+            paths.add(f"{prefix}/metrics.json")
+    for seed in SEEDS:
+        prefix = f"array_json__small__3000__seed{seed}"
+        paths.add(f"{prefix}/checkpoint_step3000.pt")
+        paths.add(f"{prefix}/generations.jsonl")
+        paths.add(f"{prefix}/teacher_forced_train_rows.jsonl")
+        paths.add(f"{prefix}/teacher_forced_eval_rows.jsonl")
+        paths.add(f"{prefix}/metrics.json")
+    return paths
+
+
+def validate_diagnostic_terminal_root(root: Path, *, terminal_status: str) -> None:
+    terminals = [path.name for path in (root / "DONE.json", root / "FAILED.json") if path.exists()]
+    if terminals != [f"{terminal_status}.json"]:
+        raise ValueError("Diagnostic root must contain exactly one terminal marker matching the requested status.")
+    manifest = root / "manifest.json"
+    summary = root / "summary.json"
+    if not manifest.is_file() or not summary.is_file():
+        raise ValueError("Diagnostic root must contain manifest.json and summary.json before publish.")
+    manifest_data = json.loads(manifest.read_text())
+    summary_data = json.loads(summary.read_text())
+    terminal_data = json.loads((root / f"{terminal_status}.json").read_text())
+    for name, data in (("manifest", manifest_data), ("summary", summary_data), ("terminal", terminal_data)):
+        if data.get("artifact_class") != DIAGNOSTIC_ARTIFACT_CLASS:
+            raise ValueError(f"Diagnostic {name} missing non-evidence artifact_class.")
+        if data.get("feasibility_selection_eligible") is not False:
+            raise ValueError(f"Diagnostic {name} must be ineligible for feasibility selection.")
+        if data.get("task_010d_authorized") is not False:
+            raise ValueError(f"Diagnostic {name} must not authorize Task 010D.")
+    expected_inventory = diagnostic_inventory(root)
+    if manifest_data.get("file_inventory") != expected_inventory:
+        raise ValueError("Diagnostic manifest file_inventory does not exactly match the published root.")
+    if terminal_data.get("status") != terminal_status:
+        raise ValueError("Diagnostic terminal status does not match its filename.")
+    if terminal_data.get("manifest_path") != "manifest.json":
+        raise ValueError("Diagnostic terminal manifest_path must be manifest.json.")
+    if terminal_data.get("manifest_sha256") != file_sha256(manifest):
+        raise ValueError("Diagnostic terminal does not bind the exact manifest checksum.")
+    if terminal_data.get("file_inventory") != expected_inventory:
+        raise ValueError("Diagnostic terminal does not bind the exact manifest inventory.")
+    shared_fields = (
+        "source_commit",
+        "source_provenance",
+        "exact_command",
+        "output_root",
+        "wall_time_seconds",
+        "deterministic_flags",
+        "handoff",
+        "input_root",
+        "diagnostic_lineage",
+        "configuration",
+        "record_hashes",
+        "core_blobs",
+        "environment",
+        "completed_scope",
+        "partial_scope",
+        "failure_classification",
+    )
+    for record_name, record in (("summary", summary_data), ("manifest", manifest_data), ("terminal", terminal_data)):
+        missing = [field_name for field_name in shared_fields if field_name not in record]
+        if missing:
+            raise ValueError(f"Diagnostic {record_name} is missing required provenance fields: {missing!r}.")
+    for field_name in shared_fields:
+        if summary_data.get(field_name) != manifest_data.get(field_name):
+            raise ValueError(f"Diagnostic summary and manifest disagree on {field_name}.")
+        if terminal_data.get(field_name) != manifest_data.get(field_name):
+            raise ValueError(f"Diagnostic terminal and manifest disagree on {field_name}.")
+    if terminal_status == "DONE":
+        actual_paths = {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
+        expected_paths = expected_done_diagnostic_paths()
+        if actual_paths != expected_paths:
+            missing = sorted(expected_paths - actual_paths)
+            extra = sorted(actual_paths - expected_paths)
+            raise ValueError(f"DONE diagnostic root has incomplete or extra files: missing={missing!r}, extra={extra!r}.")
+        completed = manifest_data.get("completed_scope")
+        if not isinstance(completed, list):
+            raise ValueError("DONE diagnostic manifest completed_scope must be a list.")
+        if sum(1 for row in completed if isinstance(row, dict) and row.get("name") == "named_cell") != 12:
+            raise ValueError("DONE diagnostic must complete exactly 12 Named cells.")
+        if sum(1 for row in completed if isinstance(row, dict) and row.get("name") == "array_diagnostic_training") != 3:
+            raise ValueError("DONE diagnostic must complete exactly three new Array runs.")
+        if sum(1 for row in completed if isinstance(row, dict) and row.get("name") == "array_baseline_reuse") != 6:
+            raise ValueError("DONE diagnostic must bind exactly six reused Array baselines.")
+
+
+def publish_diagnostic_root(temp_root: Path, output_root: Path, *, terminal_status: str) -> None:
+    validate_diagnostic_terminal_root(temp_root, terminal_status=terminal_status)
+    if output_root.exists() or output_root.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite existing diagnostic root: {output_root}")
+    atomic_rename_noreplace(temp_root, output_root)
+
+
+def publish_diagnostic_root_or_leave_incomplete(temp_root: Path, output_root: Path, *, terminal_status: str) -> None:
+    try:
+        publish_diagnostic_root(temp_root, output_root, terminal_status=terminal_status)
+    except Exception as exc:
+        terminal = temp_root / f"{terminal_status}.json"
+        if terminal.is_file() and not terminal.is_symlink():
+            terminal.unlink()
+        raise DiagnosticPublicationError(
+            f"Diagnostic publication failed without overwriting {output_root}; the temporary root is incomplete."
+        ) from exc
+
+
+def atomic_rename_noreplace(source: Path, destination: Path) -> None:
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise RuntimeError("Atomic no-clobber diagnostic publication requires Linux renameat2.")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    at_fdcwd = -100
+    rename_noreplace = 1
+    result = renameat2(
+        at_fdcwd,
+        os.fsencode(source),
+        at_fdcwd,
+        os.fsencode(destination),
+        rename_noreplace,
+    )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number == errno.EEXIST:
+        raise FileExistsError(error_number, "Refusing to overwrite existing diagnostic root", destination)
+    raise OSError(error_number, os.strerror(error_number), destination)
+
+
 def write_diagnostic_terminal(
     root: Path,
     terminal_status: str,
     *,
     input_root: Path,
+    output_root: Path,
     predecessor_diagnostic_roots: Sequence[Path],
     completed_scope: Sequence[dict[str, object]],
     partial_scope: Sequence[dict[str, object]] = (),
     failure: str | None = None,
     failure_classification: str | None = None,
+    source_snapshot: SourceSnapshot,
+    wall_time_seconds: float,
 ) -> None:
     if terminal_status not in {"DONE", "FAILED"}:
         raise ValueError("Diagnostic terminal_status must be DONE or FAILED.")
     if terminal_status == "FAILED" and failure_classification not in {"transient_infrastructure", "diagnostic_implementation_defect"}:
         raise ValueError("FAILED diagnostics require a frozen failure classification.")
-    source_commit = current_source_commit()
-    source_snapshot = unchecked_source_snapshot()
+    if not math.isfinite(wall_time_seconds) or wall_time_seconds < 0:
+        raise ValueError("Diagnostic wall_time_seconds must be finite and non-negative.")
+    snapshot = source_snapshot
+    source_commit = snapshot.commit
     input_manifest = json.loads((input_root / "manifest.json").read_text())
-    lineage = [diagnostic_terminal_binding(path) for path in predecessor_diagnostic_roots]
+    lineage = flattened_diagnostic_lineage(predecessor_diagnostic_roots)
     common = {
         "artifact_class": DIAGNOSTIC_ARTIFACT_CLASS,
         "feasibility_selection_eligible": False,
@@ -1952,7 +2411,24 @@ def write_diagnostic_terminal(
         "failure": failure,
         "failure_classification": failure_classification,
         "source_commit": source_commit,
-        "source_provenance": asdict(source_snapshot),
+        "source_provenance": asdict(snapshot),
+        "exact_command": diagnostic_exact_command(
+            output_root,
+            predecessor_diagnostic_roots,
+            input_root=input_root,
+        ),
+        "output_root": str(output_root),
+        "wall_time_seconds": wall_time_seconds,
+        "deterministic_flags": {
+            "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
+            "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+            "PYTHONPATH": os.environ.get("PYTHONPATH"),
+            "torch_deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "cuda_tf32": torch.backends.cuda.matmul.allow_tf32,
+            "cudnn_tf32": torch.backends.cudnn.allow_tf32,
+        },
         "handoff": {
             "path": DIAGNOSTIC_HANDOFF_PATH,
             "sha256": file_sha256(REPO_ROOT / DIAGNOSTIC_HANDOFF_PATH),
@@ -2002,14 +2478,34 @@ def write_diagnostic_terminal(
         "manifest_path": "manifest.json",
         "manifest_sha256": manifest_sha,
         "source_commit": source_commit,
+        "source_provenance": asdict(snapshot),
+        "protocol": common["protocol"],
+        "exact_command": common["exact_command"],
+        "output_root": common["output_root"],
+        "wall_time_seconds": wall_time_seconds,
+        "deterministic_flags": common["deterministic_flags"],
+        "handoff": common["handoff"],
+        "input_root": common["input_root"],
+        "configuration": common["configuration"],
+        "environment": common["environment"],
+        "record_hashes": common["record_hashes"],
+        "core_blobs": common["core_blobs"],
         "diagnostic_lineage": lineage,
         "completed_scope": list(completed_scope),
         "partial_scope": list(partial_scope),
+        "failure_classification": failure_classification,
+        "file_inventory": manifest["file_inventory"],
     }
     if failure is not None:
         terminal["error"] = failure
         terminal["failure_classification"] = failure_classification
     write_json(root / f"{terminal_status}.json", terminal)
+
+
+def classify_diagnostic_failure(error: Exception) -> str:
+    if isinstance(error, (OSError, subprocess.SubprocessError, torch.OutOfMemoryError)):
+        return "transient_infrastructure"
+    return "diagnostic_implementation_defect"
 
 
 def run_diagnostic_failure(
@@ -2018,33 +2514,44 @@ def run_diagnostic_failure(
     input_root: Path,
     output_root: Path,
     predecessor_diagnostic_roots: Sequence[Path] = (),
+    raw_argv: Sequence[str] | None = None,
+    environ: dict[str, str] | None = None,
 ) -> None:
     validate_diagnostic_cli_contract(
         device=device,
         input_root=input_root,
         output_root=output_root,
         predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+        raw_argv=raw_argv,
+        environ=environ,
     )
     source_snapshot = capture_diagnostic_source_provenance(input_root, output_root, predecessor_diagnostic_roots)
+    preflight_bindings = diagnostic_preflight_bindings(input_root, predecessor_diagnostic_roots)
+    start_time = time.monotonic()
     temp_root = output_root.with_name(output_root.name + ".tmp")
     temp_root.mkdir(parents=True)
     completed_scope: list[dict[str, object]] = []
     partial_scope: list[dict[str, object]] = []
+    active_scope: dict[str, object] | None = {"name": "diagnostic_initialization"}
     try:
         validate_diagnostic_input_root(input_root)
         tokenizer = ByteTokenizer()
         target_device = torch.device(device)
         records = grouped_records()
+        active_scope = {"name": "named_matrix_construction"}
         named_matrix = build_named_diagnostic_matrix()
         write_jsonl(
             temp_root / "named_diagnostic_matrix.jsonl",
             (row for cell in NAMED_DIAGNOSTIC_CELLS for row in named_matrix[cell]),
         )
         completed_scope.append({"name": "named_matrix_construction", "rows": 4 * EVAL_RECORDS_PER_FAMILY})
+        active_scope = None
         for seed in SEEDS:
+            active_scope = {"name": "named_checkpoint_reuse", "seed": seed}
             reused_named = reused_feasibility_cell_binding(input_root, "named_value_json", "medium", seed)
             model = load_checkpoint_model(Path(str(reused_named["checkpoint_path"])), "medium", target_device)
             for cell in NAMED_DIAGNOSTIC_CELLS:
+                active_scope = {"name": "named_cell", "seed": seed, "cell": cell}
                 cell_dir = temp_root / f"named_value_json__medium__seed{seed}__{cell}"
                 cell_dir.mkdir()
                 named_rows = generate_named_diagnostic_rows(model, named_matrix[cell], target_device)
@@ -2060,12 +2567,21 @@ def run_diagnostic_failure(
                         "checkpoint_sha256": reused_named["checkpoint_sha256"],
                     }
                 )
+                active_scope = None
+        active_scope = {"name": "array_training_plan"}
         array_plan = diagnostic_array_training_plan()
         validate_diagnostic_array_training_plan(array_plan)
         write_json(temp_root / "array_training_plan.json", array_plan)
         completed_scope.append({"name": "array_training_plan", "runs": len(array_plan)})
+        active_scope = None
         for model_size in MODEL_SIZES:
             for seed in SEEDS:
+                active_scope = {
+                    "name": "array_baseline_reuse",
+                    "model_size": model_size,
+                    "steps": TRAINING_STEPS,
+                    "seed": seed,
+                }
                 reused_array = reused_feasibility_cell_binding(input_root, "array_json", model_size, seed)
                 model = load_checkpoint_model(Path(str(reused_array["checkpoint_path"])), model_size, target_device)
                 baseline_dir = temp_root / f"array_json__{model_size}__1500__seed{seed}__reused"
@@ -2116,8 +2632,15 @@ def run_diagnostic_failure(
                         "rows": len(array_rows),
                     }
                 )
+                active_scope = None
         for row in array_plan:
             seed = require_exact_int(row["seed"], "seed")
+            active_scope = {
+                "name": "array_diagnostic_training",
+                "model_size": "small",
+                "steps": DIAGNOSTIC_STEPS,
+                "seed": seed,
+            }
             reused_small = reused_feasibility_cell_binding(input_root, "array_json", "small", seed)
             run_dir = temp_root / f"array_json__small__3000__seed{seed}"
             run_dir.mkdir()
@@ -2178,32 +2701,42 @@ def run_diagnostic_failure(
                     "checkpoint_path": str((run_dir / "checkpoint_step3000.pt").relative_to(temp_root)),
                 }
             )
+            active_scope = None
+        active_scope = {"name": "terminal_publication"}
+        verify_diagnostic_preflight_bindings(preflight_bindings, input_root, predecessor_diagnostic_roots)
         verify_source_unchanged(source_snapshot, active_output_root=temp_root)
         write_diagnostic_terminal(
             temp_root,
             "DONE",
             input_root=input_root,
+            output_root=output_root,
             predecessor_diagnostic_roots=predecessor_diagnostic_roots,
             completed_scope=completed_scope,
             partial_scope=partial_scope,
+            source_snapshot=source_snapshot,
+            wall_time_seconds=time.monotonic() - start_time,
         )
-        os.replace(temp_root, output_root)
-    except SourceChangedError:
+        publish_diagnostic_root_or_leave_incomplete(temp_root, output_root, terminal_status="DONE")
+    except (SourceChangedError, DiagnosticPublicationError):
         raise
     except Exception as exc:
+        verify_diagnostic_preflight_bindings(preflight_bindings, input_root, predecessor_diagnostic_roots)
         verify_source_unchanged(source_snapshot, active_output_root=temp_root)
-        partial_scope.append({"name": "diagnose_failure", "error": repr(exc)})
+        partial_scope.append({**(active_scope or {"name": "diagnose_failure"}), "error": repr(exc)})
         write_diagnostic_terminal(
             temp_root,
             "FAILED",
             input_root=input_root,
+            output_root=output_root,
             predecessor_diagnostic_roots=predecessor_diagnostic_roots,
             completed_scope=completed_scope,
             partial_scope=partial_scope,
             failure=repr(exc),
-            failure_classification="diagnostic_implementation_defect",
+            failure_classification=classify_diagnostic_failure(exc),
+            source_snapshot=source_snapshot,
+            wall_time_seconds=time.monotonic() - start_time,
         )
-        os.replace(temp_root, output_root)
+        publish_diagnostic_root_or_leave_incomplete(temp_root, output_root, terminal_status="FAILED")
         raise
 
 
@@ -3618,6 +4151,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             input_root=input_root,
             output_root=output_root,
             predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+            raw_argv=sys.argv if argv is None else None,
         )
         return 0
     raise AssertionError("unreachable")
