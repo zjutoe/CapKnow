@@ -147,7 +147,7 @@ Retain raw generations and report per seed/cell:
 - requested target-prefix counts;
 - exact target-value and exact distractor-value counts;
 - whether the decoded value occurs anywhere in the prompt;
-- suffix character accuracy, Hamming/edit distance, and first-error position;
+- suffix character accuracy, Hamming/edit distance, and first-error histogram;
 - `template × target-key` counts and exact matches;
 - EOS, generated-length, generation-cap, and context-window diagnostics.
 
@@ -209,7 +209,8 @@ report per seed:
 - greedy eval exact matches, with no pass/fail reinterpretation;
 - exact matches by item count and `template × item-count`;
 - JSON validity, correct item count, expected/missing/extra item counts;
-- equal-length Hamming/edit distance and first-error position;
+- response Hamming distance when lengths match, edit distance, and first-error
+  position;
 - EOS, generated-length, generation-cap, and context-window diagnostics.
 
 The 3000-step cell is a diagnostic counterfactual, not a candidate feasibility
@@ -243,11 +244,34 @@ Common response metrics use UTF-8 bytes:
   invalid decoded responses.
 
 Teacher-forced metrics predict every response byte plus EOS selected by the existing
-response-only labels. Sequence exact requires every selected label, including EOS,
-to equal the argmax token. Token accuracy is micro-averaged as total correct selected
-tokens divided by total selected tokens. Loss is summed cross-entropy over all
-selected tokens divided by that same token count. Record- or batch-macro alternatives
-are forbidden.
+response-only labels. Evaluate the exact original record-index order, separately for
+train and eval, in contiguous batches of exactly 64 records. The frozen sets contain
+512 train and 64 eval records, so partial batches are forbidden. Call
+`encode_record_batch(..., max_length=256)` for every batch and require the resulting
+shape `[64, 256]`. Put the model in `eval()` mode, use `torch.no_grad()`, and forbid
+autocast. Input and label tensors are `torch.int64`; model parameters, logits, and
+unreduced loss tensors are `torch.float32` on `cuda:0`, and any mismatch is a hard
+diagnostic failure.
+
+Construct the existing response-only labels, then compute unreduced per-position
+cross-entropy with `torch.nn.functional.cross_entropy` over flattened logits and
+labels using `ignore_index=-100` and `reduction="none"`, reshaped back to `[64,
+256]`. For each row, visit selected label positions in ascending source-position
+order. Retain in a teacher-forced JSONL row the split, original record index,
+template ID, operand ID, zero-based batch index, zero-based row-within-batch,
+selected-token count, correct-token count, sequence-exact flag, and NLL numerator.
+The NLL numerator is
+`math.fsum` of the host Python `float` values obtained from the selected float32 loss
+scalars in that position order. Sequence exact requires every selected label,
+including EOS, to equal `logits.argmax(dim=-1)` at its source position.
+
+Within each seed/model/steps/split table, aggregate selected-token and correct-token
+counts as integers in record-index order and aggregate the retained row NLL
+numerators with `math.fsum` in that same order. Token accuracy is total correct over
+total selected; loss is the aggregate NLL numerator over total selected. Sequence
+exact is reported as an integer numerator over the record count. These retained row
+fields are the independent reconstruction source; record- or batch-macro
+alternatives and a second forward pass for published aggregates are forbidden.
 
 Named row metrics parse the decoded response with `json.loads`. `valid_json_string`
 requires exactly one JSON string; `valid_named_grammar` additionally requires the
@@ -263,8 +287,15 @@ when the generated suffix has the same byte at that position, with missing posit
 counted incorrect and extra positions ignored. Report the numerator, denominator
 `4 * target_prefix_rows`, and rate; if the denominator is zero, the rate is JSON
 `null`. Suffix Hamming is defined only when the generated suffix is exactly four
-bytes; suffix edit distance is defined for every parsed target-prefix suffix. Other
-rows receive JSON `null` for suffix distances.
+bytes; suffix edit distance is defined for every parsed target-prefix suffix. Suffix
+first error is also defined only for parsed target-prefix rows: compare the generated
+suffix with the expected four-byte suffix using the common byte-level first-error
+rule above. It is JSON `null` for an exact suffix; a missing or extra tail reports
+the shorter suffix length, and invalid decode or non-target-prefix rows are JSON
+`null`. Other rows receive JSON `null` for every suffix distance/error field.
+Aggregate suffix first error only as an integer-position histogram plus an explicit
+`observation_count` equal to the number of non-null row values; when that count is
+zero, the histogram is empty.
 
 Array row metrics require `json.loads` to produce a list containing only strings.
 Correct item count compares list lengths. Positional exact items compare equal items
@@ -412,7 +443,9 @@ Targeted tests must prove:
    medium checkpoints;
 6. row-level metric edge cases and independent reconstruction, including invalid
    decode/JSON, missing EOS, unequal/empty values, duplicate Array items, conditional
-   denominators, EOS-inclusive teacher forcing, and JSON `null` handling;
+   denominators, Named suffix first-error rows/histograms, JSON `null` handling, and
+   exact teacher-forced record order, batch/padding shape, dtype/mode, row statistics,
+   EOS inclusion, and `math.fsum` aggregation;
 7. refusal on input hash, source, terminal, inventory, lineage, record, frozen
    configuration, CUDA-device, ignored-input, output-root, command, or artifact-role
    mismatch;
