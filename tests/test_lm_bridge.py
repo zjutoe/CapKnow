@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 import importlib
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -2530,3 +2532,257 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     )
     with pytest.raises(ValueError, match="symlink|located directly"):
         sf.validate_selection_record(symlink_selection)
+
+
+def test_diagnostic_named_matrix_has_exact_four_cells_and_no_relabeling() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    matrix = sf.build_named_diagnostic_matrix()
+
+    assert tuple(matrix) == sf.NAMED_DIAGNOSTIC_CELLS
+    for cell, rows in matrix.items():
+        assert len(rows) == 64
+        counts: dict[tuple[str, str], int] = {}
+        for row in rows:
+            assert row["diagnostic_cell"] == cell
+            assert row["operand_source_split"] == ("train" if cell.endswith("seen_operand") else "eval")
+            assert row["surface_source_split"] == ("train" if cell.startswith("seen_surface") else "eval")
+            assert row["source_template_id"].startswith(f"seq_named_value_json_{row['operand_source_split']}_")
+            assert row["template_id"].startswith(f"seq_named_value_json_{row['surface_source_split']}_")
+            counts[(row["template_id"], row["target_key"])] = counts.get((row["template_id"], row["target_key"]), 0) + 1
+        assert len(counts) == 16
+        assert set(counts.values()) == {4}
+
+    seen = matrix["seen_surface_seen_operand"][0]
+    held_surface = matrix["held_surface_seen_operand"][0]
+    assert seen["operand_id"] == held_surface["operand_id"]
+    assert seen["operand_source_split"] == held_surface["operand_source_split"] == "train"
+    assert seen["source_template_id"] == held_surface["source_template_id"]
+    assert seen["prompt"] != held_surface["prompt"]
+    assert len(seen["prompt"].encode("utf-8")) == len(held_surface["prompt"].encode("utf-8"))
+
+
+def test_diagnostic_array_training_plan_is_exactly_three_small_3000_runs() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    plan = sf.diagnostic_array_training_plan()
+
+    assert plan == [
+        {"family": "array_json", "model_size": "small", "steps": 3000, "seed": 0},
+        {"family": "array_json", "model_size": "small", "steps": 3000, "seed": 1},
+        {"family": "array_json", "model_size": "small", "steps": 3000, "seed": 2},
+    ]
+    sf.validate_diagnostic_array_training_plan(plan)
+    with pytest.raises(ValueError, match="exactly three"):
+        sf.validate_diagnostic_array_training_plan([*plan, {"family": "hex_copy", "model_size": "small", "steps": 3000, "seed": 0}])
+    with pytest.raises(ValueError, match="exactly three"):
+        sf.validate_diagnostic_array_training_plan([{**plan[0], "steps": 1500}, *plan[1:]])
+
+
+def test_diagnostic_step1500_equality_gate_and_batch_stream(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    records = sf.diagnostic_record_sets()["array_train512"]
+    assert sf.deterministic_batch_indices(
+        record_count=len(records),
+        seed=0,
+        state_mask=0,
+        batch_size=sf.BATCH_SIZE,
+        steps=sf.DIAGNOSTIC_STEPS,
+    )[: sf.TRAINING_STEPS] == sf.deterministic_batch_indices(
+        record_count=len(records),
+        seed=0,
+        state_mask=0,
+        batch_size=sf.BATCH_SIZE,
+        steps=sf.TRAINING_STEPS,
+    )
+
+    model = build_model("small")
+    checkpoint = tmp_path / "checkpoint_step1500.pt"
+    save_checkpoint(str(checkpoint), model, metadata={"family": "array_json", "model_size": "small", "seed": 0, "training_steps": 1500})
+    sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
+    with torch.no_grad():
+        next(model.parameters()).add_(1)
+    with pytest.raises(ValueError, match="tensor bytes mismatch"):
+        sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
+
+
+def test_diagnostic_frozen_blobs_record_hashes_and_reused_bindings() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    assert sf.validate_diagnostic_record_hashes() == sf.DIAGNOSTIC_RECORD_HASHES
+    assert sf.validate_diagnostic_core_blobs() == sf.DIAGNOSTIC_CORE_BLOBS
+
+    input_root = sf.ARTIFACT_PARENT / "feasibility_004"
+    manifest = json.loads((input_root / "manifest.json").read_text())
+    sf.validate_diagnostic_input_root(input_root, environment=manifest["environment"])
+    for model_size in ("small", "medium"):
+        for seed in (0, 1, 2):
+            binding = sf.reused_feasibility_cell_binding(input_root, "array_json", model_size, seed)
+            assert binding["family"] == "array_json"
+            assert binding["model_size"] == model_size
+            assert binding["seed"] == seed
+            assert re.fullmatch(r"[0-9a-f]{64}", binding["generations_sha256"])
+            assert re.fullmatch(r"[0-9a-f]{64}", binding["checkpoint_sha256"])
+    for seed in (0, 1, 2):
+        binding = sf.reused_feasibility_cell_binding(input_root, "named_value_json", "medium", seed)
+        assert binding["checkpoint_path"].endswith(f"named_value_json__medium__seed{seed}/checkpoint_step1500.pt")
+
+
+def test_diagnostic_row_metrics_edge_cases_and_teacher_forced_reconstruction() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    tokenizer = ByteTokenizer()
+    record = sf.diagnostic_record_sets()["named_eval64"][0]
+    full = (*tokenizer.encode_evaluation_prefix(record.prompt), *tokenizer.encode_text(record.answer), EOS_ID)
+    metrics = sf.named_row_metrics(record.prompt, record.answer, full, sf.named_value_target_key(record), [value for _key, value in sf.named_roster(record)])
+    assert metrics["exact_match"] is True
+    assert metrics["has_eos"] is True
+    assert metrics["suffix_correct_positions"] == 4
+    assert metrics["suffix_first_error"] is None
+
+    wrong = json.dumps(json.loads(record.answer)[:-1] + "f")
+    wrong_full = (*tokenizer.encode_evaluation_prefix(record.prompt), *tokenizer.encode_text(wrong), EOS_ID)
+    wrong_metrics = sf.named_row_metrics(record.prompt, record.answer, wrong_full, sf.named_value_target_key(record), [value for _key, value in sf.named_roster(record)])
+    assert wrong_metrics["target_prefix"] is True
+    assert wrong_metrics["suffix_first_error"] == 3
+    assert wrong_metrics["suffix_position_denominator"] == 4
+
+    array_prompt = 'Return compact JSON array from chunks: qaaaa | qbbbb | qaaaa'
+    array_expected = '["qaaaa","qbbbb","qaaaa"]'
+    array_generated = '["qaaaa","qcccc"]'
+    array_full = (*tokenizer.encode_evaluation_prefix(array_prompt), *tokenizer.encode_text(array_generated), EOS_ID)
+    array_metrics = sf.array_row_metrics(array_prompt, array_expected, array_full)
+    assert array_metrics["valid_array_schema"] is True
+    assert array_metrics["correct_item_count"] is False
+    assert Counter(array_metrics["missing_items"]) == Counter(["qbbbb", "qaaaa"])
+    assert array_metrics["extra_items"] == ["qcccc"]
+
+    invalid_full = (*tokenizer.encode_evaluation_prefix(record.prompt), EOS_ID, EOS_ID)
+    invalid = sf.generation_slice_metrics(record.prompt, record.answer, invalid_full)
+    assert invalid["generated"] is None
+    assert invalid["generation_error"] is not None
+    assert invalid["response_edit_distance"] is None
+
+    class UniformModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(()))
+            self.seen_shape: tuple[int, int] | None = None
+
+        def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+            self.seen_shape = tuple(input_ids.shape)
+            return torch.zeros((*input_ids.shape, ByteTokenizer.vocab_size), dtype=torch.float32, device=input_ids.device) + self.weight
+
+    model = UniformModel()
+    model.eval()
+    tf_rows, aggregate = sf.teacher_forced_rows(model, sf.diagnostic_record_sets()["array_eval64"], tokenizer, torch.device("cpu"), split="eval")
+    assert model.seen_shape == (64, 256)
+    assert len(tf_rows) == 64
+    assert [row["record_index"] for row in tf_rows] == list(range(64))
+    assert aggregate["selected_token_count"] == sum(row["selected_token_count"] for row in tf_rows)
+    assert aggregate["token_accuracy"]["numerator"] == sum(row["correct_token_count"] for row in tf_rows)
+    assert aggregate["nll_numerator"] == math.fsum(row["nll_numerator"] for row in tf_rows)
+
+
+def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", tmp_path)
+    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
+    input_root = tmp_path / "feasibility_004"
+    output_root = tmp_path / "feasibility_diagnostic_001"
+
+    with pytest.raises(ValueError, match="cuda:0"):
+        sf.validate_diagnostic_cli_contract(device="cpu", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=())
+    assert not output_root.exists()
+    sf.validate_diagnostic_cli_contract(device="cuda:0", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=())
+
+    done_root = tmp_path / "feasibility_diagnostic_001"
+    done_root.mkdir()
+    manifest = {
+        "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
+        "feasibility_selection_eligible": False,
+        "task_010d_authorized": False,
+        "terminal_status": "DONE",
+    }
+    (done_root / "manifest.json").write_text(json.dumps(manifest) + "\n")
+    terminal = {
+        "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
+        "feasibility_selection_eligible": False,
+        "task_010d_authorized": False,
+        "status": "DONE",
+        "manifest_sha256": sf.file_sha256(done_root / "manifest.json"),
+    }
+    (done_root / "DONE.json").write_text(json.dumps(terminal) + "\n")
+    with pytest.raises(ValueError, match="prior DONE"):
+        sf.validate_new_diagnostic_root(input_root, tmp_path / "feasibility_diagnostic_002", (done_root,))
+    assert sf.diagnostic_terminal_binding(done_root)["terminal_state"] == "DONE"
+
+
+def test_diagnostic_failed_terminal_inventory_fields_and_checkpoint_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    input_root = sf.ARTIFACT_PARENT / "feasibility_004"
+    root = tmp_path / "feasibility_diagnostic_001"
+    root.mkdir()
+    (root / "rows.jsonl").write_text("{}\n")
+    monkeypatch.setattr(sf, "current_source_commit", lambda: _test_source_commit())
+    monkeypatch.setattr(sf, "ignored_source_inputs", lambda: ())
+    sf.write_diagnostic_terminal(
+        root,
+        "FAILED",
+        input_root=input_root,
+        predecessor_diagnostic_roots=(),
+        completed_scope=({"name": "preflight"},),
+        partial_scope=({"name": "array_run", "seed": 0},),
+        failure="synthetic failure",
+        failure_classification="diagnostic_implementation_defect",
+    )
+    manifest = json.loads((root / "manifest.json").read_text())
+    failed = json.loads((root / "FAILED.json").read_text())
+    assert manifest["artifact_class"] == sf.DIAGNOSTIC_ARTIFACT_CLASS
+    assert manifest["feasibility_selection_eligible"] is False
+    assert manifest["task_010d_authorized"] is False
+    assert failed["manifest_sha256"] == sf.file_sha256(root / "manifest.json")
+    assert {row["path"]: row["role"] for row in manifest["file_inventory"]}["rows.jsonl"] == "retained_rows"
+
+    checkpoint = tmp_path / "diagnostic_checkpoint.pt"
+    save_checkpoint(
+        str(checkpoint),
+        build_model("small"),
+        metadata={
+            "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
+            "feasibility_selection_eligible": False,
+            "task_010d_authorized": False,
+            "family": "array_json",
+            "model_size": "small",
+            "seed": 0,
+            "training_steps": 3000,
+        },
+    )
+    metadata = torch.load(checkpoint, map_location="cpu", weights_only=True)["metadata"]
+    assert metadata["artifact_class"] == sf.DIAGNOSTIC_ARTIFACT_CLASS
+    assert metadata["feasibility_selection_eligible"] is False
+    assert metadata["task_010d_authorized"] is False
+
+
+def test_diagnostic_roots_are_rejected_by_feasibility_selection_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", tmp_path)
+    diagnostic_root = tmp_path / "feasibility_diagnostic_001"
+    diagnostic_root.mkdir()
+    with pytest.raises(ValueError, match="feasibility_NNN"):
+        sf.validate_feasibility_root_artifacts(diagnostic_root, require_passing=False)
+    selection = tmp_path / "feasibility_selection_001.json"
+    selection.write_text(
+        json.dumps(
+            {
+                "selected_root": str(diagnostic_root),
+                "selected_manifest_sha256": "0" * 64,
+                "source_commit": _test_source_commit(),
+                "configuration": sf.frozen_configuration(),
+                "per_cell_counts": [],
+                "pass_decision": True,
+                "independent_review_verdict": "ACCEPT",
+                "predecessor_roots": [],
+                "predecessor_selections": [],
+            }
+        )
+        + "\n"
+    )
+    with pytest.raises(ValueError, match="feasibility_NNN"):
+        sf.validate_selection_record(selection)

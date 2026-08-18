@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from functools import lru_cache
 from hashlib import sha256
 import json
+import math
 import os
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -26,8 +28,15 @@ import torch
 from capability_certificate_lab.lm_bridge import corpus_generator as cg
 from capability_certificate_lab.lm_bridge.model import build_model
 from capability_certificate_lab.lm_bridge.tokenizer import ByteTokenizer
+from capability_certificate_lab.lm_bridge.tokenizer import EOS_ID
 from capability_certificate_lab.lm_bridge.train import (
+    GRADIENT_CLIP_NORM,
     TextRecord,
+    deterministic_batch_indices,
+    encode_record_batch,
+    make_optimizer,
+    response_only_labels,
+    response_only_loss,
     save_checkpoint,
     set_deterministic_backend,
     train_text_records,
@@ -43,6 +52,7 @@ TRAINING_STEPS = 1500
 BATCH_SIZE = 64
 PASS_THRESHOLD = 52
 ROOT_RE = re.compile(r"^feasibility_(\d{3})$")
+DIAGNOSTIC_ROOT_RE = re.compile(r"^feasibility_diagnostic_(\d{3})$")
 SELECTION_RE = re.compile(r"^feasibility_selection_(\d{3})\.json$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ARTIFACT_PARENT = REPO_ROOT / "artifacts" / "phase8_toy_lm_bridge"
@@ -67,6 +77,35 @@ BOOLEAN_OPERAND_RE = re.compile(r"\b(affirm|reject)-([0-9a-f]{16})\b", re.IGNORE
 NAMED_TARGET_RE = re.compile(r"\b(?:key|name)\s+(red|blue|green|silver)\b", re.IGNORECASE)
 PROMPT_PLACEHOLDER_RE = re.compile(r"\{[abc]\}")
 ACCEPTED_INDEPENDENT_REVIEW_VERDICT = "ACCEPT"
+DIAGNOSTIC_ARTIFACT_CLASS = "non_evidence_feasibility_diagnostic"
+DIAGNOSTIC_STEPS = 3000
+DIAGNOSTIC_INPUT_ROOT_NAME = "feasibility_004"
+DIAGNOSTIC_INPUT_SOURCE_COMMIT = "3cb75ad550c4357562c0d4d9a9b098bfb2cf66ea"
+DIAGNOSTIC_HANDOFF_PATH = "phase8/Task_010C_D1_Feasibility_Failure_Diagnostic.md"
+DIAGNOSTIC_REQUIRED_DEVICE = "cuda:0"
+DIAGNOSTIC_INPUT_CHECKSUMS = {
+    "manifest.json": "19cf2db4df6f6928d0afa7ab8aef8d891e944152e480541f5aaf8702565e8d00",
+    "summary.json": "4eaf7b5742161ff6ea5612f7c53668ee71c38f598e18da27a375fafebb6dc506",
+    "FAILED.json": "6b3c81d3be78c8e3deeaf991dad4a1e2df41171187ba4e20533799162a46f3ae",
+}
+DIAGNOSTIC_CORE_BLOBS = {
+    "capability_certificate_lab/lm_bridge/tokenizer.py": "79ded37d148d40b0ba4e501881f585d74e971798",
+    "capability_certificate_lab/lm_bridge/model.py": "70e57d8ccea8773b99ec797634e3ea32fe0bb9bf",
+    "capability_certificate_lab/lm_bridge/train.py": "fe2d6a901c96dc35a5e90b12996d6c01df2f2f56",
+}
+DIAGNOSTIC_RECORD_HASHES = {
+    "named_train512": "9b55084d281a9420e12a1b6a35c3eb199abd74f4b766a14a833e6241c59564b8",
+    "named_train_first64": "6806025fa541c4f71d84a2dfce29777e0ac4e056c1bad762aeb10d309f5503ad",
+    "named_eval64": "6cc73c98616430a12a357de99702e8cb4db95258225adab80fd11212aa203d20",
+    "array_train512": "6bbcae6203dfcf443f9871f30b48c29580fa721317387ff26b757b4066a98e94",
+    "array_eval64": "8d504dd63ad2538aedc8195a4f3c0729ed38ec95a078b9c9895fbf93cf8c173a",
+}
+NAMED_DIAGNOSTIC_CELLS = (
+    "seen_surface_seen_operand",
+    "held_surface_seen_operand",
+    "seen_surface_held_operand",
+    "held_surface_held_operand",
+)
 
 SCIENTIFIC_MARKERS = (
     *cg.TASK_ORDER,
@@ -969,6 +1008,1203 @@ def require_exact_str(value: object, field_name: str) -> str:
     if type(value) is not str:
         raise ValueError(f"Feasibility cell {field_name} must be a JSON string.")
     return value
+
+
+def canonical_record_set_sha256(records: Sequence[FeasibilityRecord]) -> str:
+    payload = b"".join(
+        (json.dumps(asdict(record), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        for record in records
+    )
+    return sha256(payload).hexdigest()
+
+
+def diagnostic_record_sets() -> dict[str, tuple[FeasibilityRecord, ...]]:
+    named = build_family_records("named_value_json")
+    array = build_family_records("array_json")
+    named_train = tuple(record for record in named if record.split == "train")
+    named_eval = tuple(record for record in named if record.split == "eval")
+    array_train = tuple(record for record in array if record.split == "train")
+    array_eval = tuple(record for record in array if record.split == "eval")
+    return {
+        "named_train512": named_train,
+        "named_train_first64": named_train[:EVAL_RECORDS_PER_FAMILY],
+        "named_eval64": named_eval,
+        "array_train512": array_train,
+        "array_eval64": array_eval,
+    }
+
+
+def validate_diagnostic_record_hashes() -> dict[str, str]:
+    actual = {name: canonical_record_set_sha256(records) for name, records in diagnostic_record_sets().items()}
+    if actual != DIAGNOSTIC_RECORD_HASHES:
+        raise ValueError(f"Diagnostic record hash mismatch: expected {DIAGNOSTIC_RECORD_HASHES!r}, got {actual!r}.")
+    return actual
+
+
+def named_roster(record: FeasibilityRecord) -> tuple[tuple[str, str], ...]:
+    roster = tuple((key.casefold(), value.casefold()) for key, value in NAMED_FIELD_RE.findall(record.prompt))
+    if tuple(key for key, _value in roster) != NAMED_VALUE_KEYS:
+        raise ValueError("named_value_json roster must list red, blue, green, silver in order.")
+    return roster
+
+
+def render_named_surface_from_operand(record: FeasibilityRecord, surface_split: str) -> tuple[str, str]:
+    if record.family != "named_value_json":
+        raise ValueError("Named diagnostic rows require named_value_json records.")
+    if surface_split not in {"train", "eval"}:
+        raise ValueError("Named diagnostic surface_split must be train or eval.")
+    surface_index = record.index % 4
+    target = named_value_target_key(record)
+    field_text = "; ".join(f"{key}={value}" for key, value in named_roster(record))
+    prompt = PROMPT_SURFACES["named_value_json"][surface_split][surface_index].format(a=target, b=field_text)
+    template_id = f"seq_named_value_json_{surface_split}_{surface_index}"
+    return prompt, template_id
+
+
+def build_named_diagnostic_matrix() -> dict[str, list[dict[str, object]]]:
+    sets = diagnostic_record_sets()
+    sources = {
+        "seen": sets["named_train_first64"],
+        "held": sets["named_eval64"],
+    }
+    cell_plan = {
+        "seen_surface_seen_operand": ("train", "seen"),
+        "held_surface_seen_operand": ("eval", "seen"),
+        "seen_surface_held_operand": ("train", "held"),
+        "held_surface_held_operand": ("eval", "held"),
+    }
+    matrix: dict[str, list[dict[str, object]]] = {}
+    for cell, (surface_split, operand_group) in cell_plan.items():
+        rows: list[dict[str, object]] = []
+        for row_index, source_record in enumerate(sources[operand_group]):
+            prompt, template_id = render_named_surface_from_operand(source_record, surface_split)
+            rows.append(
+                {
+                    "family": "named_value_json",
+                    "diagnostic_cell": cell,
+                    "row_index": row_index,
+                    "operand_source_split": source_record.split,
+                    "operand_source_index": source_record.index,
+                    "operand_id": source_record.operand_id,
+                    "source_template_id": source_record.template_id,
+                    "surface_source_split": surface_split,
+                    "surface_index": source_record.index % 4,
+                    "template_id": template_id,
+                    "target_key": named_value_target_key(source_record),
+                    "roster": [{"key": key, "value": value} for key, value in named_roster(source_record)],
+                    "prompt": prompt,
+                    "expected": source_record.answer,
+                }
+            )
+        matrix[cell] = rows
+    validate_named_diagnostic_matrix(matrix)
+    return matrix
+
+
+def validate_named_diagnostic_matrix(matrix: dict[str, list[dict[str, object]]]) -> None:
+    if tuple(matrix.keys()) != NAMED_DIAGNOSTIC_CELLS:
+        raise ValueError("Named diagnostic matrix must contain the four frozen cells in canonical order.")
+    for cell, rows in matrix.items():
+        if len(rows) != EVAL_RECORDS_PER_FAMILY:
+            raise ValueError("Every Named diagnostic cell must contain exactly 64 rows.")
+        counts: Counter[tuple[str, str]] = Counter()
+        for row_index, row in enumerate(rows):
+            if row.get("row_index") != row_index:
+                raise ValueError("Named diagnostic rows must retain deterministic row_index order.")
+            operand_split = require_exact_str(row.get("operand_source_split"), "operand_source_split")
+            surface_split = require_exact_str(row.get("surface_source_split"), "surface_source_split")
+            if cell.endswith("seen_operand") and operand_split != "train":
+                raise ValueError("Seen-operand cells must retain train operand source metadata.")
+            if cell.endswith("held_operand") and operand_split != "eval":
+                raise ValueError("Held-operand cells must retain eval operand source metadata.")
+            if cell.startswith("seen_surface") and surface_split != "train":
+                raise ValueError("Seen-surface cells must render train surfaces.")
+            if cell.startswith("held_surface") and surface_split != "eval":
+                raise ValueError("Held-surface cells must render eval surfaces.")
+            target_key = require_exact_str(row.get("target_key"), "target_key")
+            template_id = require_exact_str(row.get("template_id"), "template_id")
+            if template_id != f"seq_named_value_json_{surface_split}_{row['surface_index']}":
+                raise ValueError("Named diagnostic template_id must identify only the rendered surface.")
+            counts[(template_id, target_key)] += 1
+            prompt = require_exact_str(row.get("prompt"), "prompt")
+            expected = require_exact_str(row.get("expected"), "expected")
+            source_like = FeasibilityRecord(
+                family="named_value_json",
+                split=surface_split,
+                index=require_exact_int(row.get("operand_source_index"), "operand_source_index"),
+                template_id=template_id,
+                operand_id=require_exact_str(row.get("operand_id"), "operand_id"),
+                prompt=prompt,
+                answer=expected,
+            )
+            bound_prompt_surface_id(source_like, a=target_key, b=named_value_field_text(source_like))
+            other_split = "eval" if surface_split == "train" else "train"
+            other_prompt, _other_template = render_named_surface_from_operand(
+                FeasibilityRecord(
+                    family="named_value_json",
+                    split=operand_split,
+                    index=require_exact_int(row.get("operand_source_index"), "operand_source_index"),
+                    template_id=require_exact_str(row.get("source_template_id"), "source_template_id"),
+                    operand_id=require_exact_str(row.get("operand_id"), "operand_id"),
+                    prompt=prompt if operand_split == surface_split else render_named_surface_from_operand(source_like, operand_split)[0],
+                    answer=expected,
+                ),
+                other_split,
+            )
+            if len(prompt.encode("utf-8")) != len(other_prompt.encode("utf-8")):
+                raise ValueError("Named diagnostic paired train/eval prompts must retain byte-length equality.")
+        if any(count != 4 for count in counts.values()) or len(counts) != 16:
+            raise ValueError("Named diagnostic template×target-key balance must be exactly four in every cell.")
+
+
+def utf8_bytes_or_none(value: str | None) -> bytes | None:
+    return None if value is None else value.encode("utf-8")
+
+
+def byte_hamming_distance(left: str, right: str) -> int | None:
+    left_bytes = left.encode("utf-8")
+    right_bytes = right.encode("utf-8")
+    if len(left_bytes) != len(right_bytes):
+        return None
+    return sum(a != b for a, b in zip(left_bytes, right_bytes, strict=True))
+
+
+def byte_edit_distance(left: str, right: str) -> int:
+    a = left.encode("utf-8")
+    b = right.encode("utf-8")
+    previous = list(range(len(b) + 1))
+    for index_a, byte_a in enumerate(a, start=1):
+        current = [index_a]
+        for index_b, byte_b in enumerate(b, start=1):
+            current.append(
+                min(
+                    previous[index_b] + 1,
+                    current[index_b - 1] + 1,
+                    previous[index_b - 1] + int(byte_a != byte_b),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def byte_first_error(left: str, right: str) -> int | None:
+    left_bytes = left.encode("utf-8")
+    right_bytes = right.encode("utf-8")
+    for index, (left_byte, right_byte) in enumerate(zip(left_bytes, right_bytes)):
+        if left_byte != right_byte:
+            return index
+    if len(left_bytes) == len(right_bytes):
+        return None
+    return min(len(left_bytes), len(right_bytes))
+
+
+def generation_slice_metrics(prompt: str, expected: str, raw_token_ids: Sequence[int]) -> dict[str, object]:
+    tokenizer = ByteTokenizer()
+    prefix = tuple(tokenizer.encode_evaluation_prefix(prompt))
+    full_ids = tuple(int(token) for token in raw_token_ids)
+    if full_ids[: len(prefix)] != prefix:
+        raise ValueError("Diagnostic raw_token_ids prefix does not exactly encode the retained prompt.")
+    generation_slice = full_ids[len(prefix) :]
+    decoded_error = None
+    try:
+        decoded: str | None = tokenizer.decode_generated_response(full_ids)
+    except (UnicodeDecodeError, ValueError) as exc:
+        decoded = None
+        decoded_error = f"{type(exc).__name__}: {exc}"
+    has_eos = decoded_error is None and generation_slice.count(EOS_ID) == 1 and generation_slice[-1:] == (EOS_ID,)
+    hit_generation_cap = decoded_error is None and not has_eos and len(generation_slice) == ByteTokenizer.max_generated_tokens
+    hit_context_cap = decoded_error is None and not has_eos and len(full_ids) == ByteTokenizer.max_sequence_length
+    return {
+        "generated": decoded,
+        "generation_error": decoded_error,
+        "exact_match": decoded == expected,
+        "raw_token_ids": list(full_ids),
+        "generation_token_count_including_eos": len(generation_slice),
+        "decoded_response_utf8_bytes": None if decoded is None else len(decoded.encode("utf-8")),
+        "has_eos": has_eos,
+        "hit_generation_cap": hit_generation_cap,
+        "hit_context_cap": hit_context_cap,
+        "response_hamming_distance": None if decoded is None else byte_hamming_distance(decoded, expected),
+        "response_edit_distance": None if decoded is None else byte_edit_distance(decoded, expected),
+        "response_first_error": None if decoded is None else byte_first_error(decoded, expected),
+    }
+
+
+def named_row_metrics(prompt: str, expected: str, raw_token_ids: Sequence[int], target_key: str, roster_values: Sequence[str]) -> dict[str, object]:
+    base = generation_slice_metrics(prompt, expected, raw_token_ids)
+    generated = base["generated"]
+    parsed = None
+    valid_json_string = False
+    valid_named_grammar = False
+    if isinstance(generated, str):
+        try:
+            parsed = json.loads(generated)
+            valid_json_string = isinstance(parsed, str)
+            valid_named_grammar = valid_json_string and NAMED_VALUE_RE.fullmatch(parsed) is not None
+        except json.JSONDecodeError:
+            parsed = None
+    target_prefix = isinstance(parsed, str) and parsed.startswith(f"{target_key}-")
+    expected_value = json.loads(expected)
+    suffix = parsed[len(target_key) + 1 :] if target_prefix else None
+    expected_suffix = expected_value[len(target_key) + 1 :]
+    suffix_first_error = None if suffix is None else byte_first_error(suffix, expected_suffix)
+    suffix_hamming = None if suffix is None or len(suffix.encode("utf-8")) != 4 else byte_hamming_distance(suffix, expected_suffix)
+    suffix_edit = None if suffix is None else byte_edit_distance(suffix, expected_suffix)
+    suffix_correct_positions = None
+    if suffix is not None:
+        suffix_bytes = suffix.encode("utf-8")
+        expected_bytes = expected_suffix.encode("utf-8")
+        suffix_correct_positions = sum(
+            index < len(suffix_bytes) and suffix_bytes[index] == expected_bytes[index]
+            for index in range(4)
+        )
+    base.update(
+        {
+            "valid_json_string": valid_json_string,
+            "valid_named_grammar": valid_named_grammar,
+            "target_prefix": target_prefix,
+            "exact_target_value": parsed == expected_value,
+            "exact_distractor_value": isinstance(parsed, str) and parsed in set(roster_values) - {expected_value},
+            "occurs_in_prompt": isinstance(parsed, str) and parsed in prompt,
+            "suffix_correct_positions": suffix_correct_positions,
+            "suffix_position_denominator": 4 if target_prefix else 0,
+            "suffix_hamming_distance": suffix_hamming,
+            "suffix_edit_distance": suffix_edit,
+            "suffix_first_error": suffix_first_error,
+        }
+    )
+    return base
+
+
+def array_row_metrics(prompt: str, expected: str, raw_token_ids: Sequence[int]) -> dict[str, object]:
+    base = generation_slice_metrics(prompt, expected, raw_token_ids)
+    generated = base["generated"]
+    expected_items = json.loads(expected)
+    syntax_valid = False
+    schema_valid = False
+    correct_item_count = False
+    positional_exact_items = None
+    missing_items = None
+    extra_items = None
+    if isinstance(generated, str):
+        try:
+            parsed = json.loads(generated)
+            syntax_valid = True
+            schema_valid = isinstance(parsed, list) and all(isinstance(item, str) for item in parsed)
+        except json.JSONDecodeError:
+            parsed = None
+        if schema_valid:
+            correct_item_count = len(parsed) == len(expected_items)  # type: ignore[arg-type]
+            positional_exact_items = sum(1 for got, want in zip(parsed, expected_items) if got == want)  # type: ignore[arg-type]
+            missing_items = list((Counter(expected_items) - Counter(parsed)).elements())  # type: ignore[arg-type]
+            extra_items = list((Counter(parsed) - Counter(expected_items)).elements())  # type: ignore[arg-type]
+    base.update(
+        {
+            "valid_json_syntax": syntax_valid,
+            "valid_array_schema": schema_valid,
+            "correct_item_count": correct_item_count,
+            "positional_exact_items": positional_exact_items,
+            "missing_items": missing_items,
+            "extra_items": extra_items,
+        }
+    )
+    return base
+
+
+def count_rate(numerator: int, denominator: int) -> dict[str, object]:
+    return {"numerator": numerator, "denominator": denominator, "rate": None if denominator == 0 else numerator / denominator}
+
+
+def mean_value(total: float, count: int) -> dict[str, object]:
+    return {"observation_count": count, "mean": None if count == 0 else total / count}
+
+
+def aggregate_named_rows(rows: Sequence[dict[str, object]]) -> dict[str, object]:
+    exact = sum(1 for row in rows if row["exact_match"] is True)
+    target_prefix_rows = [row for row in rows if row["target_prefix"] is True]
+    suffix_num = sum(int(row["suffix_correct_positions"]) for row in target_prefix_rows)
+    suffix_den = 4 * len(target_prefix_rows)
+    first_errors = [row["suffix_first_error"] for row in rows if row["suffix_first_error"] is not None]
+    return {
+        "exact_sequence_matches": count_rate(exact, len(rows)),
+        "valid_json_string": count_rate(sum(1 for row in rows if row["valid_json_string"] is True), len(rows)),
+        "valid_named_grammar": count_rate(sum(1 for row in rows if row["valid_named_grammar"] is True), len(rows)),
+        "target_prefix": count_rate(len(target_prefix_rows), len(rows)),
+        "exact_target_value": count_rate(sum(1 for row in rows if row["exact_target_value"] is True), len(rows)),
+        "exact_distractor_value": count_rate(sum(1 for row in rows if row["exact_distractor_value"] is True), len(rows)),
+        "occurs_in_prompt": count_rate(sum(1 for row in rows if row["occurs_in_prompt"] is True), len(rows)),
+        "suffix_position_accuracy": count_rate(suffix_num, suffix_den),
+        "suffix_first_error_histogram": {
+            "observation_count": len(first_errors),
+            "histogram": {str(key): value for key, value in sorted(Counter(first_errors).items())},
+        },
+    }
+
+
+def aggregate_array_rows(rows: Sequence[dict[str, object]]) -> dict[str, object]:
+    return {
+        "greedy_exact_matches": count_rate(sum(1 for row in rows if row["exact_match"] is True), len(rows)),
+        "valid_json_syntax": count_rate(sum(1 for row in rows if row["valid_json_syntax"] is True), len(rows)),
+        "valid_array_schema": count_rate(sum(1 for row in rows if row["valid_array_schema"] is True), len(rows)),
+        "correct_item_count": count_rate(sum(1 for row in rows if row["correct_item_count"] is True), len(rows)),
+    }
+
+
+def teacher_forced_rows(
+    model: torch.nn.Module,
+    records: Sequence[FeasibilityRecord],
+    tokenizer: ByteTokenizer,
+    device: torch.device,
+    *,
+    split: str,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    if len(records) % BATCH_SIZE != 0:
+        raise ValueError("Teacher-forced evaluation forbids partial batches.")
+    if model.training:
+        raise ValueError("Teacher-forced evaluation requires model.eval() before entry.")
+    if any(parameter.dtype != torch.float32 for parameter in model.parameters()):
+        raise ValueError("Teacher-forced evaluation requires float32 model parameters.")
+    rows: list[dict[str, object]] = []
+    with torch.no_grad():
+        for batch_index in range(0, len(records), BATCH_SIZE):
+            batch_records = records[batch_index : batch_index + BATCH_SIZE]
+            input_ids = encode_record_batch(tuple(TextRecord(record.prompt, record.answer) for record in batch_records), tokenizer, max_length=ByteTokenizer.max_sequence_length)
+            if tuple(input_ids.shape) != (BATCH_SIZE, ByteTokenizer.max_sequence_length) or input_ids.dtype != torch.int64:
+                raise ValueError("Teacher-forced input batch must have int64 shape [64, 256].")
+            input_ids = input_ids.to(device)
+            logits = model(input_ids)
+            if logits.dtype != torch.float32:
+                raise ValueError("Teacher-forced logits must be float32.")
+            labels = response_only_labels(input_ids)
+            if labels.dtype != torch.int64:
+                raise ValueError("Teacher-forced labels must be int64.")
+            losses = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.shape[-1]),
+                labels.reshape(-1),
+                ignore_index=-100,
+                reduction="none",
+            ).reshape(BATCH_SIZE, ByteTokenizer.max_sequence_length)
+            if losses.dtype != torch.float32:
+                raise ValueError("Teacher-forced unreduced loss tensor must be float32.")
+            predictions = logits.argmax(dim=-1)
+            for row_within_batch, record in enumerate(batch_records):
+                selected_positions = [position for position, label in enumerate(labels[row_within_batch].tolist()) if label != -100]
+                selected_count = len(selected_positions)
+                correct_count = sum(
+                    int(predictions[row_within_batch, position].item()) == int(labels[row_within_batch, position].item())
+                    for position in selected_positions
+                )
+                nll_values = [float(losses[row_within_batch, position].detach().cpu()) for position in selected_positions]
+                rows.append(
+                    {
+                        "split": split,
+                        "record_index": record.index,
+                        "template_id": record.template_id,
+                        "operand_id": record.operand_id,
+                        "batch_index": batch_index // BATCH_SIZE,
+                        "row_within_batch": row_within_batch,
+                        "selected_token_count": selected_count,
+                        "correct_token_count": correct_count,
+                        "sequence_exact": correct_count == selected_count,
+                        "nll_numerator": math.fsum(nll_values),
+                    }
+                )
+    total_selected = sum(int(row["selected_token_count"]) for row in rows)
+    total_correct = sum(int(row["correct_token_count"]) for row in rows)
+    total_nll = math.fsum(float(row["nll_numerator"]) for row in rows)
+    aggregate = {
+        "sequence_exact": count_rate(sum(1 for row in rows if row["sequence_exact"] is True), len(rows)),
+        "token_accuracy": count_rate(total_correct, total_selected),
+        "loss": None if total_selected == 0 else total_nll / total_selected,
+        "nll_numerator": total_nll,
+        "selected_token_count": total_selected,
+    }
+    return rows, aggregate
+
+
+def load_checkpoint_model(checkpoint_path: Path, model_size: str, device: torch.device) -> torch.nn.Module:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    model = build_model(model_size)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    model.eval()
+    return model
+
+
+def generate_named_diagnostic_rows(
+    model: torch.nn.Module,
+    matrix_rows: Sequence[dict[str, object]],
+    device: torch.device,
+) -> list[dict[str, object]]:
+    tokenizer = ByteTokenizer()
+    output_rows: list[dict[str, object]] = []
+    model.eval()
+    with torch.no_grad():
+        for row in matrix_rows:
+            prompt = require_exact_str(row["prompt"], "prompt")
+            expected = require_exact_str(row["expected"], "expected")
+            prefix = tokenizer.encode_evaluation_prefix(prompt)
+            prefix_tensor = torch.tensor([prefix], dtype=torch.long, device=device)
+            generated = model.greedy_decode(prefix_tensor)
+            raw_ids = tuple(int(token) for token in generated[0].detach().cpu().tolist())
+            roster_values = [require_exact_str(item["value"], "roster.value") for item in row["roster"]]  # type: ignore[index]
+            output_rows.append(
+                {
+                    **row,
+                    **named_row_metrics(
+                        prompt,
+                        expected,
+                        raw_ids,
+                        require_exact_str(row["target_key"], "target_key"),
+                        roster_values,
+                    ),
+                }
+            )
+    return output_rows
+
+
+def generate_array_rows(
+    model: torch.nn.Module,
+    records: Sequence[FeasibilityRecord],
+    device: torch.device,
+    *,
+    comparison_source: str,
+    model_size: str,
+    steps: int,
+    seed: int,
+) -> list[dict[str, object]]:
+    tokenizer = ByteTokenizer()
+    output_rows: list[dict[str, object]] = []
+    model.eval()
+    with torch.no_grad():
+        for row_index, record in enumerate(records):
+            prefix = tokenizer.encode_evaluation_prefix(record.prompt)
+            prefix_tensor = torch.tensor([prefix], dtype=torch.long, device=device)
+            generated = model.greedy_decode(prefix_tensor)
+            raw_ids = tuple(int(token) for token in generated[0].detach().cpu().tolist())
+            output_rows.append(
+                {
+                    "family": "array_json",
+                    "comparison_source": comparison_source,
+                    "model_size": model_size,
+                    "steps": steps,
+                    "seed": seed,
+                    "row_index": row_index,
+                    "source_split": record.split,
+                    "source_index": record.index,
+                    "template_id": record.template_id,
+                    "operand_id": record.operand_id,
+                    "prompt": record.prompt,
+                    "expected": record.answer,
+                    "item_count": array_item_count(record),
+                    **array_row_metrics(record.prompt, record.answer, raw_ids),
+                }
+            )
+    return output_rows
+
+
+def array_rows_from_reused_generations(
+    generations_path: Path,
+    *,
+    comparison_source: str,
+    model_size: str,
+    steps: int,
+    seed: int,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    records = grouped_records()["array_json"]["eval"]
+    raw_rows = validate_generation_rows(
+        generations_path,
+        {
+            "family": "array_json",
+            "eval_count": EVAL_RECORDS_PER_FAMILY,
+            "exact_matches": sum(
+                1
+                for line in generations_path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line).get("exact_match") is True
+            ),
+        },
+        current_record_for_row=None,
+    )
+    for row_index, (raw_row, record) in enumerate(zip(raw_rows, records, strict=True)):
+        if raw_row["prompt"] != record.prompt or raw_row["expected"] != record.answer:
+            raise ValueError("Reused array generation row no longer matches current frozen array eval record.")
+        rows.append(
+            {
+                "family": "array_json",
+                "comparison_source": comparison_source,
+                "model_size": model_size,
+                "steps": steps,
+                "seed": seed,
+                "row_index": row_index,
+                "source_split": "eval",
+                "source_index": record.index,
+                "template_id": record.template_id,
+                "operand_id": record.operand_id,
+                "prompt": record.prompt,
+                "expected": record.answer,
+                "item_count": array_item_count(record),
+                **array_row_metrics(record.prompt, record.answer, raw_row["raw_token_ids"]),
+            }
+        )
+    return rows
+
+
+def array_item_template_counts(rows: Sequence[dict[str, object]]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        counts[f"{row['template_id']}__items{row['item_count']}"] += 1
+    return dict(sorted(counts.items()))
+
+
+def diagnostic_source_clean_allowed_paths(
+    input_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path],
+) -> set[Path]:
+    allowed: set[Path] = set()
+    for number in range(1, 5):
+        root = input_root.with_name(f"feasibility_{number:03d}")
+        if root.exists():
+            allowed.update(inventory_bound_root_paths(root))
+    for predecessor in predecessor_diagnostic_roots:
+        terminal, _terminal_data, manifest, _manifest_sha = load_diagnostic_terminal_binding(predecessor)
+        allowed.add(terminal.resolve())
+        allowed.add(manifest.resolve())
+        manifest_data = json.loads(manifest.read_text())
+        for row in manifest_data.get("file_inventory", []):
+            if isinstance(row, dict) and isinstance(row.get("path"), str):
+                allowed.add((predecessor / row["path"]).resolve())
+    return allowed
+
+
+def capture_diagnostic_source_provenance(
+    input_root: Path,
+    output_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path],
+) -> SourceSnapshot:
+    require_diagnostic_artifact_location(output_root, "output_root")
+    allowed = diagnostic_source_clean_allowed_paths(input_root, predecessor_diagnostic_roots)
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        cwd=REPO_ROOT,
+    ).stdout.splitlines()
+    for line in status:
+        code = line[:2]
+        rel = line[3:]
+        candidate = (Path(rel) if Path(rel).is_absolute() else REPO_ROOT / rel).resolve()
+        if code != "??":
+            raise RuntimeError(f"Tracked or staged source change blocks diagnostic run: {line}")
+        if candidate not in allowed:
+            raise RuntimeError(f"Untracked file is not an exact supplied diagnostic/feasibility binding: {line}")
+    ignored_inputs = ignored_source_inputs()
+    if ignored_inputs:
+        raise RuntimeError("Ignored executable source input blocks diagnostic run.")
+    return SourceSnapshot(commit=current_source_commit(), status_lines=tuple(status), ignored_inputs=())
+
+
+def current_environment_dict() -> dict[str, object]:
+    return {
+        "python": sys.version,
+        "platform": platform.platform(),
+        "torch": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "cuda": torch.version.cuda,
+        "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "gpu_driver": gpu_driver_version(),
+    }
+
+
+def validate_diagnostic_core_blobs(commit: str = "HEAD") -> dict[str, str]:
+    actual = {
+        path: git_output(["git", "rev-parse", f"{commit}:{path}"])
+        for path in DIAGNOSTIC_CORE_BLOBS
+    }
+    if actual != DIAGNOSTIC_CORE_BLOBS:
+        raise ValueError(f"Frozen core Git blob mismatch: expected {DIAGNOSTIC_CORE_BLOBS!r}, got {actual!r}.")
+    return actual
+
+
+def validate_diagnostic_input_root(
+    input_root: Path,
+    *,
+    environment: dict[str, object] | None = None,
+) -> dict[str, object]:
+    require_canonical_path_string(str(input_root), "input_root", ROOT_RE)
+    require_artifact_location(input_root, "input_root", ROOT_RE)
+    if input_root.name != DIAGNOSTIC_INPUT_ROOT_NAME:
+        raise ValueError("Diagnostic input root must be the frozen feasibility_004 root.")
+    for relative_path, expected_sha in DIAGNOSTIC_INPUT_CHECKSUMS.items():
+        path = input_root / relative_path
+        if not path.is_file() or file_sha256(path) != expected_sha:
+            raise ValueError(f"Frozen feasibility_004 {relative_path} checksum mismatch.")
+    validate_feasibility_root_artifacts(input_root, require_passing=False)
+    manifest_data = json.loads((input_root / "manifest.json").read_text())
+    if manifest_data.get("source_commit") != DIAGNOSTIC_INPUT_SOURCE_COMMIT:
+        raise ValueError("Frozen feasibility_004 source commit mismatch.")
+    if manifest_data.get("terminal_status") != "FAILED":
+        raise ValueError("Frozen feasibility_004 must be a FAILED root.")
+    actual_environment = current_environment_dict() if environment is None else environment
+    if actual_environment != manifest_data.get("environment"):
+        raise ValueError("Diagnostic execution environment must exactly match feasibility_004.")
+    validate_diagnostic_core_blobs()
+    validate_diagnostic_record_hashes()
+    return manifest_data
+
+
+def diagnostic_root_number(root: Path) -> int:
+    match = DIAGNOSTIC_ROOT_RE.match(root.name)
+    if match is None:
+        raise ValueError("Diagnostic root basename must be immutable numbered form feasibility_diagnostic_NNN.")
+    number = int(match.group(1))
+    if number <= 0:
+        raise ValueError("Diagnostic root numbering starts at feasibility_diagnostic_001.")
+    return number
+
+
+def require_diagnostic_artifact_location(path: Path, field_name: str) -> None:
+    require_canonical_path_string(str(path), field_name, DIAGNOSTIC_ROOT_RE)
+    parent_path = ARTIFACT_PARENT if ARTIFACT_PARENT.is_absolute() else REPO_ROOT / ARTIFACT_PARENT
+    artifact_path = path if path.is_absolute() else REPO_ROOT / path
+    reject_existing_symlink_component(parent_path, f"{field_name} artifact parent")
+    reject_existing_symlink_component(artifact_path, field_name)
+    parent = parent_path.resolve(strict=False)
+    resolved = artifact_path.resolve(strict=False)
+    if resolved.parent != parent:
+        raise ValueError(f"{field_name} must be located directly under {ARTIFACT_PARENT.as_posix()}.")
+
+
+def diagnostic_terminal_binding(root: Path) -> dict[str, object]:
+    require_diagnostic_artifact_location(root, "predecessor_diagnostic_root")
+    terminal, terminal_data, manifest, manifest_sha = load_diagnostic_terminal_binding(root)
+    return {
+        "path": str(root),
+        "terminal_state": terminal.stem,
+        "terminal_sha256": file_sha256(terminal),
+        "manifest_sha256": manifest_sha,
+        "source_commit": terminal_data.get("source_commit"),
+        "diagnostic_lineage": terminal_data.get("diagnostic_lineage", []),
+    }
+
+
+def load_diagnostic_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, str]:
+    done = root / "DONE.json"
+    failed = root / "FAILED.json"
+    existing = [path for path in (done, failed) if path.exists()]
+    if len(existing) > 1:
+        raise ValueError("Diagnostic root has both DONE.json and FAILED.json.")
+    if not existing:
+        raise ValueError("Diagnostic root lacks DONE.json or FAILED.json.")
+    terminal = existing[0]
+    manifest = root / "manifest.json"
+    if not manifest.exists():
+        raise ValueError("Diagnostic root lacks manifest.json.")
+    manifest_sha = file_sha256(manifest)
+    terminal_data = json.loads(terminal.read_text())
+    manifest_data = json.loads(manifest.read_text())
+    for data_name, data in (("terminal", terminal_data), ("manifest", manifest_data)):
+        if data.get("artifact_class") != DIAGNOSTIC_ARTIFACT_CLASS:
+            raise ValueError(f"Diagnostic {data_name} artifact_class mismatch.")
+        if data.get("feasibility_selection_eligible") is not False:
+            raise ValueError(f"Diagnostic {data_name} must be non-selection.")
+        if data.get("task_010d_authorized") is not False:
+            raise ValueError(f"Diagnostic {data_name} must not authorize Task 010D.")
+    if terminal_data.get("status") != terminal.stem or manifest_data.get("terminal_status") != terminal.stem:
+        raise ValueError("Diagnostic terminal status mismatch.")
+    if terminal_data.get("manifest_sha256") != manifest_sha:
+        raise ValueError("Diagnostic terminal does not bind manifest checksum.")
+    return terminal, terminal_data, manifest, manifest_sha
+
+
+def validate_new_diagnostic_root(
+    input_root: Path,
+    output_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path] = (),
+) -> None:
+    validate_diagnostic_input_root(input_root)
+    require_diagnostic_artifact_location(output_root, "output_root")
+    output_number = diagnostic_root_number(output_root)
+    predecessor_numbers: list[int] = []
+    lineage: list[dict[str, object]] = []
+    for predecessor in predecessor_diagnostic_roots:
+        require_diagnostic_artifact_location(predecessor, "predecessor_diagnostic_root")
+        number = diagnostic_root_number(predecessor)
+        if predecessor_numbers and number <= predecessor_numbers[-1]:
+            raise ValueError("Predecessor diagnostic roots must be in strictly ascending order.")
+        terminal, _terminal_data, _manifest, _manifest_sha = load_diagnostic_terminal_binding(predecessor)
+        if terminal.stem == "DONE":
+            raise ValueError("A prior DONE diagnostic root forbids later diagnostic roots.")
+        predecessor_numbers.append(number)
+        binding = diagnostic_terminal_binding(predecessor)
+        lineage.extend(binding.get("diagnostic_lineage", []))  # type: ignore[arg-type]
+        lineage.append(binding)
+    if predecessor_numbers != list(range(1, output_number)):
+        raise ValueError("Diagnostic predecessor roots must be complete and continuous before the output root.")
+    if output_root.exists() or output_root.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite existing diagnostic root: {output_root}")
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    if temp_root.exists() or temp_root.is_symlink():
+        raise FileExistsError(f"Temporary diagnostic root already exists: {temp_root}")
+
+
+def validate_diagnostic_cli_contract(
+    *,
+    device: str,
+    input_root: Path,
+    output_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path],
+) -> None:
+    if device != DIAGNOSTIC_REQUIRED_DEVICE:
+        raise ValueError("diagnose-failure only supports device string cuda:0.")
+    expected_command = [
+        "scripts/phase8_sequence_feasibility.py",
+        "diagnose-failure",
+        "--device",
+        DIAGNOSTIC_REQUIRED_DEVICE,
+        "--input-root",
+        str(input_root),
+        "--output-root",
+        str(output_root),
+    ]
+    for predecessor in predecessor_diagnostic_roots:
+        expected_command.extend(["--predecessor-diagnostic-root", str(predecessor)])
+    validate_new_diagnostic_root(input_root, output_root, predecessor_diagnostic_roots)
+    if output_root.name == "feasibility_diagnostic_001" and predecessor_diagnostic_roots:
+        raise ValueError("Initial diagnostic command must not include predecessor roots.")
+
+
+def reused_feasibility_cell_binding(input_root: Path, family: str, model_size: str, seed: int) -> dict[str, object]:
+    manifest_path = input_root / "manifest.json"
+    manifest_environment = json.loads(manifest_path.read_text()).get("environment") if manifest_path.is_file() else None
+    manifest = validate_diagnostic_input_root(input_root, environment=manifest_environment)
+    cells = manifest.get("cells")
+    if not isinstance(cells, list):
+        raise ValueError("feasibility_004 manifest cells must be a list.")
+    matches = [
+        cell for cell in cells
+        if cell.get("family") == family and cell.get("model_size") == model_size and cell.get("seed") == seed
+    ]
+    if len(matches) != 1:
+        raise ValueError("Frozen feasibility_004 reused cell binding is missing or duplicated.")
+    cell = dict(matches[0])
+    generation_path = input_root / require_canonical_relative_path(cell["generations_path"], "generations_path")
+    checkpoint_path = input_root / require_canonical_relative_path(cell["checkpoint_path"], "checkpoint_path")
+    cell["generations_sha256"] = file_sha256(generation_path)
+    cell["checkpoint_sha256"] = file_sha256(checkpoint_path)
+    cell["generations_path"] = str(generation_path)
+    cell["checkpoint_path"] = str(checkpoint_path)
+    return cell
+
+
+def diagnostic_array_training_plan() -> list[dict[str, object]]:
+    return [
+        {"family": "array_json", "model_size": "small", "steps": DIAGNOSTIC_STEPS, "seed": seed}
+        for seed in SEEDS
+    ]
+
+
+def validate_diagnostic_array_training_plan(plan: Sequence[dict[str, object]]) -> None:
+    expected = diagnostic_array_training_plan()
+    if list(plan) != expected:
+        raise ValueError("Diagnostic must train exactly three array_json small/3000 runs with seeds 0,1,2.")
+
+
+def tensor_bytes(tensor: torch.Tensor) -> bytes:
+    return tensor.detach().cpu().contiguous().numpy().tobytes()
+
+
+def compare_model_to_checkpoint_step1500(model: torch.nn.Module, checkpoint_path: Path, model_size: str) -> None:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    expected_model = build_model(model_size)
+    if checkpoint.get("config") != expected_model.config.__dict__:
+        raise ValueError("Step-1500 equality gate config mismatch.")
+    if checkpoint.get("parameter_count") != expected_model.parameter_count:
+        raise ValueError("Step-1500 equality gate parameter_count mismatch.")
+    expected_state = checkpoint.get("model_state_dict")
+    current_state = model.state_dict()
+    if not isinstance(expected_state, dict) or set(expected_state) != set(current_state):
+        raise ValueError("Step-1500 equality gate state_dict keys mismatch.")
+    for key in sorted(current_state):
+        expected_tensor = expected_state[key]
+        current_tensor = current_state[key].detach().cpu()
+        if not isinstance(expected_tensor, torch.Tensor):
+            raise ValueError("Step-1500 equality gate checkpoint state contains a non-tensor.")
+        if expected_tensor.dtype != current_tensor.dtype:
+            raise ValueError(f"Step-1500 equality gate dtype mismatch for {key}.")
+        if tuple(expected_tensor.shape) != tuple(current_tensor.shape):
+            raise ValueError(f"Step-1500 equality gate shape mismatch for {key}.")
+        if tensor_bytes(expected_tensor) != tensor_bytes(current_tensor):
+            raise ValueError(f"Step-1500 equality gate tensor bytes mismatch for {key}.")
+
+
+def train_array_small_3000_diagnostic(
+    *,
+    seed: int,
+    train_records: Sequence[FeasibilityRecord],
+    tokenizer: ByteTokenizer,
+    device: torch.device,
+    frozen_step1500_checkpoint: Path,
+    checkpoint_path: Path,
+) -> dict[str, object]:
+    if device.type != "cuda" or device.index != 0:
+        raise ValueError("Array diagnostic training must run on cuda:0.")
+    set_deterministic_backend(seed)
+    model = build_model("small")
+    model.to(device)
+    model.train()
+    optimizer = make_optimizer(model)
+    batches = deterministic_batch_indices(
+        record_count=len(train_records),
+        seed=seed,
+        state_mask=0,
+        batch_size=BATCH_SIZE,
+        steps=DIAGNOSTIC_STEPS,
+    )
+    if batches[:TRAINING_STEPS] != deterministic_batch_indices(
+        record_count=len(train_records),
+        seed=seed,
+        state_mask=0,
+        batch_size=BATCH_SIZE,
+        steps=TRAINING_STEPS,
+    ):
+        raise ValueError("Diagnostic 3000-step batch stream does not extend the frozen 1500-step stream.")
+    final_loss = float("nan")
+    for step_index, batch in enumerate(batches, start=1):
+        batch_records = [TextRecord(train_records[index].prompt, train_records[index].answer) for index in batch]
+        input_ids = encode_record_batch(batch_records, tokenizer).to(device)
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(input_ids)
+        loss = response_only_loss(logits, input_ids)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
+        optimizer.step()
+        final_loss = float(loss.detach().cpu())
+        if step_index == TRAINING_STEPS:
+            rng_state = random.getstate()
+            torch_rng_state = torch.random.get_rng_state()
+            cuda_rng_state = torch.cuda.get_rng_state(device)
+            optimizer_state_keys = tuple(optimizer.state_dict().keys())
+            compare_model_to_checkpoint_step1500(model, frozen_step1500_checkpoint, "small")
+            if random.getstate() != rng_state:
+                raise ValueError("Step-1500 equality snapshot changed Python RNG state.")
+            if not torch.equal(torch.random.get_rng_state(), torch_rng_state):
+                raise ValueError("Step-1500 equality snapshot changed Torch RNG state.")
+            if not torch.equal(torch.cuda.get_rng_state(device), cuda_rng_state):
+                raise ValueError("Step-1500 equality snapshot changed CUDA RNG state.")
+            if tuple(optimizer.state_dict().keys()) != optimizer_state_keys:
+                raise ValueError("Step-1500 equality snapshot changed optimizer state schema.")
+    save_checkpoint(
+        str(checkpoint_path),
+        model,
+        metadata={
+            "artifact_class": DIAGNOSTIC_ARTIFACT_CLASS,
+            "feasibility_selection_eligible": False,
+            "task_010d_authorized": False,
+            "family": "array_json",
+            "model_size": "small",
+            "seed": seed,
+            "training_steps": DIAGNOSTIC_STEPS,
+            "training_loss": final_loss,
+        },
+    )
+    return {"final_loss": final_loss, "checkpoint_path": str(checkpoint_path)}
+
+
+def diagnostic_inventory(root: Path) -> list[dict[str, object]]:
+    rows = []
+    for row in inventory(root):
+        role = "summary" if row["path"] == "summary.json" else "diagnostic_artifact"
+        if str(row["path"]).endswith(".pt"):
+            role = "checkpoint"
+        elif str(row["path"]).endswith(".jsonl"):
+            role = "retained_rows"
+        rows.append({**row, "role": role})
+    return rows
+
+
+def write_diagnostic_terminal(
+    root: Path,
+    terminal_status: str,
+    *,
+    input_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path],
+    completed_scope: Sequence[dict[str, object]],
+    partial_scope: Sequence[dict[str, object]] = (),
+    failure: str | None = None,
+    failure_classification: str | None = None,
+) -> None:
+    if terminal_status not in {"DONE", "FAILED"}:
+        raise ValueError("Diagnostic terminal_status must be DONE or FAILED.")
+    if terminal_status == "FAILED" and failure_classification not in {"transient_infrastructure", "diagnostic_implementation_defect"}:
+        raise ValueError("FAILED diagnostics require a frozen failure classification.")
+    source_commit = current_source_commit()
+    source_snapshot = unchecked_source_snapshot()
+    input_manifest = json.loads((input_root / "manifest.json").read_text())
+    lineage = [diagnostic_terminal_binding(path) for path in predecessor_diagnostic_roots]
+    common = {
+        "artifact_class": DIAGNOSTIC_ARTIFACT_CLASS,
+        "feasibility_selection_eligible": False,
+        "task_010d_authorized": False,
+        "protocol": "phase8_feasibility_failure_diagnostic",
+        "terminal_status": terminal_status,
+        "failure": failure,
+        "failure_classification": failure_classification,
+        "source_commit": source_commit,
+        "source_provenance": asdict(source_snapshot),
+        "handoff": {
+            "path": DIAGNOSTIC_HANDOFF_PATH,
+            "sha256": file_sha256(REPO_ROOT / DIAGNOSTIC_HANDOFF_PATH),
+        },
+        "input_root": {
+            "path": str(input_root),
+            "manifest_sha256": file_sha256(input_root / "manifest.json"),
+            "summary_sha256": file_sha256(input_root / "summary.json"),
+            "terminal_sha256": file_sha256(input_root / "FAILED.json"),
+            "source_commit": input_manifest.get("source_commit"),
+            "predecessor_roots": input_manifest.get("predecessor_roots"),
+        },
+        "diagnostic_lineage": lineage,
+        "configuration": {
+            "artifact_class": DIAGNOSTIC_ARTIFACT_CLASS,
+            "feasibility_selection_eligible": False,
+            "task_010d_authorized": False,
+            "named_cells": list(NAMED_DIAGNOSTIC_CELLS),
+            "array_new_training": diagnostic_array_training_plan(),
+            "diagnostic_steps": DIAGNOSTIC_STEPS,
+            "formal_training_steps": TRAINING_STEPS,
+            "pass_threshold": PASS_THRESHOLD,
+        },
+        "record_hashes": validate_diagnostic_record_hashes(),
+        "core_blobs": validate_diagnostic_core_blobs(),
+        "environment": current_environment_dict(),
+        "completed_scope": list(completed_scope),
+        "partial_scope": list(partial_scope),
+    }
+    summary = {
+        **common,
+        "summary": {
+            "done": terminal_status == "DONE",
+            "completed_scope_count": len(completed_scope),
+            "partial_scope_count": len(partial_scope),
+        },
+    }
+    write_json(root / "summary.json", summary)
+    manifest = {**common, "file_inventory": diagnostic_inventory(root)}
+    write_json(root / "manifest.json", manifest)
+    manifest_sha = file_sha256(root / "manifest.json")
+    terminal = {
+        "artifact_class": DIAGNOSTIC_ARTIFACT_CLASS,
+        "feasibility_selection_eligible": False,
+        "task_010d_authorized": False,
+        "status": terminal_status,
+        "manifest_path": "manifest.json",
+        "manifest_sha256": manifest_sha,
+        "source_commit": source_commit,
+        "diagnostic_lineage": lineage,
+        "completed_scope": list(completed_scope),
+        "partial_scope": list(partial_scope),
+    }
+    if failure is not None:
+        terminal["error"] = failure
+        terminal["failure_classification"] = failure_classification
+    write_json(root / f"{terminal_status}.json", terminal)
+
+
+def run_diagnostic_failure(
+    *,
+    device: str,
+    input_root: Path,
+    output_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path] = (),
+) -> None:
+    validate_diagnostic_cli_contract(
+        device=device,
+        input_root=input_root,
+        output_root=output_root,
+        predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+    )
+    source_snapshot = capture_diagnostic_source_provenance(input_root, output_root, predecessor_diagnostic_roots)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    temp_root.mkdir(parents=True)
+    completed_scope: list[dict[str, object]] = []
+    partial_scope: list[dict[str, object]] = []
+    try:
+        validate_diagnostic_input_root(input_root)
+        tokenizer = ByteTokenizer()
+        target_device = torch.device(device)
+        records = grouped_records()
+        named_matrix = build_named_diagnostic_matrix()
+        write_jsonl(
+            temp_root / "named_diagnostic_matrix.jsonl",
+            (row for cell in NAMED_DIAGNOSTIC_CELLS for row in named_matrix[cell]),
+        )
+        completed_scope.append({"name": "named_matrix_construction", "rows": 4 * EVAL_RECORDS_PER_FAMILY})
+        for seed in SEEDS:
+            reused_named = reused_feasibility_cell_binding(input_root, "named_value_json", "medium", seed)
+            model = load_checkpoint_model(Path(str(reused_named["checkpoint_path"])), "medium", target_device)
+            for cell in NAMED_DIAGNOSTIC_CELLS:
+                cell_dir = temp_root / f"named_value_json__medium__seed{seed}__{cell}"
+                cell_dir.mkdir()
+                named_rows = generate_named_diagnostic_rows(model, named_matrix[cell], target_device)
+                write_jsonl(cell_dir / "generations.jsonl", named_rows)
+                write_json(cell_dir / "metrics.json", aggregate_named_rows(named_rows))
+                completed_scope.append(
+                    {
+                        "name": "named_cell",
+                        "seed": seed,
+                        "cell": cell,
+                        "rows": len(named_rows),
+                        "checkpoint_reused_from": reused_named["checkpoint_path"],
+                        "checkpoint_sha256": reused_named["checkpoint_sha256"],
+                    }
+                )
+        array_plan = diagnostic_array_training_plan()
+        validate_diagnostic_array_training_plan(array_plan)
+        write_json(temp_root / "array_training_plan.json", array_plan)
+        completed_scope.append({"name": "array_training_plan", "runs": len(array_plan)})
+        for model_size in MODEL_SIZES:
+            for seed in SEEDS:
+                reused_array = reused_feasibility_cell_binding(input_root, "array_json", model_size, seed)
+                model = load_checkpoint_model(Path(str(reused_array["checkpoint_path"])), model_size, target_device)
+                baseline_dir = temp_root / f"array_json__{model_size}__1500__seed{seed}__reused"
+                baseline_dir.mkdir()
+                array_rows = array_rows_from_reused_generations(
+                    Path(str(reused_array["generations_path"])),
+                    comparison_source="feasibility_004_reused",
+                    model_size=model_size,
+                    steps=TRAINING_STEPS,
+                    seed=seed,
+                )
+                write_jsonl(baseline_dir / "greedy_metrics_rows.jsonl", array_rows)
+                train_tf_rows, train_tf_aggregate = teacher_forced_rows(
+                    model,
+                    records["array_json"]["train"],
+                    tokenizer,
+                    target_device,
+                    split="train",
+                )
+                eval_tf_rows, eval_tf_aggregate = teacher_forced_rows(
+                    model,
+                    records["array_json"]["eval"],
+                    tokenizer,
+                    target_device,
+                    split="eval",
+                )
+                write_jsonl(baseline_dir / "teacher_forced_train_rows.jsonl", train_tf_rows)
+                write_jsonl(baseline_dir / "teacher_forced_eval_rows.jsonl", eval_tf_rows)
+                write_json(
+                    baseline_dir / "metrics.json",
+                    {
+                        "greedy": aggregate_array_rows(array_rows),
+                        "teacher_forced_train": train_tf_aggregate,
+                        "teacher_forced_eval": eval_tf_aggregate,
+                        "template_item_counts": array_item_template_counts(array_rows),
+                        "reused_generations_path": reused_array["generations_path"],
+                        "reused_generations_sha256": reused_array["generations_sha256"],
+                        "reused_checkpoint_path": reused_array["checkpoint_path"],
+                        "reused_checkpoint_sha256": reused_array["checkpoint_sha256"],
+                    },
+                )
+                completed_scope.append(
+                    {
+                        "name": "array_baseline_reuse",
+                        "model_size": model_size,
+                        "steps": TRAINING_STEPS,
+                        "seed": seed,
+                        "rows": len(array_rows),
+                    }
+                )
+        for row in array_plan:
+            seed = require_exact_int(row["seed"], "seed")
+            reused_small = reused_feasibility_cell_binding(input_root, "array_json", "small", seed)
+            run_dir = temp_root / f"array_json__small__3000__seed{seed}"
+            run_dir.mkdir()
+            train_result = train_array_small_3000_diagnostic(
+                seed=seed,
+                train_records=records["array_json"]["train"],
+                tokenizer=tokenizer,
+                device=target_device,
+                frozen_step1500_checkpoint=Path(str(reused_small["checkpoint_path"])),
+                checkpoint_path=run_dir / "checkpoint_step3000.pt",
+            )
+            model = load_checkpoint_model(run_dir / "checkpoint_step3000.pt", "small", target_device)
+            array_rows = generate_array_rows(
+                model,
+                records["array_json"]["eval"],
+                target_device,
+                comparison_source="diagnostic_small_3000",
+                model_size="small",
+                steps=DIAGNOSTIC_STEPS,
+                seed=seed,
+            )
+            write_jsonl(run_dir / "generations.jsonl", array_rows)
+            train_tf_rows, train_tf_aggregate = teacher_forced_rows(
+                model,
+                records["array_json"]["train"],
+                tokenizer,
+                target_device,
+                split="train",
+            )
+            eval_tf_rows, eval_tf_aggregate = teacher_forced_rows(
+                model,
+                records["array_json"]["eval"],
+                tokenizer,
+                target_device,
+                split="eval",
+            )
+            write_jsonl(run_dir / "teacher_forced_train_rows.jsonl", train_tf_rows)
+            write_jsonl(run_dir / "teacher_forced_eval_rows.jsonl", eval_tf_rows)
+            write_json(
+                run_dir / "metrics.json",
+                {
+                    "training": train_result,
+                    "greedy": aggregate_array_rows(array_rows),
+                    "teacher_forced_train": train_tf_aggregate,
+                    "teacher_forced_eval": eval_tf_aggregate,
+                    "template_item_counts": array_item_template_counts(array_rows),
+                    "step1500_checkpoint_reused_for_equality_gate": reused_small["checkpoint_path"],
+                    "step1500_checkpoint_sha256": reused_small["checkpoint_sha256"],
+                },
+            )
+            completed_scope.append(
+                {
+                    "name": "array_diagnostic_training",
+                    "model_size": "small",
+                    "steps": DIAGNOSTIC_STEPS,
+                    "seed": seed,
+                    "rows": len(array_rows),
+                    "checkpoint_path": str((run_dir / "checkpoint_step3000.pt").relative_to(temp_root)),
+                }
+            )
+        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
+        write_diagnostic_terminal(
+            temp_root,
+            "DONE",
+            input_root=input_root,
+            predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+            completed_scope=completed_scope,
+            partial_scope=partial_scope,
+        )
+        os.replace(temp_root, output_root)
+    except SourceChangedError:
+        raise
+    except Exception as exc:
+        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
+        partial_scope.append({"name": "diagnose_failure", "error": repr(exc)})
+        write_diagnostic_terminal(
+            temp_root,
+            "FAILED",
+            input_root=input_root,
+            predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+            completed_scope=completed_scope,
+            partial_scope=partial_scope,
+            failure=repr(exc),
+            failure_classification="diagnostic_implementation_defect",
+        )
+        os.replace(temp_root, output_root)
+        raise
 
 
 def run_suite(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> None:
@@ -2340,6 +3576,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     validate.add_argument("path")
     inspect = subparsers.add_parser("inspect-records")
     inspect.add_argument("--family", choices=FAMILIES)
+    diagnose = subparsers.add_parser("diagnose-failure")
+    diagnose.add_argument("--device", required=True)
+    diagnose.add_argument("--input-root", required=True)
+    diagnose.add_argument("--output-root", required=True)
+    diagnose.add_argument("--predecessor-diagnostic-root", action="append", default=[])
     return parser.parse_args(argv)
 
 
@@ -2364,6 +3605,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         families = (args.family,) if args.family else FAMILIES
         data = {family: [asdict(record) for record in build_family_records(family)] for family in families}
         print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    if args.command == "diagnose-failure":
+        input_root = Path(require_canonical_path_string(args.input_root, "input_root", ROOT_RE))
+        output_root = Path(require_canonical_path_string(args.output_root, "output_root", DIAGNOSTIC_ROOT_RE))
+        predecessor_diagnostic_roots = tuple(
+            Path(require_canonical_path_string(path, "predecessor_diagnostic_root", DIAGNOSTIC_ROOT_RE))
+            for path in args.predecessor_diagnostic_root
+        )
+        run_diagnostic_failure(
+            device=args.device,
+            input_root=input_root,
+            output_root=output_root,
+            predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+        )
         return 0
     raise AssertionError("unreachable")
 
