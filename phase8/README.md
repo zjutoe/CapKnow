@@ -28,6 +28,8 @@ working tree are not valid bindings.
 010A -> 010B -> 010C -> 010D -> 010E -> 010F -> 010G -> 010H
      -> final-source feasibility selection -> resource benchmark/authorization
      -> formal shards
+
+010C feasibility FAIL -> 010C-D1 read-only/fixed-factor diagnostic -> main decision
 ```
 
 The post-010C feasibility decision is an early engineering gate. Because later tasks
@@ -54,6 +56,8 @@ condition and must be returned to `main`.
 - `010B`: A/B/C corpora, held-out exclusion, and randomized-control validation.
 - `010C`: byte tokenizer, causal model, loss primitives, software smoke control, and
   held-out feasibility runner.
+- `010C-D1`: non-evidence failure diagnostic for an accepted immutable feasibility
+  failure; it cannot create a selection or advance to `010D`.
 - `010D`: formal training/checkpoint primitives and isolated evaluator.
 - `010E`: behavioral response matrices and exact/adaptive certificate integration.
 - `010F`: frozen metrics, sensitivity matrices, aggregation, and report-ready
