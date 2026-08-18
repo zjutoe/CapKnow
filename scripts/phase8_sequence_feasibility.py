@@ -391,6 +391,16 @@ def validate_boolean_label_contract(records: Sequence[FeasibilityRecord]) -> Non
             continue
         if sum(record.answer == "true" for record in split_records) != len(split_records) // 2:
             raise ValueError("boolean_json truth labels must be balanced overall within each split.")
+        suffix_tails_by_label = {
+            label: sorted(
+                operand_by_record[record][1][-1]
+                for record in split_records
+                if operand_by_record[record][0] == label
+            )
+            for label in BOOLEAN_LABELS
+        }
+        if suffix_tails_by_label["affirm"] != suffix_tails_by_label["reject"]:
+            raise ValueError("boolean_json suffix-tail distributions must match exactly across labels.")
         by_template: dict[str, list[FeasibilityRecord]] = {}
         for record in split_records:
             by_template.setdefault(record.template_id, []).append(record)

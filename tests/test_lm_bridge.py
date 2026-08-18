@@ -1368,6 +1368,28 @@ def test_feasibility_boolean_suffix_reuse_under_opposite_label_is_rejected() -> 
         sf.validate_feasibility_records(tuple(records))
 
 
+def test_feasibility_boolean_label_coded_suffix_tail_is_rejected() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    records = sf.build_family_records("boolean_json")
+    tampered = []
+    for record in records:
+        operand = sf.BOOLEAN_OPERAND_RE.search(record.prompt)
+        assert operand is not None
+        label, suffix = sf.parsed_boolean_operands(record.prompt)[0]
+        replacement = f"{label}-{suffix[:-1]}{'0' if label == 'affirm' else 'f'}"
+        tampered.append(
+            sf.FeasibilityRecord(
+                **{
+                    **record.__dict__,
+                    "prompt": record.prompt.replace(operand.group(0), replacement),
+                }
+            )
+        )
+
+    with pytest.raises(ValueError, match="suffix-tail distributions must match exactly across labels"):
+        sf.validate_feasibility_records(tuple(tampered))
+
+
 @pytest.mark.parametrize("family", ("hex_copy", "boolean_json"))
 def test_feasibility_hex_and_boolean_prompt_surface_collapse_is_rejected(family: str) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
