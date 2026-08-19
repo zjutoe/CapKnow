@@ -2626,6 +2626,40 @@ def test_diagnostic_step1500_equality_gate_and_batch_stream(tmp_path: Path) -> N
         sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
 
 
+def test_diagnostic_step_loop_gate_occurs_after_1500_before_1501() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    events: list[str] = []
+
+    def step_callback(step_index: int, _batch: object) -> None:
+        events.append(f"step{step_index}")
+
+    def gate_callback() -> None:
+        events.append("gate")
+
+    result = sf.run_diagnostic_step_loop_with_gate(
+        ((0,), (1,), (2,)),
+        gate_step=2,
+        step_callback=step_callback,
+        gate_callback=gate_callback,
+    )
+    assert events == ["step1", "step2", "gate", "step3"]
+    assert result["step_after_gate_executed"] is True
+    mismatch_events: list[str] = []
+
+    def mismatch_gate() -> None:
+        mismatch_events.append("gate")
+        raise ValueError("mismatch")
+
+    with pytest.raises(ValueError, match="mismatch"):
+        sf.run_diagnostic_step_loop_with_gate(
+            ((0,), (1,), (2,)),
+            gate_step=2,
+            step_callback=lambda step_index, _batch: mismatch_events.append(f"step{step_index}"),
+            gate_callback=mismatch_gate,
+        )
+    assert mismatch_events == ["step1", "step2", "gate"]
+
+
 def test_diagnostic_frozen_blobs_record_hashes_and_reused_bindings() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     assert sf.validate_diagnostic_record_hashes() == sf.DIAGNOSTIC_RECORD_HASHES
@@ -2679,12 +2713,12 @@ def test_diagnostic_row_metrics_edge_cases_and_teacher_forced_reconstruction() -
     assert array_metrics["correct_item_count"] is False
     assert Counter(array_metrics["missing_items"]) == Counter(["qbbbb", "qaaaa"])
     assert array_metrics["extra_items"] == ["qcccc"]
-    array_aggregate = sf.aggregate_array_rows([{**array_metrics, "template_id": "seq_array_json_eval_0", "item_count": 3, "expected": array_expected}])
+    array_aggregate = sf.aggregate_array_rows([{**array_metrics, "family": "array_json", "template_id": "seq_array_json_eval_0", "item_count": 3, "expected": array_expected}])
     assert array_aggregate["item_count_exact_matches"]["3"]["denominator"] == 1
     assert array_aggregate["template_item_count_exact_matches"]["seq_array_json_eval_0__items3"]["denominator"] == 1
-    assert array_aggregate["expected_item_counts"] == {"qaaaa": 2, "qbbbb": 1}
-    assert array_aggregate["missing_item_counts"] == {"qaaaa": 1, "qbbbb": 1}
-    assert array_aggregate["extra_item_counts"] == {"qcccc": 1}
+    assert array_aggregate["expected_item_counts"] == {"observation_count": 1, "total": 3, "counts": {"qaaaa": 2, "qbbbb": 1}}
+    assert array_aggregate["missing_item_counts"] == {"observation_count": 1, "total": 2, "counts": {"qaaaa": 1, "qbbbb": 1}}
+    assert array_aggregate["extra_item_counts"] == {"observation_count": 1, "total": 1, "counts": {"qcccc": 1}}
     assert array_aggregate["response_edit_distance"]["observation_count"] == 1
 
     invalid_full = (*tokenizer.encode_evaluation_prefix(record.prompt), EOS_ID, EOS_ID)
@@ -2736,16 +2770,30 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
     monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
     input_root = tmp_path / "feasibility_004"
     output_root = tmp_path / "feasibility_diagnostic_001"
+    exact_env = {"PYTHONDONTWRITEBYTECODE": "1", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "PYTHONPATH": "."}
+    exact_argv = [
+        "python",
+        "scripts/phase8_sequence_feasibility.py",
+        "diagnose-failure",
+        "--device",
+        "cuda:0",
+        "--input-root",
+        str(input_root),
+        "--output-root",
+        str(output_root),
+    ]
 
     with pytest.raises(ValueError, match="cuda:0"):
-        sf.validate_diagnostic_cli_contract(device="cpu", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=())
+        sf.validate_diagnostic_cli_contract(device="cpu", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=(), raw_argv=exact_argv, environ=exact_env)
     assert not output_root.exists()
-    sf.validate_diagnostic_cli_contract(device="cuda:0", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=())
+    with pytest.raises(ValueError, match="repository-relative"):
+        sf.validate_diagnostic_cli_contract(device="cuda:0", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=(), raw_argv=exact_argv, environ=exact_env)
     validate_new_root = sf.validate_new_diagnostic_root
     monkeypatch.setattr(sf, "validate_new_diagnostic_root", lambda input_root, output_root, predecessor_diagnostic_roots=(): None)
     command_input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
     command_output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
     exact_argv = [
+        "python",
         "scripts/phase8_sequence_feasibility.py",
         "diagnose-failure",
         "--device",
@@ -2755,7 +2803,6 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
         "--output-root",
         str(command_output_root),
     ]
-    exact_env = {"PYTHONDONTWRITEBYTECODE": "1", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "PYTHONPATH": "."}
     sf.validate_diagnostic_cli_contract(
         device="cuda:0",
         input_root=command_input_root,
@@ -2764,7 +2811,7 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
         raw_argv=exact_argv,
         environ=exact_env,
     )
-    with pytest.raises(ValueError, match="raw argv"):
+    with pytest.raises(ValueError, match="process argv"):
         sf.validate_diagnostic_cli_contract(
             device="cuda:0",
             input_root=command_input_root,
@@ -2799,6 +2846,7 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
         "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
         "feasibility_selection_eligible": False,
         "task_010d_authorized": False,
+        "protocol": "phase8_feasibility_failure_diagnostic",
         "terminal_status": "DONE",
         "source_commit": "b" * 40,
         "source_provenance": {},
@@ -2830,14 +2878,15 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
         "status": "DONE",
         "manifest_path": "manifest.json",
         "manifest_sha256": sf.file_sha256(done_root / "manifest.json"),
-        **{key: common[key] for key in (
-            "source_commit", "source_provenance", "exact_command", "output_root", "wall_time_seconds",
+            **{key: common[key] for key in (
+            "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
             "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
             "core_blobs", "diagnostic_lineage", "completed_scope", "partial_scope", "failure_classification",
         )},
         "file_inventory": manifest["file_inventory"],
     }
     (done_root / "DONE.json").write_text(json.dumps(terminal) + "\n")
+    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
     with pytest.raises(ValueError, match="prior DONE"):
         sf.validate_new_diagnostic_root(input_root, tmp_path / "feasibility_diagnostic_002", (done_root,))
     assert sf.diagnostic_terminal_binding(done_root)["terminal_state"] == "DONE"
@@ -2851,6 +2900,8 @@ def test_diagnostic_failed_terminal_inventory_fields_and_checkpoint_metadata(tmp
     (root / "rows.jsonl").write_text("{}\n")
     monkeypatch.setattr(sf, "current_source_commit", lambda: _test_source_commit())
     monkeypatch.setattr(sf, "ignored_source_inputs", lambda: ())
+    preflight_bindings = sf.diagnostic_preflight_bindings(input_root, ())
+    monkeypatch.setattr(sf, "current_environment_dict", lambda: {"mutated_after_preflight": True})
     sf.write_diagnostic_terminal(
         root,
         "FAILED",
@@ -2862,6 +2913,7 @@ def test_diagnostic_failed_terminal_inventory_fields_and_checkpoint_metadata(tmp
         failure="synthetic failure",
         failure_classification="diagnostic_implementation_defect",
         source_snapshot=sf.SourceSnapshot(commit=_test_source_commit(), status_lines=(), ignored_inputs=()),
+        preflight_bindings=preflight_bindings,
         wall_time_seconds=0.0,
     )
     manifest = json.loads((root / "manifest.json").read_text())
@@ -2876,11 +2928,13 @@ def test_diagnostic_failed_terminal_inventory_fields_and_checkpoint_metadata(tmp
         assert record["configuration"]["diagnostic_steps"] == 3000
         assert record["handoff"]["path"] == sf.DIAGNOSTIC_HANDOFF_PATH
         assert record["input_root"]["path"] == str(input_root)
+        assert record["environment"] == preflight_bindings["environment"]
     assert record["record_hashes"] == sf.DIAGNOSTIC_RECORD_HASHES
     assert failed["manifest_sha256"] == sf.file_sha256(root / "manifest.json")
     assert failed["file_inventory"] == manifest["file_inventory"]
     assert {row["path"]: row["role"] for row in manifest["file_inventory"]}["rows.jsonl"] == "retained_rows"
     monkeypatch.setattr(sf, "ARTIFACT_PARENT", tmp_path)
+    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
     assert sf.diagnostic_terminal_binding(root)["terminal_state"] == "FAILED"
 
     checkpoint = tmp_path / "diagnostic_checkpoint.pt"
@@ -2905,8 +2959,10 @@ def test_diagnostic_failed_terminal_inventory_fields_and_checkpoint_metadata(tmp
     assert sf.classify_diagnostic_failure(ValueError("bad implementation")) == "diagnostic_implementation_defect"
 
 
-def test_diagnostic_publish_done_requires_exact_paths_and_no_clobber(tmp_path: Path) -> None:
+def test_diagnostic_publish_done_requires_exact_paths_and_no_clobber(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "validate_diagnostic_done_artifacts", lambda root: None)
 
     def make_done_root(root: Path) -> None:
         root.mkdir(parents=True)
@@ -2923,6 +2979,7 @@ def test_diagnostic_publish_done_requires_exact_paths_and_no_clobber(tmp_path: P
             "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
             "feasibility_selection_eligible": False,
             "task_010d_authorized": False,
+            "protocol": "phase8_feasibility_failure_diagnostic",
             "terminal_status": "DONE",
             "source_commit": "b" * 40,
             "source_provenance": {},
@@ -2955,9 +3012,9 @@ def test_diagnostic_publish_done_requires_exact_paths_and_no_clobber(tmp_path: P
             "status": "DONE",
             "manifest_path": "manifest.json",
             "manifest_sha256": sf.file_sha256(root / "manifest.json"),
-            **{key: common[key] for key in (
-                "source_commit", "source_provenance", "exact_command", "output_root", "wall_time_seconds",
-                "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
+                **{key: common[key] for key in (
+                    "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
+                    "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
                 "core_blobs", "diagnostic_lineage", "completed_scope", "partial_scope", "failure_classification",
             )},
             "file_inventory": manifest["file_inventory"],
@@ -2999,6 +3056,7 @@ def test_diagnostic_predecessor_inventory_lineage_and_retry_contracts(tmp_path: 
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     monkeypatch.setattr(sf, "ARTIFACT_PARENT", tmp_path)
     monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
+    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
     monkeypatch.setattr(sf, "current_source_commit", lambda: "b" * 40)
     configuration = {
         "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
@@ -3019,6 +3077,7 @@ def test_diagnostic_predecessor_inventory_lineage_and_retry_contracts(tmp_path: 
             "feasibility_selection_eligible": False,
             "task_010d_authorized": False,
             "terminal_status": "FAILED",
+            "protocol": "phase8_feasibility_failure_diagnostic",
             "diagnostic_lineage": lineage,
             "configuration": configuration,
             "source_commit": source_commit,
@@ -3046,9 +3105,9 @@ def test_diagnostic_predecessor_inventory_lineage_and_retry_contracts(tmp_path: 
             "status": "FAILED",
             "manifest_path": "manifest.json",
             "manifest_sha256": sf.file_sha256(root / "manifest.json"),
-            **{key: common[key] for key in (
-                "source_commit", "source_provenance", "exact_command", "output_root", "wall_time_seconds",
-                "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
+                **{key: common[key] for key in (
+                    "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
+                    "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
                 "core_blobs", "diagnostic_lineage", "completed_scope", "partial_scope", "failure_classification",
             )},
             "file_inventory": manifest["file_inventory"],
@@ -3135,3 +3194,302 @@ def test_diagnostic_roots_are_rejected_by_feasibility_selection_validation(tmp_p
     )
     with pytest.raises(ValueError, match="feasibility_NNN"):
         sf.validate_selection_record(selection)
+
+
+def test_diagnostic_array_aggregate_rejects_invalid_row_observation_tampering() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    tokenizer = ByteTokenizer()
+    prompt = "Return compact JSON array from chunks: qaaaa | qbbbb"
+    expected = '["qaaaa","qbbbb"]'
+    valid_full = (*tokenizer.encode_evaluation_prefix(prompt), *tokenizer.encode_text('["qaaaa","qcccc"]'), EOS_ID)
+    valid_row = {
+        **sf.array_row_metrics(prompt, expected, valid_full),
+        "family": "array_json",
+        "template_id": "seq_array_json_eval_0",
+        "item_count": 2,
+        "expected": expected,
+    }
+    invalid_full = (*tokenizer.encode_evaluation_prefix(prompt), *tokenizer.encode_text('{"not":"array"}'), EOS_ID)
+    invalid_row = {
+        **sf.array_row_metrics(prompt, expected, invalid_full),
+        "family": "array_json",
+        "template_id": "seq_array_json_eval_0",
+        "item_count": 2,
+        "expected": expected,
+    }
+    aggregate = sf.aggregate_array_rows([valid_row, invalid_row])
+    assert aggregate["row_count"] == 2
+    assert aggregate["valid_schema_observation_count"] == 1
+    assert aggregate["missing_item_counts"] == {"observation_count": 1, "total": 1, "counts": {"qbbbb": 1}}
+    assert aggregate["extra_item_counts"] == {"observation_count": 1, "total": 1, "counts": {"qcccc": 1}}
+    all_invalid = sf.aggregate_array_rows([invalid_row])
+    assert all_invalid["missing_item_counts"] == {"observation_count": 0, "total": None, "counts": None}
+    assert all_invalid["positional_exact_items"] == {"numerator": 0, "denominator": 0, "rate": None}
+    tampered = {**invalid_row, "missing_items": []}
+    with pytest.raises(ValueError, match="Invalid Array schema"):
+        sf.aggregate_array_rows([tampered])
+    tampered_valid = {**valid_row, "extra_items": None}
+    with pytest.raises(ValueError, match="Valid Array schema"):
+        sf.aggregate_array_rows([tampered_valid])
+
+
+def test_diagnostic_reused_array_rows_preserve_current_eval_identity(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    records = sf.grouped_records()["array_json"]["eval"]
+    tokenizer = ByteTokenizer()
+    rows = [_generation_row(record, tokenizer, exact_match=False) for record in records]
+    path = tmp_path / "generations.jsonl"
+    path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n")
+    converted = sf.array_rows_from_reused_generations(
+        path,
+        comparison_source="feasibility_004_reused",
+        model_size="small",
+        steps=sf.TRAINING_STEPS,
+        seed=0,
+    )
+    assert len(converted) == sf.EVAL_RECORDS_PER_FAMILY
+    sf.validate_array_generation_artifact(
+        converted,
+        comparison_source="feasibility_004_reused",
+        model_size="small",
+        steps=sf.TRAINING_STEPS,
+        seed=0,
+    )
+    metric_tampered = [dict(row) for row in converted]
+    metric_tampered[0]["exact_match"] = not metric_tampered[0]["exact_match"]
+    with pytest.raises(ValueError, match="does not rebuild"):
+        sf.validate_array_generation_artifact(
+            metric_tampered,
+            comparison_source="feasibility_004_reused",
+            model_size="small",
+            steps=sf.TRAINING_STEPS,
+            seed=0,
+        )
+    for field_name, replacement in (
+        ("family", "hex_copy"),
+        ("index", 999),
+        ("template_id", "wrong-template"),
+        ("operand_id", "wrong-operand"),
+        ("prompt", "wrong prompt"),
+        ("expected", "[]"),
+    ):
+        tampered_rows = [dict(row) for row in rows]
+        tampered_rows[0][field_name] = replacement
+        path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in tampered_rows) + "\n")
+        with pytest.raises(ValueError, match="Generation artifact row|raw_token_ids prefix"):
+            sf.array_rows_from_reused_generations(
+                path,
+                comparison_source="feasibility_004_reused",
+                model_size="small",
+                steps=sf.TRAINING_STEPS,
+                seed=0,
+            )
+
+
+def test_diagnostic_named_matrix_rejects_family_and_cell_relabeling() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    matrix = sf.build_named_diagnostic_matrix()
+    family_tampered = {cell: [dict(row) for row in rows] for cell, rows in matrix.items()}
+    family_tampered["seen_surface_seen_operand"][0]["family"] = "array_json"
+    with pytest.raises(ValueError, match="family named_value_json"):
+        sf.validate_named_diagnostic_matrix(family_tampered)
+    cell_tampered = {cell: [dict(row) for row in rows] for cell, rows in matrix.items()}
+    cell_tampered["seen_surface_seen_operand"][0]["diagnostic_cell"] = "held_surface_seen_operand"
+    with pytest.raises(ValueError, match="diagnostic_cell"):
+        sf.validate_named_diagnostic_matrix(cell_tampered)
+    tokenizer = ByteTokenizer()
+    matrix_rows = matrix["seen_surface_seen_operand"]
+    generation_rows = []
+    for row in matrix_rows:
+        raw_ids = [*tokenizer.encode_evaluation_prefix(row["prompt"]), *tokenizer.encode_text(row["expected"]), EOS_ID]
+        generation_rows.append(
+            {
+                **row,
+                **sf.named_row_metrics(
+                    row["prompt"],
+                    row["expected"],
+                    raw_ids,
+                    row["target_key"],
+                    [item["value"] for item in row["roster"]],
+                ),
+            }
+        )
+    sf.validate_named_generation_artifact(generation_rows, matrix_rows)
+    generation_rows[0] = {**generation_rows[0], "target_prefix": False}
+    with pytest.raises(ValueError, match="does not rebuild"):
+        sf.validate_named_generation_artifact(generation_rows, matrix_rows)
+
+
+def test_diagnostic_real_process_command_rejects_direct_main_and_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
+    monkeypatch.setattr(sf, "validate_new_diagnostic_root", lambda input_root, output_root, predecessor_diagnostic_roots=(): None)
+    command_input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
+    command_output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
+    exact_env = {"PYTHONDONTWRITEBYTECODE": "1", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "PYTHONPATH": "."}
+    exact_argv = [
+        "python",
+        "scripts/phase8_sequence_feasibility.py",
+        "diagnose-failure",
+        "--device",
+        "cuda:0",
+        "--input-root",
+        str(command_input_root),
+        "--output-root",
+        str(command_output_root),
+    ]
+    sf.validate_diagnostic_cli_contract(
+        device="cuda:0",
+        input_root=command_input_root,
+        output_root=command_output_root,
+        predecessor_diagnostic_roots=(),
+        raw_argv=exact_argv,
+        environ=exact_env,
+    )
+    with pytest.raises(ValueError, match="process argv"):
+        sf.validate_diagnostic_cli_contract(
+            device="cuda:0",
+            input_root=command_input_root,
+            output_root=command_output_root,
+            predecessor_diagnostic_roots=(),
+            raw_argv=["python", "-O", *exact_argv[1:]],
+            environ=exact_env,
+        )
+    with pytest.raises(ValueError, match="main\\(argv"):
+        sf.main([
+            "diagnose-failure",
+            "--device",
+            "cuda:0",
+            "--input-root",
+            str(command_input_root),
+            "--output-root",
+            str(command_output_root),
+        ])
+
+
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    (
+        (MemoryError("host oom"), "transient_infrastructure"),
+        (torch.OutOfMemoryError("cuda oom"), "transient_infrastructure"),
+        (OSError("filesystem"), "transient_infrastructure"),
+        (subprocess.SubprocessError("worker"), "transient_infrastructure"),
+        (RuntimeError("bug"), "diagnostic_implementation_defect"),
+        (ValueError("bug"), "diagnostic_implementation_defect"),
+    ),
+)
+def test_diagnostic_failure_classification_matrix(exc: Exception, expected: str) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    assert sf.classify_diagnostic_failure(exc) == expected
+
+
+def test_diagnostic_parameter_count_comparator_is_isolated_from_formal_helper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    assert sf.expected_parameter_count("small") == build_model("small").parameter_count
+    calls: list[str] = []
+
+    def forbidden_helper(model_size: str) -> int:
+        calls.append(model_size)
+        raise AssertionError("diagnostic comparator must not call formal expected_parameter_count")
+
+    checkpoint = tmp_path / "checkpoint.pt"
+    model = build_model("small")
+    save_checkpoint(
+        str(checkpoint),
+        model,
+        metadata={"family": "array_json", "model_size": "small", "seed": 0, "training_steps": sf.TRAINING_STEPS},
+    )
+    monkeypatch.setattr(sf, "expected_parameter_count", forbidden_helper)
+    sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
+    assert calls == []
+
+
+def test_diagnostic_common_semantic_validator_rejects_provenance_protocol_and_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    source_commit = _test_source_commit()
+    output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
+    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
+    input_manifest = json.loads((input_root / "manifest.json").read_text())
+    monkeypatch.setattr(sf, "validate_git_commit_exists", lambda commit: None)
+    monkeypatch.setattr(sf, "validate_diagnostic_record_hashes", lambda: sf.DIAGNOSTIC_RECORD_HASHES)
+    monkeypatch.setattr(sf, "validate_diagnostic_core_blobs", lambda commit="HEAD": sf.DIAGNOSTIC_CORE_BLOBS)
+    monkeypatch.setattr(sf, "validate_diagnostic_environment", lambda environment, input_root: None)
+    common = {
+        "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
+        "feasibility_selection_eligible": False,
+        "task_010d_authorized": False,
+        "protocol": "phase8_feasibility_failure_diagnostic",
+        "terminal_status": "FAILED",
+        "failure": "synthetic",
+        "failure_classification": "diagnostic_implementation_defect",
+        "source_commit": source_commit,
+        "source_provenance": {"commit": source_commit, "status_lines": [], "ignored_inputs": []},
+        "exact_command": sf.diagnostic_exact_command(output_root, (), input_root=input_root),
+        "output_root": str(output_root),
+        "wall_time_seconds": 0.0,
+        "deterministic_flags": {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+            "PYTHONPATH": ".",
+            "torch_deterministic_algorithms": True,
+            "cudnn_deterministic": True,
+            "cudnn_benchmark": False,
+            "cuda_tf32": False,
+            "cudnn_tf32": False,
+        },
+        "handoff": {"path": sf.DIAGNOSTIC_HANDOFF_PATH, "sha256": sf.file_sha256(REPO_ROOT / sf.DIAGNOSTIC_HANDOFF_PATH)},
+        "input_root": {
+            "path": str(input_root),
+            "manifest_sha256": sf.DIAGNOSTIC_INPUT_CHECKSUMS["manifest.json"],
+            "summary_sha256": sf.DIAGNOSTIC_INPUT_CHECKSUMS["summary.json"],
+            "terminal_sha256": sf.DIAGNOSTIC_INPUT_CHECKSUMS["FAILED.json"],
+            "source_commit": sf.DIAGNOSTIC_INPUT_SOURCE_COMMIT,
+            "predecessor_roots": input_manifest["predecessor_roots"],
+        },
+        "diagnostic_lineage": [],
+        "configuration": sf.frozen_diagnostic_configuration(),
+        "record_hashes": sf.DIAGNOSTIC_RECORD_HASHES,
+        "core_blobs": sf.DIAGNOSTIC_CORE_BLOBS,
+        "environment": {"python": "x", "platform": "x", "torch": "x", "cuda_available": True, "cuda": "x", "gpu": "x", "gpu_driver": "x"},
+        "completed_scope": [],
+        "partial_scope": [{"name": "failed"}],
+        "file_inventory": [],
+        "summary": {"done": False, "completed_scope_count": 0, "partial_scope_count": 1},
+    }
+    common["partial_scope"][0]["error"] = "synthetic"
+    sf.validate_diagnostic_common_semantics(output_root, terminal_status="FAILED", terminal_data=common, manifest_data=common, summary_data=common)
+    mutations = (
+        ("protocol", "wrong"),
+        ("source_commit", "0" * 40),
+        ("source_provenance", {}),
+        ("exact_command", []),
+        ("configuration", {}),
+        ("record_hashes", {}),
+        ("core_blobs", {}),
+        ("deterministic_flags", {}),
+        ("handoff", {}),
+        ("input_root", {}),
+        ("environment", {}),
+    )
+    for key, value in mutations:
+        tampered = {**common, key: value}
+        with pytest.raises(ValueError):
+            sf.validate_diagnostic_common_semantics(output_root, terminal_status="FAILED", terminal_data=tampered, manifest_data=tampered, summary_data=tampered)
+    with pytest.raises(ValueError, match="environment"):
+        sf.validate_diagnostic_environment_schema({"python": "x"})
+
+
+def test_diagnostic_done_validators_reject_fake_checkpoint_and_duplicate_scope(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    fake_checkpoint = tmp_path / "checkpoint_step3000.pt"
+    fake_checkpoint.write_bytes(b"checkpoint")
+    with pytest.raises(ValueError, match="checkpoint"):
+        sf.validate_diagnostic_checkpoint_3000(fake_checkpoint, seed=0)
+    duplicate_named_scope = [
+        *({"name": "named_cell", "seed": seed, "cell": cell, "rows": sf.EVAL_RECORDS_PER_FAMILY} for seed in sf.SEEDS for cell in sf.NAMED_DIAGNOSTIC_CELLS),
+        {"name": "named_cell", "seed": 0, "cell": "seen_surface_seen_operand", "rows": sf.EVAL_RECORDS_PER_FAMILY},
+        *({"name": "array_baseline_reuse", "model_size": model_size, "steps": sf.TRAINING_STEPS, "seed": seed, "rows": sf.EVAL_RECORDS_PER_FAMILY} for model_size in sf.MODEL_SIZES for seed in sf.SEEDS),
+        *({"name": "array_diagnostic_training", "model_size": "small", "steps": sf.DIAGNOSTIC_STEPS, "seed": seed, "rows": sf.EVAL_RECORDS_PER_FAMILY} for seed in sf.SEEDS),
+    ]
+    with pytest.raises(ValueError, match="duplicates"):
+        sf.validate_diagnostic_completed_scope(duplicate_named_scope, terminal_status="DONE")
