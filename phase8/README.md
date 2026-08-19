@@ -31,6 +31,7 @@ working tree are not valid bindings.
 
 010C feasibility FAIL -> 010C-D1 non-selection/fixed-factor diagnostic -> main decision
     -> 010C-D2 independently reviewed one-shot protocol-amendment proposal
+    -> 010C-D2-I weight-tying implementation -> independent implementation review
 ```
 
 The post-010C feasibility decision is an early engineering gate. Because later tasks
@@ -63,6 +64,10 @@ condition and must be returned to `main`.
   accepted D1 diagnostic. The proposal has no implementation or experiment authority;
   acceptance at an exact reviewed commit is required before a separate implementation
   handoff may be frozen.
+- `010C-D2-I`: implementation of the independently accepted D2 weight-tying proposal,
+  including exact historical validation, D1 decision-provenance binding, and the
+  future one-shot `feasibility_005` gate. It cannot run the experiment or authorize
+  `010D`.
 - `010D`: formal training/checkpoint primitives and isolated evaluator.
 - `010E`: behavioral response matrices and exact/adaptive certificate integration.
 - `010F`: frozen metrics, sensitivity matrices, aggregation, and report-ready
