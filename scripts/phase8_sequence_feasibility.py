@@ -3203,7 +3203,7 @@ def validate_new_diagnostic_root(
         raise FileExistsError(f"Temporary diagnostic root already exists: {temp_root}")
 
 
-def validate_diagnostic_cli_contract(
+def validate_diagnostic_cli_authorization_contract(
     *,
     device: str,
     input_root: Path,
@@ -3233,9 +3233,40 @@ def validate_diagnostic_cli_contract(
     for key, expected_value in DIAGNOSTIC_REQUIRED_ENV.items():
         if actual_env.get(key) != expected_value:
             raise ValueError(f"diagnose-failure environment {key} must exactly equal {expected_value!r}.")
-    validate_new_diagnostic_root(input_root, output_root, predecessor_diagnostic_roots)
+
+
+def validate_diagnostic_cli_root_contract(
+    *,
+    input_root: Path,
+    output_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path],
+) -> None:
     if output_root.name == "feasibility_diagnostic_001" and predecessor_diagnostic_roots:
         raise ValueError("Initial diagnostic command must not include predecessor roots.")
+    validate_new_diagnostic_root(input_root, output_root, predecessor_diagnostic_roots)
+
+
+def validate_diagnostic_cli_contract(
+    *,
+    device: str,
+    input_root: Path,
+    output_root: Path,
+    predecessor_diagnostic_roots: Sequence[Path],
+    environ: dict[str, str] | None = None,
+) -> None:
+    validate_diagnostic_cli_authorization_contract(
+        device=device,
+        input_root=input_root,
+        output_root=output_root,
+        predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+        environ=environ,
+    )
+    configure_diagnostic_deterministic_backend()
+    validate_diagnostic_cli_root_contract(
+        input_root=input_root,
+        output_root=output_root,
+        predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+    )
 
 
 def diagnostic_kernel_argv() -> list[str]:
@@ -4113,7 +4144,6 @@ def run_diagnostic_failure(
         predecessor_diagnostic_roots=predecessor_diagnostic_roots,
         environ=environ,
     )
-    configure_diagnostic_deterministic_backend()
     source_snapshot = capture_diagnostic_source_provenance(input_root, output_root, predecessor_diagnostic_roots)
     preflight_bindings = diagnostic_preflight_bindings(input_root, predecessor_diagnostic_roots)
     start_time = time.monotonic()

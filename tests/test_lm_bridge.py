@@ -38,6 +38,42 @@ from capability_certificate_lab.lm_bridge.train import (
 )
 
 
+def _snapshot_diagnostic_process_state(sf: object) -> dict[str, object]:
+    return {
+        "rng_states": sf.snapshot_rng_states(),
+        "num_threads": torch.get_num_threads(),
+        "mkldnn_enabled": torch.backends.mkldnn.enabled,
+        "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "deterministic_warn_only": torch.is_deterministic_algorithms_warn_only_enabled(),
+        "cudnn_deterministic": torch.backends.cudnn.deterministic,
+        "cudnn_benchmark": torch.backends.cudnn.benchmark,
+        "cuda_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_tf32": torch.backends.cudnn.allow_tf32,
+        "env": {key: os.environ.get(key) for key in sf.DIAGNOSTIC_REQUIRED_ENV},
+    }
+
+
+def _restore_diagnostic_process_state(sf: object, state: dict[str, object]) -> None:
+    env = state["env"]
+    assert isinstance(env, dict)
+    for key, value in env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    sf.restore_rng_states(state["rng_states"])
+    torch.set_num_threads(state["num_threads"])
+    torch.backends.mkldnn.enabled = state["mkldnn_enabled"]
+    torch.use_deterministic_algorithms(
+        state["deterministic_algorithms"],
+        warn_only=state["deterministic_warn_only"],
+    )
+    torch.backends.cudnn.deterministic = state["cudnn_deterministic"]
+    torch.backends.cudnn.benchmark = state["cudnn_benchmark"]
+    torch.backends.cuda.matmul.allow_tf32 = state["cuda_tf32"]
+    torch.backends.cudnn.allow_tf32 = state["cudnn_tf32"]
+
+
 def test_frozen_primitive_state_and_task_order() -> None:
     assert cg.PRIMITIVE_ORDER == ("MEMORY", "SEARCH", "FILTER", "CONDITION")
     assert cg.STATE_MASKS == tuple(range(16))
@@ -2780,8 +2816,14 @@ def test_diagnostic_row_metrics_edge_cases_and_teacher_forced_reconstruction() -
     assert aggregate["loss"]["observation_count"] == aggregate["selected_token_count"]
 
 
-def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    process_state = _snapshot_diagnostic_process_state(sf)
+    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
     monkeypatch.setattr(sf, "ARTIFACT_PARENT", tmp_path)
     monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
     input_root = tmp_path / "feasibility_004"
@@ -3329,8 +3371,13 @@ def test_diagnostic_named_matrix_rejects_family_and_cell_relabeling() -> None:
         sf.validate_named_generation_artifact(generation_rows, matrix_rows)
 
 
-def test_diagnostic_real_process_command_rejects_direct_main_and_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_diagnostic_real_process_command_rejects_direct_main_and_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    process_state = _snapshot_diagnostic_process_state(sf)
+    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
     monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
     monkeypatch.setattr(sf, "validate_new_diagnostic_root", lambda input_root, output_root, predecessor_diagnostic_roots=(): None)
     command_input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
@@ -3895,43 +3942,27 @@ def test_diagnostic_early_failed_terminal_uses_backend_before_model_work(
     request: pytest.FixtureRequest,
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    original_rng_states = sf.snapshot_rng_states()
-    original_num_threads = torch.get_num_threads()
-    original_mkldnn_enabled = torch.backends.mkldnn.enabled
-    original_deterministic_algorithms = torch.are_deterministic_algorithms_enabled()
-    original_deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    original_cudnn_deterministic = torch.backends.cudnn.deterministic
-    original_cudnn_benchmark = torch.backends.cudnn.benchmark
-    original_cuda_tf32 = torch.backends.cuda.matmul.allow_tf32
-    original_cudnn_tf32 = torch.backends.cudnn.allow_tf32
-
-    def restore_torch_process_state() -> None:
-        sf.restore_rng_states(original_rng_states)
-        torch.set_num_threads(original_num_threads)
-        torch.backends.mkldnn.enabled = original_mkldnn_enabled
-        torch.use_deterministic_algorithms(
-            original_deterministic_algorithms,
-            warn_only=original_deterministic_warn_only,
-        )
-        torch.backends.cudnn.deterministic = original_cudnn_deterministic
-        torch.backends.cudnn.benchmark = original_cudnn_benchmark
-        torch.backends.cuda.matmul.allow_tf32 = original_cuda_tf32
-        torch.backends.cudnn.allow_tf32 = original_cudnn_tf32
-
-    request.addfinalizer(restore_torch_process_state)
+    process_state = _snapshot_diagnostic_process_state(sf)
+    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
+    contract_source = inspect.getsource(sf.validate_diagnostic_cli_contract)
+    auth_index = contract_source.index("validate_diagnostic_cli_authorization_contract(")
+    backend_index = contract_source.index("configure_diagnostic_deterministic_backend()")
+    root_index = contract_source.index("validate_diagnostic_cli_root_contract(")
+    assert auth_index < backend_index < root_index
     source = inspect.getsource(sf.run_diagnostic_failure)
-    backend_index = source.index("configure_diagnostic_deterministic_backend()")
-    assert backend_index < source.index("temp_root =")
+    cli_contract_index = source.index("validate_diagnostic_cli_contract(")
+    assert source.index("require_diagnostic_real_main_context()") < cli_contract_index
+    assert cli_contract_index < source.index("temp_root =")
     for forward_capable_call in (
         "load_checkpoint_model(",
         "generate_named_diagnostic_rows(",
         "teacher_forced_rows(",
         "train_array_small_3000_diagnostic(",
     ):
-        assert backend_index < source.index(forward_capable_call)
+        assert cli_contract_index < source.index(forward_capable_call)
 
-    input_root = tmp_path / "feasibility_004"
-    output_root = tmp_path / "feasibility_diagnostic_001"
+    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
+    output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
     source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
     preflight = {
         "input_root": str(input_root),
@@ -3944,6 +3975,18 @@ def test_diagnostic_early_failed_terminal_uses_backend_before_model_work(
         "core_blobs": {},
         "environment": {},
     }
+    exact_argv = [
+        "python",
+        "scripts/phase8_sequence_feasibility.py",
+        "diagnose-failure",
+        "--device",
+        "cuda:0",
+        "--input-root",
+        str(input_root),
+        "--output-root",
+        str(output_root),
+    ]
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     monkeypatch.setenv("PYTHONPATH", ".")
@@ -3966,11 +4009,26 @@ def test_diagnostic_early_failed_terminal_uses_backend_before_model_work(
         }
 
     events: list[object] = []
+    real_authorization_contract = sf.validate_diagnostic_cli_authorization_contract
     real_set_deterministic_backend = sf.set_deterministic_backend
+
+    def authorization_probe(**kwargs: object) -> None:
+        events.append("authorization")
+        real_authorization_contract(**kwargs)
 
     def backend_probe(seed: int) -> None:
         events.append(("backend", seed))
         real_set_deterministic_backend(seed)
+
+    def root_stage_probe(
+        *,
+        input_root: Path,
+        output_root: Path,
+        predecessor_diagnostic_roots: tuple[Path, ...],
+    ) -> None:
+        events.append("root_predecessor_stage")
+        assert predecessor_diagnostic_roots == ()
+        sf.validate_diagnostic_flags(current_flags())
 
     def early_matrix_failure() -> dict[str, list[dict[str, object]]]:
         events.append("named_matrix_construction")
@@ -3999,7 +4057,9 @@ def test_diagnostic_early_failed_terminal_uses_backend_before_model_work(
         ]
 
     monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
-    monkeypatch.setattr(sf, "validate_diagnostic_cli_contract", lambda **kwargs: None)
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
+    monkeypatch.setattr(sf, "validate_diagnostic_cli_authorization_contract", authorization_probe)
+    monkeypatch.setattr(sf, "validate_diagnostic_cli_root_contract", root_stage_probe)
     monkeypatch.setattr(sf, "set_deterministic_backend", backend_probe)
     monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
     monkeypatch.setattr(sf, "diagnostic_preflight_bindings", lambda *args: preflight)
@@ -4018,10 +4078,158 @@ def test_diagnostic_early_failed_terminal_uses_backend_before_model_work(
         sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=output_root)
 
     assert events == [
+        "authorization",
         ("backend", sf.DIAGNOSTIC_BACKEND_SEED),
+        "root_predecessor_stage",
         "named_matrix_construction",
         "failed_publication",
     ]
+
+
+def test_diagnostic_retry_preflight_root_stage_runs_after_backend_from_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    process_state = _snapshot_diagnostic_process_state(sf)
+    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
+    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
+    predecessor = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
+    output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_002")
+    exact_argv = [
+        "python",
+        "scripts/phase8_sequence_feasibility.py",
+        "diagnose-failure",
+        "--device",
+        "cuda:0",
+        "--input-root",
+        str(input_root),
+        "--output-root",
+        str(output_root),
+        "--predecessor-diagnostic-root",
+        str(predecessor),
+    ]
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    monkeypatch.setenv("PYTHONPATH", ".")
+    torch.set_num_threads(max(1, torch.get_num_threads()))
+    torch.backends.mkldnn.enabled = True
+    torch.use_deterministic_algorithms(False)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    assert not torch.are_deterministic_algorithms_enabled()
+    assert not torch.backends.cudnn.deterministic
+    assert torch.backends.cudnn.benchmark
+    assert torch.backends.cuda.matmul.allow_tf32
+    assert torch.backends.cudnn.allow_tf32
+
+    def current_flags() -> dict[str, object]:
+        return {
+            "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
+            "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+            "PYTHONPATH": os.environ.get("PYTHONPATH"),
+            "torch_deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "cuda_tf32": torch.backends.cuda.matmul.allow_tf32,
+            "cudnn_tf32": torch.backends.cudnn.allow_tf32,
+        }
+
+    def root_stage_probe(
+        *,
+        input_root: Path,
+        output_root: Path,
+        predecessor_diagnostic_roots: tuple[Path, ...],
+    ) -> None:
+        assert input_root == Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
+        assert output_root == Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_002")
+        assert predecessor_diagnostic_roots == (predecessor,)
+        sf.validate_diagnostic_flags(current_flags())
+        assert torch.get_num_threads() == 1
+        assert torch.backends.mkldnn.enabled is False
+        assert torch.is_deterministic_algorithms_warn_only_enabled() is False
+
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
+    monkeypatch.setattr(sf, "validate_diagnostic_cli_root_contract", root_stage_probe)
+
+    sf.validate_diagnostic_cli_contract(
+        device="cuda:0",
+        input_root=input_root,
+        output_root=output_root,
+        predecessor_diagnostic_roots=(predecessor,),
+    )
+
+
+@pytest.mark.parametrize(
+    "original_cublas",
+    (":16:8", None),
+    ids=("wrong", "missing"),
+)
+def test_diagnostic_cli_rejects_original_cublas_before_backend_configuration(
+    original_cublas: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    process_state = _snapshot_diagnostic_process_state(sf)
+    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
+    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
+    output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
+    exact_argv = [
+        "python",
+        "scripts/phase8_sequence_feasibility.py",
+        "diagnose-failure",
+        "--device",
+        "cuda:0",
+        "--input-root",
+        str(input_root),
+        "--output-root",
+        str(output_root),
+    ]
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("PYTHONPATH", ".")
+    if original_cublas is None:
+        monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
+    else:
+        monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", original_cublas)
+    torch.backends.mkldnn.enabled = True
+    torch.use_deterministic_algorithms(False)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    calls: list[str] = []
+
+    def forbidden_backend_configuration() -> None:
+        calls.append("backend")
+        raise AssertionError("backend configuration ran before original environment authorization")
+
+    def forbidden_root_stage(**kwargs: object) -> None:
+        calls.append("root")
+        raise AssertionError("root/predecessor stage ran after rejected original environment")
+
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
+    monkeypatch.setattr(sf, "configure_diagnostic_deterministic_backend", forbidden_backend_configuration)
+    monkeypatch.setattr(sf, "validate_diagnostic_cli_root_contract", forbidden_root_stage)
+
+    with pytest.raises(ValueError, match="CUBLAS_WORKSPACE_CONFIG"):
+        sf.validate_diagnostic_cli_contract(
+            device="cuda:0",
+            input_root=input_root,
+            output_root=output_root,
+            predecessor_diagnostic_roots=(),
+        )
+
+    assert calls == []
+    assert os.environ.get("CUBLAS_WORKSPACE_CONFIG") == original_cublas
+    assert not torch.are_deterministic_algorithms_enabled()
+    assert torch.backends.mkldnn.enabled is True
+    assert torch.backends.cudnn.deterministic is False
+    assert torch.backends.cudnn.benchmark is True
+    assert torch.backends.cuda.matmul.allow_tf32 is True
+    assert torch.backends.cudnn.allow_tf32 is True
 
 
 def test_diagnostic_flags_reject_each_false_deterministic_state() -> None:
