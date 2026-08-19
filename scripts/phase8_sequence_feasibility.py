@@ -93,6 +93,10 @@ ACCEPTED_INDEPENDENT_REVIEW_VERDICT = "ACCEPT"
 DIAGNOSTIC_ARTIFACT_CLASS = "non_evidence_feasibility_diagnostic"
 DIAGNOSTIC_STEPS = 3000
 DIAGNOSTIC_INPUT_ROOT_NAME = "feasibility_004"
+DIAGNOSTIC_TRAJECTORY_EVIDENCE_SCHEMA = "phase8_array_small_3000_training_trajectory_v1"
+DIAGNOSTIC_MODEL_STATE_FINGERPRINT_SCHEMA = "phase8_model_state_fingerprint_v1"
+DIAGNOSTIC_BATCH_SCHEDULE_SCHEMA = "phase8_batch_schedule_digest_v1"
+DIAGNOSTIC_TRAINING_TRACE_SCHEMA = "phase8_training_trace_digest_v1"
 DIAGNOSTIC_INPUT_SOURCE_COMMIT = "3cb75ad550c4357562c0d4d9a9b098bfb2cf66ea"
 DIAGNOSTIC_HANDOFF_PATH = "phase8/Task_010C_D1_Feasibility_Failure_Diagnostic.md"
 DIAGNOSTIC_ACCEPTED_PROTOCOL_COMMIT = "f2aa335256201672767eac1840e135672b43e046"
@@ -1023,6 +1027,12 @@ def frozen_diagnostic_configuration() -> dict[str, object]:
         "array_new_training": diagnostic_array_training_plan(),
         "diagnostic_steps": DIAGNOSTIC_STEPS,
         "formal_training_steps": TRAINING_STEPS,
+        "validation": {
+            "authorized_new_training_runs": 3,
+            "validation_training_or_replay_runs": 0,
+            "trajectory_evidence_source": "in_run_checkpoint_metadata_and_metrics",
+            "selection_evidence": False,
+        },
         "batch_size": BATCH_SIZE,
         "pass_threshold": PASS_THRESHOLD,
         "tokenizer": {
@@ -2273,10 +2283,9 @@ def validate_diagnostic_checkpoint_3000(path: Path, *, seed: int) -> None:
         raise ValueError(f"Diagnostic 3000 checkpoint is not a valid PyTorch checkpoint: {exc}") from exc
     if not isinstance(checkpoint, dict):
         raise ValueError("Diagnostic 3000 checkpoint must be a mapping.")
-    expected_model = build_model("small")
-    if checkpoint.get("config") != expected_model.config.__dict__:
+    if checkpoint.get("config") != transformer_config("small").__dict__:
         raise ValueError("Diagnostic 3000 checkpoint config mismatch.")
-    if checkpoint.get("parameter_count") != expected_model.parameter_count:
+    if checkpoint.get("parameter_count") != FROZEN_PARAMETER_COUNTS["small"]:
         raise ValueError("Diagnostic 3000 checkpoint parameter_count mismatch.")
     metadata = checkpoint.get("metadata")
     expected_metadata = {
@@ -2291,19 +2300,163 @@ def validate_diagnostic_checkpoint_3000(path: Path, *, seed: int) -> None:
     }
     if not isinstance(metadata, dict):
         raise ValueError("Diagnostic 3000 checkpoint metadata must be a mapping.")
+    expected_metadata_keys = {*expected_metadata, "training_loss", "training_trajectory_evidence"}
+    if set(metadata) != expected_metadata_keys:
+        raise ValueError("Diagnostic 3000 checkpoint metadata must use the exact trajectory-evidence schema.")
     for key, value in expected_metadata.items():
         if metadata.get(key) != value:
             raise ValueError(f"Diagnostic 3000 checkpoint metadata {key} mismatch.")
+    training_loss = metadata.get("training_loss")
+    if type(training_loss) not in {int, float} or not math.isfinite(float(training_loss)):
+        raise ValueError("Diagnostic 3000 checkpoint training_loss must be finite.")
     state = checkpoint.get("model_state_dict")
-    expected_state = expected_model.state_dict()
-    if not isinstance(state, dict) or set(state) != set(expected_state):
-        raise ValueError("Diagnostic 3000 checkpoint state_dict schema mismatch.")
-    for key, expected_tensor in expected_state.items():
-        tensor = state[key]
-        if not isinstance(tensor, torch.Tensor):
-            raise ValueError("Diagnostic 3000 checkpoint state_dict values must be tensors.")
-        if tensor.dtype != expected_tensor.dtype or tuple(tensor.shape) != tuple(expected_tensor.shape):
-            raise ValueError("Diagnostic 3000 checkpoint tensor dtype/shape mismatch.")
+    if model_state_schema_from_state_dict(state) != isolated_model_state_schema("small"):
+        raise ValueError("Diagnostic 3000 checkpoint state_dict dtype/shape schema mismatch.")
+    validate_diagnostic_trajectory_evidence(
+        metadata.get("training_trajectory_evidence"),
+        seed=seed,
+        final_model_state_fingerprint=model_state_fingerprint_from_state_dict(state),
+        expected_final_loss=training_loss,
+    )
+
+
+def validate_loss_scalar_evidence(value: object, *, expected_value: object, field_name: str) -> None:
+    if not isinstance(value, dict) or set(value) != {"value", "repr", "tensor_dtype", "tensor_shape", "tensor_bytes_hex"}:
+        raise ValueError(f"{field_name} must use the exact loss scalar evidence schema.")
+    if type(value.get("value")) not in {int, float} or not math.isfinite(float(value["value"])):
+        raise ValueError(f"{field_name}.value must be finite.")
+    if float(value["value"]) != float(expected_value):
+        raise ValueError(f"{field_name}.value does not match retained final_loss.")
+    if value.get("repr") != repr(float(value["value"])):
+        raise ValueError(f"{field_name}.repr does not match the retained Python float representation.")
+    if value.get("tensor_dtype") != "torch.float32" or value.get("tensor_shape") != []:
+        raise ValueError(f"{field_name} must bind a scalar float32 loss tensor.")
+    tensor_bytes_hex = value.get("tensor_bytes_hex")
+    if not isinstance(tensor_bytes_hex, str) or not re.fullmatch(r"[0-9a-f]+", tensor_bytes_hex) or len(tensor_bytes_hex) != 8:
+        raise ValueError(f"{field_name}.tensor_bytes_hex must bind exactly one float32 scalar.")
+    expected_tensor_bytes_hex = tensor_bytes(torch.tensor(float(value["value"]), dtype=torch.float32)).hex()
+    if tensor_bytes_hex != expected_tensor_bytes_hex:
+        raise ValueError(f"{field_name}.tensor_bytes_hex does not encode the retained float32 loss value.")
+
+
+def validate_diagnostic_trajectory_evidence(
+    evidence: object,
+    *,
+    seed: int,
+    final_model_state_fingerprint: str,
+    expected_final_loss: object,
+    frozen_step1500_model_state_fingerprint: str | None = None,
+) -> None:
+    expected_keys = {
+        "serialization",
+        "claimed_seed",
+        "family",
+        "model_size",
+        "training_steps",
+        "authorized_new_training_run_count",
+        "schedule",
+        "initial_model_state_fingerprint",
+        "step1500",
+        "trace",
+        "step_count",
+        "step1501_executed",
+        "final_model_state_fingerprint",
+        "final_optimizer_state_fingerprint",
+        "retained_final_loss",
+    }
+    if not isinstance(evidence, dict) or set(evidence) != expected_keys:
+        raise ValueError("Diagnostic training trajectory evidence must use the exact schema.")
+    if evidence.get("serialization") != DIAGNOSTIC_TRAJECTORY_EVIDENCE_SCHEMA:
+        raise ValueError("Diagnostic training trajectory evidence serialization mismatch.")
+    if evidence.get("claimed_seed") != seed:
+        raise ValueError("Diagnostic training trajectory claimed_seed mismatch.")
+    if evidence.get("family") != "array_json" or evidence.get("model_size") != "small":
+        raise ValueError("Diagnostic training trajectory family/model_size mismatch.")
+    if evidence.get("training_steps") != DIAGNOSTIC_STEPS or evidence.get("step_count") != DIAGNOSTIC_STEPS:
+        raise ValueError("Diagnostic training trajectory step count mismatch.")
+    if evidence.get("authorized_new_training_run_count") != len(SEEDS):
+        raise ValueError("Diagnostic training trajectory authorized run count mismatch.")
+    if evidence.get("step1501_executed") is not True:
+        raise ValueError("Diagnostic training trajectory must bind step1501 execution.")
+    retained_final_loss = evidence.get("retained_final_loss")
+    if type(retained_final_loss) not in {int, float} or not math.isfinite(float(retained_final_loss)):
+        raise ValueError("Diagnostic training trajectory retained_final_loss must be finite.")
+    if float(retained_final_loss) != float(expected_final_loss):
+        raise ValueError("Diagnostic training trajectory retained_final_loss mismatch.")
+    schedule = evidence.get("schedule")
+    expected_schedule = diagnostic_training_schedule_evidence(seed, TRAIN_RECORDS_PER_FAMILY)
+    if schedule != expected_schedule:
+        raise ValueError("Diagnostic training trajectory schedule evidence mismatch.")
+    initial_fingerprint = evidence.get("initial_model_state_fingerprint")
+    if initial_fingerprint != expected_initial_model_state_fingerprint(seed):
+        raise ValueError("Diagnostic training trajectory initial model-state fingerprint mismatch.")
+    step1500 = evidence.get("step1500")
+    step1500_keys = {
+        "step",
+        "model_state_fingerprint",
+        "checkpoint_state_fingerprint",
+        "model_matches_checkpoint",
+        "optimizer_state_fingerprint",
+    }
+    if not isinstance(step1500, dict) or set(step1500) != step1500_keys:
+        raise ValueError("Diagnostic training trajectory step1500 evidence must use the exact schema.")
+    if step1500.get("step") != TRAINING_STEPS:
+        raise ValueError("Diagnostic training trajectory step1500 step mismatch.")
+    step1500_model_fingerprint = require_sha256_hex(step1500.get("model_state_fingerprint"), "trajectory.step1500.model_state_fingerprint")
+    step1500_checkpoint_fingerprint = require_sha256_hex(step1500.get("checkpoint_state_fingerprint"), "trajectory.step1500.checkpoint_state_fingerprint")
+    require_sha256_hex(step1500.get("optimizer_state_fingerprint"), "trajectory.step1500.optimizer_state_fingerprint")
+    if step1500.get("model_matches_checkpoint") is not True or step1500_model_fingerprint != step1500_checkpoint_fingerprint:
+        raise ValueError("Diagnostic training trajectory step1500 equality gate was not bound as passed.")
+    if frozen_step1500_model_state_fingerprint is not None and step1500_checkpoint_fingerprint != frozen_step1500_model_state_fingerprint:
+        raise ValueError("Diagnostic training trajectory step1500 checkpoint fingerprint mismatch.")
+    trace = evidence.get("trace")
+    trace_keys = {"serialization", "seed", "step_count", "schedule_sha256", "sha256", "final_loss"}
+    if not isinstance(trace, dict) or set(trace) != trace_keys:
+        raise ValueError("Diagnostic training trajectory trace must use the exact schema.")
+    if trace.get("serialization") != DIAGNOSTIC_TRAINING_TRACE_SCHEMA:
+        raise ValueError("Diagnostic training trajectory trace serialization mismatch.")
+    if trace.get("seed") != seed or trace.get("step_count") != DIAGNOSTIC_STEPS:
+        raise ValueError("Diagnostic training trajectory trace seed/step_count mismatch.")
+    if trace.get("schedule_sha256") != expected_schedule["sha256"]:
+        raise ValueError("Diagnostic training trajectory trace schedule digest mismatch.")
+    require_sha256_hex(trace.get("sha256"), "trajectory.trace.sha256")
+    validate_loss_scalar_evidence(trace.get("final_loss"), expected_value=retained_final_loss, field_name="trajectory.trace.final_loss")
+    if require_sha256_hex(evidence.get("final_model_state_fingerprint"), "trajectory.final_model_state_fingerprint") != final_model_state_fingerprint:
+        raise ValueError("Diagnostic training trajectory final model-state fingerprint mismatch.")
+    require_sha256_hex(evidence.get("final_optimizer_state_fingerprint"), "trajectory.final_optimizer_state_fingerprint")
+
+
+def validate_diagnostic_training_trajectory_evidence(
+    checkpoint_path: Path,
+    *,
+    seed: int,
+    training_metrics: object,
+    frozen_step1500_checkpoint: Path,
+) -> None:
+    validate_diagnostic_checkpoint_3000(checkpoint_path, seed=seed)
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("metadata"), dict):
+        raise ValueError("Diagnostic trajectory checkpoint metadata is invalid.")
+    metadata = checkpoint["metadata"]  # type: ignore[index]
+    evidence = metadata.get("training_trajectory_evidence")
+    if not isinstance(training_metrics, dict):
+        raise ValueError("Diagnostic trajectory training metrics must be a mapping.")
+    if training_metrics.get("trajectory_evidence") != evidence:
+        raise ValueError("Diagnostic trajectory evidence mismatch between checkpoint metadata and metrics.")
+    final_loss = training_metrics.get("final_loss")
+    if type(final_loss) not in {int, float} or not math.isfinite(float(final_loss)):
+        raise ValueError("Diagnostic trajectory training metrics final_loss must be finite.")
+    if float(final_loss) != float(metadata.get("training_loss")):
+        raise ValueError("Diagnostic trajectory training metrics final_loss does not bind checkpoint metadata.")
+    if training_metrics.get("step1501_executed") is not True:
+        raise ValueError("Diagnostic trajectory training metrics must bind step1501 execution.")
+    validate_diagnostic_trajectory_evidence(
+        evidence,
+        seed=seed,
+        final_model_state_fingerprint=model_state_fingerprint_from_state_dict(checkpoint.get("model_state_dict")),
+        expected_final_loss=final_loss,
+        frozen_step1500_model_state_fingerprint=checkpoint_model_state_fingerprint(frozen_step1500_checkpoint),
+    )
 
 
 def diagnostic_replay_device() -> torch.device:
@@ -2490,7 +2643,7 @@ def validate_array_generation_artifact(
             raise ValueError("DONE Array generation row does not rebuild from the frozen eval record and raw tokens.")
 
 
-def validate_diagnostic_done_artifacts(root: Path) -> None:
+def diagnostic_named_matrix_by_cell(root: Path) -> dict[str, list[dict[str, object]]]:
     matrix_rows = read_jsonl_rows(root / "named_diagnostic_matrix.jsonl")
     matrix: dict[str, list[dict[str, object]]] = {cell: [] for cell in NAMED_DIAGNOSTIC_CELLS}
     for row in matrix_rows:
@@ -2499,133 +2652,171 @@ def validate_diagnostic_done_artifacts(root: Path) -> None:
             raise ValueError("Named diagnostic matrix contains an unexpected cell.")
         matrix[cell].append(row)
     validate_named_diagnostic_matrix(matrix)
+    return matrix
+
+
+def validate_diagnostic_named_scope_semantics(root: Path, row: dict[str, object], input_root: Path, matrix: dict[str, list[dict[str, object]]]) -> None:
+    seed = require_exact_int(row.get("seed"), "completed_scope.seed")
+    cell = require_exact_str(row.get("cell"), "completed_scope.cell")
+    prefix = root / f"named_value_json__medium__seed{seed}__{cell}"
+    rows = read_jsonl_rows(prefix / "generations.jsonl")
+    validate_named_generation_artifact(rows, matrix[cell])
+    metrics = json.loads((prefix / "metrics.json").read_text())
+    if metrics != aggregate_named_rows(rows):
+        raise ValueError("Diagnostic Named metrics do not rebuild from retained rows.")
+    reused_named = reused_feasibility_cell_binding(input_root, "named_value_json", "medium", seed)
+    if row.get("checkpoint_reused_from") != reused_named["checkpoint_path"]:
+        raise ValueError("Diagnostic Named completed scope checkpoint path mismatch.")
+    if row.get("checkpoint_sha256") != reused_named["checkpoint_sha256"]:
+        raise ValueError("Diagnostic Named completed scope checkpoint checksum mismatch.")
+    replay_named_generation_artifact(
+        Path(str(reused_named["checkpoint_path"])),
+        matrix_rows=matrix[cell],
+        retained_rows=rows,
+    )
+
+
+def validate_diagnostic_array_plan_scope_semantics(root: Path) -> None:
+    plan = json.loads((root / "array_training_plan.json").read_text())
+    validate_diagnostic_array_training_plan(plan)
+
+
+def validate_diagnostic_reused_array_scope_semantics(root: Path, row: dict[str, object], input_root: Path) -> None:
+    model_size = require_exact_str(row.get("model_size"), "completed_scope.model_size")
+    seed = require_exact_int(row.get("seed"), "completed_scope.seed")
+    prefix = root / f"array_json__{model_size}__1500__seed{seed}__reused"
+    greedy_rows = read_jsonl_rows(prefix / "greedy_metrics_rows.jsonl")
+    validate_array_generation_artifact(
+        greedy_rows,
+        comparison_source="feasibility_004_reused",
+        model_size=model_size,
+        steps=TRAINING_STEPS,
+        seed=seed,
+    )
+    train_rows = read_jsonl_rows(prefix / "teacher_forced_train_rows.jsonl")
+    eval_rows = read_jsonl_rows(prefix / "teacher_forced_eval_rows.jsonl")
+    metrics = json.loads((prefix / "metrics.json").read_text())
+    expected_metric_keys = {
+        "greedy", "teacher_forced_train", "teacher_forced_eval", "template_item_counts",
+        "reused_generations_path", "reused_generations_sha256", "reused_checkpoint_path", "reused_checkpoint_sha256",
+    }
+    if set(metrics) != expected_metric_keys:
+        raise ValueError("Diagnostic reused Array metrics must use the exact frozen schema.")
+    validate_teacher_forced_artifact(train_rows, metrics.get("teacher_forced_train"), split="train", expected_count=TRAIN_RECORDS_PER_FAMILY)
+    validate_teacher_forced_artifact(eval_rows, metrics.get("teacher_forced_eval"), split="eval", expected_count=EVAL_RECORDS_PER_FAMILY)
+    if metrics.get("greedy") != aggregate_array_rows(greedy_rows):
+        raise ValueError("Diagnostic reused Array greedy aggregate does not rebuild from retained rows.")
+    if metrics.get("template_item_counts") != array_item_template_counts(greedy_rows):
+        raise ValueError("Diagnostic reused Array template_item_counts do not rebuild from retained rows.")
+    reused = reused_feasibility_cell_binding(input_root, "array_json", model_size, seed)
+    for key in ("reused_generations_path", "reused_generations_sha256", "reused_checkpoint_path", "reused_checkpoint_sha256"):
+        source_key = key.removeprefix("reused_")
+        if metrics.get(key) != reused[source_key]:
+            raise ValueError(f"Diagnostic reused Array {key} does not match feasibility_004.")
+    replay_array_artifacts(
+        Path(str(reused["checkpoint_path"])),
+        model_size=model_size,
+        comparison_source="feasibility_004_reused",
+        steps=TRAINING_STEPS,
+        seed=seed,
+        retained_greedy_rows=greedy_rows,
+        retained_train_rows=train_rows,
+        retained_eval_rows=eval_rows,
+        retained_train_aggregate=metrics.get("teacher_forced_train"),
+        retained_eval_aggregate=metrics.get("teacher_forced_eval"),
+    )
+
+
+def validate_diagnostic_new_array_scope_semantics(root: Path, row: dict[str, object], input_root: Path) -> None:
+    seed = require_exact_int(row.get("seed"), "completed_scope.seed")
+    prefix = root / f"array_json__small__3000__seed{seed}"
+    checkpoint_path = prefix / "checkpoint_step3000.pt"
+    validate_diagnostic_checkpoint_3000(checkpoint_path, seed=seed)
+    greedy_rows = read_jsonl_rows(prefix / "generations.jsonl")
+    validate_array_generation_artifact(
+        greedy_rows,
+        comparison_source="diagnostic_small_3000",
+        model_size="small",
+        steps=DIAGNOSTIC_STEPS,
+        seed=seed,
+    )
+    train_rows = read_jsonl_rows(prefix / "teacher_forced_train_rows.jsonl")
+    eval_rows = read_jsonl_rows(prefix / "teacher_forced_eval_rows.jsonl")
+    metrics = json.loads((prefix / "metrics.json").read_text())
+    expected_metric_keys = {
+        "training", "greedy", "teacher_forced_train", "teacher_forced_eval", "template_item_counts",
+        "step1500_checkpoint_reused_for_equality_gate", "step1500_checkpoint_sha256",
+    }
+    if set(metrics) != expected_metric_keys:
+        raise ValueError("Diagnostic new Array metrics must use the exact frozen schema.")
+    training = metrics.get("training")
+    if not isinstance(training, dict) or set(training) != {"final_loss", "checkpoint_path", "step1501_executed", "trajectory_evidence"}:
+        raise ValueError("Diagnostic new Array training metrics must use the exact frozen schema.")
+    if training.get("step1501_executed") is not True:
+        raise ValueError("Diagnostic new Array metrics must bind nonselection 3000-step training metadata.")
+    final_loss = training.get("final_loss")
+    if type(final_loss) not in {int, float} or not math.isfinite(float(final_loss)):
+        raise ValueError("Diagnostic new Array final_loss must be finite.")
+    expected_checkpoint_path = f"array_json__small__3000__seed{seed}/checkpoint_step3000.pt"
+    if training.get("checkpoint_path") != expected_checkpoint_path or row.get("checkpoint_path") != expected_checkpoint_path:
+        raise ValueError("Diagnostic new Array training checkpoint_path mismatch.")
+    validate_teacher_forced_artifact(train_rows, metrics.get("teacher_forced_train"), split="train", expected_count=TRAIN_RECORDS_PER_FAMILY)
+    validate_teacher_forced_artifact(eval_rows, metrics.get("teacher_forced_eval"), split="eval", expected_count=EVAL_RECORDS_PER_FAMILY)
+    if metrics.get("greedy") != aggregate_array_rows(greedy_rows):
+        raise ValueError("Diagnostic new Array greedy aggregate does not rebuild from retained rows.")
+    if metrics.get("template_item_counts") != array_item_template_counts(greedy_rows):
+        raise ValueError("Diagnostic new Array template_item_counts do not rebuild from retained rows.")
+    reused = reused_feasibility_cell_binding(input_root, "array_json", "small", seed)
+    if metrics.get("step1500_checkpoint_reused_for_equality_gate") != reused["checkpoint_path"]:
+        raise ValueError("Diagnostic new Array step-1500 equality checkpoint path mismatch.")
+    if metrics.get("step1500_checkpoint_sha256") != reused["checkpoint_sha256"]:
+        raise ValueError("Diagnostic new Array step-1500 equality checkpoint checksum mismatch.")
+    validate_diagnostic_training_trajectory_evidence(
+        checkpoint_path,
+        seed=seed,
+        training_metrics=training,
+        frozen_step1500_checkpoint=Path(str(reused["checkpoint_path"])),
+    )
+    replay_array_artifacts(
+        checkpoint_path,
+        model_size="small",
+        comparison_source="diagnostic_small_3000",
+        steps=DIAGNOSTIC_STEPS,
+        seed=seed,
+        retained_greedy_rows=greedy_rows,
+        retained_train_rows=train_rows,
+        retained_eval_rows=eval_rows,
+        retained_train_aggregate=metrics.get("teacher_forced_train"),
+        retained_eval_aggregate=metrics.get("teacher_forced_eval"),
+    )
+
+
+def validate_diagnostic_completed_scope_semantics(root: Path, completed_scope: object, input_root: Path) -> None:
+    if not isinstance(completed_scope, list) or not all(isinstance(row, dict) for row in completed_scope):
+        raise ValueError("Diagnostic completed_scope must be valid before semantic artifact checks.")
+    matrix: dict[str, list[dict[str, object]]] | None = None
+    for row in completed_scope:
+        name = row["name"]
+        if name == "named_matrix_construction":
+            matrix = diagnostic_named_matrix_by_cell(root)
+        elif name == "array_training_plan":
+            validate_diagnostic_array_plan_scope_semantics(root)
+        elif name == "named_cell":
+            if matrix is None:
+                matrix = diagnostic_named_matrix_by_cell(root)
+            validate_diagnostic_named_scope_semantics(root, row, input_root, matrix)
+        elif name == "array_baseline_reuse":
+            validate_diagnostic_reused_array_scope_semantics(root, row, input_root)
+        elif name == "array_diagnostic_training":
+            validate_diagnostic_new_array_scope_semantics(root, row, input_root)
+
+
+def validate_diagnostic_done_artifacts(root: Path) -> None:
     manifest_data = json.loads((root / "manifest.json").read_text())
     input_root = validate_diagnostic_input_binding(manifest_data.get("input_root"))
     completed_scope = manifest_data.get("completed_scope")
     validate_diagnostic_completed_scope(completed_scope, terminal_status="DONE")
-    assert isinstance(completed_scope, list)
-    plan = json.loads((root / "array_training_plan.json").read_text())
-    validate_diagnostic_array_training_plan(plan)
-    for seed in SEEDS:
-        reused_named = reused_feasibility_cell_binding(input_root, "named_value_json", "medium", seed)
-        for cell in NAMED_DIAGNOSTIC_CELLS:
-            rows = read_jsonl_rows(root / f"named_value_json__medium__seed{seed}__{cell}" / "generations.jsonl")
-            validate_named_generation_artifact(rows, matrix[cell])
-            metrics = json.loads((root / f"named_value_json__medium__seed{seed}__{cell}" / "metrics.json").read_text())
-            if metrics != aggregate_named_rows(rows):
-                raise ValueError("DONE Named metrics do not rebuild from retained rows.")
-            matching_scope = [
-                row for row in completed_scope
-                if row.get("name") == "named_cell" and row.get("seed") == seed and row.get("cell") == cell
-            ]
-            if len(matching_scope) != 1:
-                raise ValueError("DONE Named artifact must have exactly one matching completed scope.")
-            if matching_scope[0].get("checkpoint_reused_from") != reused_named["checkpoint_path"]:
-                raise ValueError("DONE Named completed scope checkpoint path mismatch.")
-            if matching_scope[0].get("checkpoint_sha256") != reused_named["checkpoint_sha256"]:
-                raise ValueError("DONE Named completed scope checkpoint checksum mismatch.")
-            replay_named_generation_artifact(
-                Path(str(reused_named["checkpoint_path"])),
-                matrix_rows=matrix[cell],
-                retained_rows=rows,
-            )
-    for model_size in MODEL_SIZES:
-        for seed in SEEDS:
-            prefix = root / f"array_json__{model_size}__1500__seed{seed}__reused"
-            greedy_rows = read_jsonl_rows(prefix / "greedy_metrics_rows.jsonl")
-            validate_array_generation_artifact(
-                greedy_rows,
-                comparison_source="feasibility_004_reused",
-                model_size=model_size,
-                steps=TRAINING_STEPS,
-                seed=seed,
-            )
-            train_rows = read_jsonl_rows(prefix / "teacher_forced_train_rows.jsonl")
-            eval_rows = read_jsonl_rows(prefix / "teacher_forced_eval_rows.jsonl")
-            metrics = json.loads((prefix / "metrics.json").read_text())
-            expected_metric_keys = {
-                "greedy", "teacher_forced_train", "teacher_forced_eval", "template_item_counts",
-                "reused_generations_path", "reused_generations_sha256", "reused_checkpoint_path", "reused_checkpoint_sha256",
-            }
-            if set(metrics) != expected_metric_keys:
-                raise ValueError("DONE reused Array metrics must use the exact frozen schema.")
-            validate_teacher_forced_artifact(train_rows, metrics.get("teacher_forced_train"), split="train", expected_count=TRAIN_RECORDS_PER_FAMILY)
-            validate_teacher_forced_artifact(eval_rows, metrics.get("teacher_forced_eval"), split="eval", expected_count=EVAL_RECORDS_PER_FAMILY)
-            if metrics.get("greedy") != aggregate_array_rows(greedy_rows):
-                raise ValueError("DONE reused Array greedy aggregate does not rebuild from retained rows.")
-            if metrics.get("template_item_counts") != array_item_template_counts(greedy_rows):
-                raise ValueError("DONE reused Array template_item_counts do not rebuild from retained rows.")
-            reused = reused_feasibility_cell_binding(input_root, "array_json", model_size, seed)
-            for key in ("reused_generations_path", "reused_generations_sha256", "reused_checkpoint_path", "reused_checkpoint_sha256"):
-                source_key = key.removeprefix("reused_")
-                if metrics.get(key) != reused[source_key]:
-                    raise ValueError(f"DONE reused Array {key} does not match feasibility_004.")
-            replay_array_artifacts(
-                Path(str(reused["checkpoint_path"])),
-                model_size=model_size,
-                comparison_source="feasibility_004_reused",
-                steps=TRAINING_STEPS,
-                seed=seed,
-                retained_greedy_rows=greedy_rows,
-                retained_train_rows=train_rows,
-                retained_eval_rows=eval_rows,
-                retained_train_aggregate=metrics.get("teacher_forced_train"),
-                retained_eval_aggregate=metrics.get("teacher_forced_eval"),
-            )
-    for seed in SEEDS:
-        prefix = root / f"array_json__small__3000__seed{seed}"
-        validate_diagnostic_checkpoint_3000(prefix / "checkpoint_step3000.pt", seed=seed)
-        greedy_rows = read_jsonl_rows(prefix / "generations.jsonl")
-        validate_array_generation_artifact(
-            greedy_rows,
-            comparison_source="diagnostic_small_3000",
-            model_size="small",
-            steps=DIAGNOSTIC_STEPS,
-            seed=seed,
-        )
-        train_rows = read_jsonl_rows(prefix / "teacher_forced_train_rows.jsonl")
-        eval_rows = read_jsonl_rows(prefix / "teacher_forced_eval_rows.jsonl")
-        metrics = json.loads((prefix / "metrics.json").read_text())
-        expected_metric_keys = {
-            "training", "greedy", "teacher_forced_train", "teacher_forced_eval", "template_item_counts",
-            "step1500_checkpoint_reused_for_equality_gate", "step1500_checkpoint_sha256",
-        }
-        if set(metrics) != expected_metric_keys:
-            raise ValueError("DONE new Array metrics must use the exact frozen schema.")
-        training = metrics.get("training")
-        if not isinstance(training, dict) or set(training) != {"final_loss", "checkpoint_path", "step1501_executed"}:
-            raise ValueError("DONE new Array training metrics must use the exact frozen schema.")
-        if training.get("step1501_executed") is not True:
-            raise ValueError("DONE new Array metrics must bind nonselection 3000-step training metadata.")
-        final_loss = training.get("final_loss")
-        if type(final_loss) not in {int, float} or not math.isfinite(float(final_loss)):
-            raise ValueError("DONE new Array final_loss must be finite.")
-        expected_checkpoint_path = f"array_json__small__3000__seed{seed}/checkpoint_step3000.pt"
-        if training.get("checkpoint_path") != expected_checkpoint_path:
-            raise ValueError("DONE new Array training checkpoint_path mismatch.")
-        validate_teacher_forced_artifact(train_rows, metrics.get("teacher_forced_train"), split="train", expected_count=TRAIN_RECORDS_PER_FAMILY)
-        validate_teacher_forced_artifact(eval_rows, metrics.get("teacher_forced_eval"), split="eval", expected_count=EVAL_RECORDS_PER_FAMILY)
-        if metrics.get("greedy") != aggregate_array_rows(greedy_rows):
-            raise ValueError("DONE new Array greedy aggregate does not rebuild from retained rows.")
-        if metrics.get("template_item_counts") != array_item_template_counts(greedy_rows):
-            raise ValueError("DONE new Array template_item_counts do not rebuild from retained rows.")
-        reused = reused_feasibility_cell_binding(input_root, "array_json", "small", seed)
-        if metrics.get("step1500_checkpoint_reused_for_equality_gate") != reused["checkpoint_path"]:
-            raise ValueError("DONE new Array step-1500 equality checkpoint path mismatch.")
-        if metrics.get("step1500_checkpoint_sha256") != reused["checkpoint_sha256"]:
-            raise ValueError("DONE new Array step-1500 equality checkpoint checksum mismatch.")
-        replay_array_artifacts(
-            prefix / "checkpoint_step3000.pt",
-            model_size="small",
-            comparison_source="diagnostic_small_3000",
-            steps=DIAGNOSTIC_STEPS,
-            seed=seed,
-            retained_greedy_rows=greedy_rows,
-            retained_train_rows=train_rows,
-            retained_eval_rows=eval_rows,
-            retained_train_aggregate=metrics.get("teacher_forced_train"),
-            retained_eval_aggregate=metrics.get("teacher_forced_eval"),
-        )
+    validate_diagnostic_completed_scope_semantics(root, completed_scope, input_root)
 
 
 def validate_diagnostic_common_semantics(
@@ -2714,6 +2905,7 @@ def validate_diagnostic_common_semantics(
     )
     validate_diagnostic_artifact_roles(root, manifest_data.get("file_inventory"))
     validate_diagnostic_completed_scope_artifacts(root, manifest_data.get("completed_scope"))
+    validate_diagnostic_completed_scope_semantics(root, manifest_data.get("completed_scope"), input_root)
 
 
 def load_diagnostic_terminal_binding(root: Path) -> tuple[Path, dict[str, object], Path, str]:
@@ -3137,6 +3329,116 @@ def tensor_bytes(tensor: torch.Tensor) -> bytes:
     return tensor.detach().cpu().contiguous().numpy().tobytes()
 
 
+def canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def update_canonical_digest(digest: object, value: object) -> None:
+    digest.update(canonical_json_bytes(value))  # type: ignore[attr-defined]
+    digest.update(b"\n")  # type: ignore[attr-defined]
+
+
+def require_sha256_hex(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 hex digest.")
+    return value
+
+
+def model_state_schema_from_state_dict(state: object) -> dict[str, dict[str, object]]:
+    if not isinstance(state, dict):
+        raise ValueError("Model state fingerprint requires a state_dict mapping.")
+    schema: dict[str, dict[str, object]] = {}
+    for key in sorted(state):
+        if not isinstance(key, str):
+            raise ValueError("Model state fingerprint keys must be strings.")
+        tensor = state[key]
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError("Model state fingerprint values must be tensors.")
+        schema[key] = {"dtype": str(tensor.dtype), "shape": list(tensor.shape)}
+    return schema
+
+
+def model_state_fingerprint_from_state_dict(state: object) -> str:
+    if not isinstance(state, dict):
+        raise ValueError("Model state fingerprint requires a state_dict mapping.")
+    digest = sha256()
+    update_canonical_digest(
+        digest,
+        {
+            "serialization": DIAGNOSTIC_MODEL_STATE_FINGERPRINT_SCHEMA,
+            "tensor_count": len(state),
+        },
+    )
+    for key in sorted(state):
+        if not isinstance(key, str):
+            raise ValueError("Model state fingerprint keys must be strings.")
+        tensor = state[key]
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError("Model state fingerprint values must be tensors.")
+        raw = tensor_bytes(tensor)
+        update_canonical_digest(
+            digest,
+            {
+                "key": key,
+                "dtype": str(tensor.dtype),
+                "shape": list(tensor.shape),
+                "byte_count": len(raw),
+            },
+        )
+        digest.update(raw)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def model_state_fingerprint(model: torch.nn.Module) -> str:
+    return model_state_fingerprint_from_state_dict(model.state_dict())
+
+
+def checkpoint_model_state_fingerprint(checkpoint_path: Path) -> str:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Checkpoint model-state fingerprint requires a checkpoint mapping.")
+    return model_state_fingerprint_from_state_dict(checkpoint.get("model_state_dict"))
+
+
+def snapshot_rng_states() -> tuple[object, torch.Tensor, tuple[torch.Tensor, ...] | None]:
+    python_state = random.getstate()
+    torch_state = torch.random.get_rng_state()
+    cuda_states = None
+    if torch.cuda.is_available():
+        cuda_states = tuple(state.clone() for state in torch.cuda.get_rng_state_all())
+    return python_state, torch_state.clone(), cuda_states
+
+
+def restore_rng_states(states: tuple[object, torch.Tensor, tuple[torch.Tensor, ...] | None]) -> None:
+    python_state, torch_state, cuda_states = states
+    random.setstate(python_state)
+    torch.random.set_rng_state(torch_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(list(cuda_states))
+
+
+def isolated_model_state_schema(model_size: str) -> dict[str, dict[str, object]]:
+    rng_states = snapshot_rng_states()
+    try:
+        return model_state_schema_from_state_dict(build_model(model_size).state_dict())
+    finally:
+        restore_rng_states(rng_states)
+
+
+def expected_initial_model_state_fingerprint(seed: int) -> str:
+    rng_states = snapshot_rng_states()
+    try:
+        model_rng_seed = MODEL_RNG_OFFSET + seed
+        random.seed(model_rng_seed)
+        torch.manual_seed(model_rng_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(model_rng_seed)
+        return model_state_fingerprint(build_model("small"))
+    finally:
+        restore_rng_states(rng_states)
+
+
 def optimizer_state_fingerprint(optimizer: torch.optim.Optimizer) -> str:
     payload = json.dumps(_optimizer_state_payload(optimizer.state_dict()), sort_keys=True, separators=(",", ":")).encode("utf-8")
     return sha256(payload).hexdigest()
@@ -3156,6 +3458,120 @@ def _optimizer_state_payload(value: object) -> object:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     return repr(value)
+
+
+def diagnostic_training_batches(seed: int, record_count: int) -> tuple[tuple[int, ...], ...]:
+    batches = deterministic_batch_indices(
+        record_count=record_count,
+        seed=seed,
+        state_mask=0,
+        batch_size=BATCH_SIZE,
+        steps=DIAGNOSTIC_STEPS,
+    )
+    if batches[:TRAINING_STEPS] != deterministic_batch_indices(
+        record_count=record_count,
+        seed=seed,
+        state_mask=0,
+        batch_size=BATCH_SIZE,
+        steps=TRAINING_STEPS,
+    ):
+        raise ValueError("Diagnostic 3000-step batch stream does not extend the frozen 1500-step stream.")
+    return batches
+
+
+def diagnostic_batch_schedule_digest(
+    batches: Sequence[Sequence[int]],
+    *,
+    seed: int,
+    record_count: int,
+) -> str:
+    digest = sha256()
+    update_canonical_digest(
+        digest,
+        {
+            "serialization": DIAGNOSTIC_BATCH_SCHEDULE_SCHEMA,
+            "seed": seed,
+            "state_mask": 0,
+            "record_count": record_count,
+            "batch_size": BATCH_SIZE,
+            "step_count": DIAGNOSTIC_STEPS,
+            "batch_count": len(batches),
+        },
+    )
+    for step_index, batch in enumerate(batches, start=1):
+        batch_indices = [require_exact_int(index, "diagnostic.batch_index") for index in batch]
+        if len(batch_indices) != BATCH_SIZE:
+            raise ValueError("Diagnostic schedule batches must retain exact batch size.")
+        if any(index < 0 or index >= record_count for index in batch_indices):
+            raise ValueError("Diagnostic schedule batch index out of range.")
+        update_canonical_digest(
+            digest,
+            {
+                "step": step_index,
+                "batch_indices": batch_indices,
+            },
+        )
+    return digest.hexdigest()
+
+
+def diagnostic_training_schedule_evidence(seed: int, record_count: int) -> dict[str, object]:
+    batches = diagnostic_training_batches(seed, record_count)
+    return {
+        "serialization": DIAGNOSTIC_BATCH_SCHEDULE_SCHEMA,
+        "seed": seed,
+        "state_mask": 0,
+        "record_count": record_count,
+        "batch_size": BATCH_SIZE,
+        "step_count": DIAGNOSTIC_STEPS,
+        "batch_count": len(batches),
+        "sha256": diagnostic_batch_schedule_digest(batches, seed=seed, record_count=record_count),
+    }
+
+
+def new_diagnostic_training_trace_digest(seed: int, schedule: dict[str, object]) -> object:
+    digest = sha256()
+    update_canonical_digest(
+        digest,
+        {
+            "serialization": DIAGNOSTIC_TRAINING_TRACE_SCHEMA,
+            "seed": seed,
+            "step_count": DIAGNOSTIC_STEPS,
+            "schedule_sha256": schedule["sha256"],
+        },
+    )
+    return digest
+
+
+def loss_scalar_evidence(loss_tensor: torch.Tensor, loss_value: float) -> dict[str, object]:
+    if loss_tensor.numel() != 1:
+        raise ValueError("Diagnostic training trace loss tensor must be scalar.")
+    raw = tensor_bytes(loss_tensor)
+    return {
+        "value": loss_value,
+        "repr": repr(loss_value),
+        "tensor_dtype": str(loss_tensor.dtype),
+        "tensor_shape": list(loss_tensor.shape),
+        "tensor_bytes_hex": raw.hex(),
+    }
+
+
+def update_diagnostic_training_trace(
+    digest: object,
+    *,
+    step_index: int,
+    batch: Sequence[int],
+    loss_tensor: torch.Tensor,
+    loss_value: float,
+) -> None:
+    batch_indices = [require_exact_int(index, "diagnostic.trace_batch_index") for index in batch]
+    update_canonical_digest(
+        digest,
+        {
+            "step": step_index,
+            "batch_indices": batch_indices,
+            "loss": loss_scalar_evidence(loss_tensor, loss_value),
+        },
+    )
 
 
 def compare_model_to_checkpoint_step1500(model: torch.nn.Module, checkpoint_path: Path, model_size: str) -> None:
@@ -3224,24 +3640,15 @@ def train_array_small_3000_diagnostic(
     model.to(device)
     model.train()
     optimizer = make_optimizer(model)
-    batches = deterministic_batch_indices(
-        record_count=len(train_records),
-        seed=seed,
-        state_mask=0,
-        batch_size=BATCH_SIZE,
-        steps=DIAGNOSTIC_STEPS,
-    )
-    if batches[:TRAINING_STEPS] != deterministic_batch_indices(
-        record_count=len(train_records),
-        seed=seed,
-        state_mask=0,
-        batch_size=BATCH_SIZE,
-        steps=TRAINING_STEPS,
-    ):
-        raise ValueError("Diagnostic 3000-step batch stream does not extend the frozen 1500-step stream.")
+    initial_model_state_fingerprint = model_state_fingerprint(model)
+    batches = diagnostic_training_batches(seed, len(train_records))
+    schedule_evidence = diagnostic_training_schedule_evidence(seed, len(train_records))
+    trace_digest = new_diagnostic_training_trace_digest(seed, schedule_evidence)
     final_loss = float("nan")
+    final_loss_evidence: dict[str, object] | None = None
+    step1500_evidence: dict[str, object] | None = None
     def train_step(_step_index: int, batch: Sequence[int]) -> float:
-        nonlocal final_loss
+        nonlocal final_loss, final_loss_evidence
         batch_records = [TextRecord(train_records[index].prompt, train_records[index].answer) for index in batch]
         input_ids = encode_record_batch(batch_records, tokenizer).to(device)
         optimizer.zero_grad(set_to_none=True)
@@ -3250,15 +3657,34 @@ def train_array_small_3000_diagnostic(
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
         optimizer.step()
-        final_loss = float(loss.detach().cpu())
+        loss_cpu = loss.detach().cpu()
+        final_loss = float(loss_cpu)
+        final_loss_evidence = loss_scalar_evidence(loss_cpu, final_loss)
+        update_diagnostic_training_trace(
+            trace_digest,
+            step_index=_step_index,
+            batch=batch,
+            loss_tensor=loss_cpu,
+            loss_value=final_loss,
+        )
         return final_loss
 
     def gate_step1500() -> None:
+        nonlocal step1500_evidence
         rng_state = random.getstate()
         torch_rng_state = torch.random.get_rng_state()
         cuda_rng_state = torch.cuda.get_rng_state(device)
+        live_state_fingerprint = model_state_fingerprint(model)
+        checkpoint_state_fingerprint = checkpoint_model_state_fingerprint(frozen_step1500_checkpoint)
         optimizer_state = optimizer_state_fingerprint(optimizer)
         compare_model_to_checkpoint_step1500(model, frozen_step1500_checkpoint, "small")
+        step1500_evidence = {
+            "step": TRAINING_STEPS,
+            "model_state_fingerprint": live_state_fingerprint,
+            "checkpoint_state_fingerprint": checkpoint_state_fingerprint,
+            "model_matches_checkpoint": True,
+            "optimizer_state_fingerprint": optimizer_state,
+        }
         if step1500_hook is not None:
             step1500_hook(model)
         if random.getstate() != rng_state:
@@ -3269,6 +3695,8 @@ def train_array_small_3000_diagnostic(
             raise ValueError("Step-1500 equality snapshot changed CUDA RNG state.")
         if optimizer_state_fingerprint(optimizer) != optimizer_state:
             raise ValueError("Step-1500 equality snapshot changed optimizer state.")
+        if model_state_fingerprint(model) != live_state_fingerprint:
+            raise ValueError("Step-1500 equality snapshot changed model state.")
 
     loop_result = run_diagnostic_step_loop_with_gate(
         batches,
@@ -3278,6 +3706,34 @@ def train_array_small_3000_diagnostic(
         progress_callback=progress_callback,
     )
     step1501_executed = loop_result["step_after_gate_executed"] is True
+    if step1500_evidence is None:
+        raise ValueError("Diagnostic 3000-step training did not bind step-1500 trajectory evidence.")
+    if final_loss_evidence is None:
+        raise ValueError("Diagnostic 3000-step training did not bind final loss evidence.")
+    trajectory_evidence = {
+        "serialization": DIAGNOSTIC_TRAJECTORY_EVIDENCE_SCHEMA,
+        "claimed_seed": seed,
+        "family": "array_json",
+        "model_size": "small",
+        "training_steps": DIAGNOSTIC_STEPS,
+        "authorized_new_training_run_count": len(SEEDS),
+        "schedule": schedule_evidence,
+        "initial_model_state_fingerprint": initial_model_state_fingerprint,
+        "step1500": step1500_evidence,
+        "trace": {
+            "serialization": DIAGNOSTIC_TRAINING_TRACE_SCHEMA,
+            "seed": seed,
+            "step_count": DIAGNOSTIC_STEPS,
+            "schedule_sha256": schedule_evidence["sha256"],
+            "sha256": trace_digest.hexdigest(),  # type: ignore[attr-defined]
+            "final_loss": final_loss_evidence,
+        },
+        "step_count": DIAGNOSTIC_STEPS,
+        "step1501_executed": step1501_executed,
+        "final_model_state_fingerprint": model_state_fingerprint(model),
+        "final_optimizer_state_fingerprint": optimizer_state_fingerprint(optimizer),
+        "retained_final_loss": final_loss,
+    }
     save_checkpoint(
         str(checkpoint_path),
         model,
@@ -3291,11 +3747,17 @@ def train_array_small_3000_diagnostic(
             "training_steps": DIAGNOSTIC_STEPS,
             "training_loss": final_loss,
             "step1501_executed": step1501_executed,
+            "training_trajectory_evidence": trajectory_evidence,
         },
     )
     if not step1501_executed:
         raise ValueError("Diagnostic 3000-step training did not prove execution of step 1501.")
-    return {"final_loss": final_loss, "checkpoint_path": str(checkpoint_path), "step1501_executed": True}
+    return {
+        "final_loss": final_loss,
+        "checkpoint_path": str(checkpoint_path),
+        "step1501_executed": True,
+        "trajectory_evidence": trajectory_evidence,
+    }
 
 
 def diagnostic_inventory(root: Path) -> list[dict[str, object]]:
@@ -3419,19 +3881,58 @@ def validate_diagnostic_terminal_root(root: Path, *, terminal_status: str) -> No
             raise ValueError("DONE diagnostic must complete exactly three new Array runs.")
         if sum(1 for row in completed if isinstance(row, dict) and row.get("name") == "array_baseline_reuse") != 6:
             raise ValueError("DONE diagnostic must bind exactly six reused Array baselines.")
-        validate_diagnostic_done_artifacts(root)
 
 
-def publish_diagnostic_root(temp_root: Path, output_root: Path, *, terminal_status: str) -> None:
+def validate_diagnostic_terminal_inventory_snapshot(root: Path, *, terminal_status: str) -> None:
+    terminals = [path.name for path in (root / "DONE.json", root / "FAILED.json") if path.exists()]
+    if terminals != [f"{terminal_status}.json"]:
+        raise ValueError("Diagnostic root must contain exactly one terminal marker matching the requested status.")
+    manifest = root / "manifest.json"
+    terminal = root / f"{terminal_status}.json"
+    if not manifest.is_file() or not terminal.is_file():
+        raise ValueError("Diagnostic root lacks terminal inventory files.")
+    manifest_data = json.loads(manifest.read_text())
+    terminal_data = json.loads(terminal.read_text())
+    expected_inventory = diagnostic_inventory(root)
+    if manifest_data.get("file_inventory") != expected_inventory:
+        raise ValueError("Diagnostic final manifest inventory does not exactly match current root files.")
+    if terminal_data.get("file_inventory") != expected_inventory:
+        raise ValueError("Diagnostic final terminal inventory does not exactly match current root files.")
+    if terminal_data.get("manifest_sha256") != file_sha256(manifest):
+        raise ValueError("Diagnostic final terminal manifest checksum mismatch.")
+    for row in expected_inventory:
+        path = root / require_canonical_relative_path(row.get("path"), "diagnostic.final_inventory.path")
+        if row.get("sha256") != file_sha256(path) or row.get("bytes") != path.stat().st_size:
+            raise ValueError("Diagnostic final inventory checksum or byte count mismatch.")
+
+
+def publish_diagnostic_root(
+    temp_root: Path,
+    output_root: Path,
+    *,
+    terminal_status: str,
+    final_callback: Callable[[], None] | None = None,
+) -> None:
     if output_root.exists() or output_root.is_symlink():
         raise FileExistsError(f"Refusing to overwrite existing diagnostic root: {output_root}")
     validate_diagnostic_terminal_root(temp_root, terminal_status=terminal_status)
+    if final_callback is not None:
+        final_callback()
+    validate_diagnostic_terminal_inventory_snapshot(temp_root, terminal_status=terminal_status)
+    if final_callback is not None:
+        final_callback()
     atomic_rename_noreplace(temp_root, output_root)
 
 
-def publish_diagnostic_root_or_leave_incomplete(temp_root: Path, output_root: Path, *, terminal_status: str) -> None:
+def publish_diagnostic_root_or_leave_incomplete(
+    temp_root: Path,
+    output_root: Path,
+    *,
+    terminal_status: str,
+    final_callback: Callable[[], None] | None = None,
+) -> None:
     try:
-        publish_diagnostic_root(temp_root, output_root, terminal_status=terminal_status)
+        publish_diagnostic_root(temp_root, output_root, terminal_status=terminal_status, final_callback=final_callback)
     except Exception as exc:
         remove_diagnostic_terminal_markers(temp_root)
         raise DiagnosticPublicationError(
@@ -3617,7 +4118,16 @@ def run_diagnostic_failure(
     active_scope: dict[str, object] | None = {"name": "diagnostic_initialization"}
     def update_active_progress(progress: dict[str, object]) -> None:
         nonlocal active_scope
-        active_scope = {**(active_scope or {"name": "diagnose_failure"}), **progress}
+        identity_keys = {"name", "seed", "cell", "model_size", "steps"}
+        base = {
+            key: value
+            for key, value in (active_scope or {"name": "diagnose_failure"}).items()
+            if key in identity_keys
+        }
+        active_scope = {**base, **progress}
+    def final_publication_callback() -> None:
+        verify_diagnostic_preflight_bindings(preflight_bindings, input_root, predecessor_diagnostic_roots)
+        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
     try:
         validate_diagnostic_input_root(input_root)
         tokenizer = ByteTokenizer()
@@ -3815,9 +4325,12 @@ def run_diagnostic_failure(
             wall_time_seconds=time.monotonic() - start_time,
         )
         try:
-            verify_diagnostic_preflight_bindings(preflight_bindings, input_root, predecessor_diagnostic_roots)
-            verify_source_unchanged(source_snapshot, active_output_root=temp_root)
-            publish_diagnostic_root_or_leave_incomplete(temp_root, output_root, terminal_status="DONE")
+            publish_diagnostic_root_or_leave_incomplete(
+                temp_root,
+                output_root,
+                terminal_status="DONE",
+                final_callback=final_publication_callback,
+            )
         except Exception as exc:
             remove_diagnostic_terminal_markers(temp_root)
             raise DiagnosticPublicationError("Diagnostic DONE terminal failed post-construction validation; temporary root is incomplete.") from exc
@@ -3843,9 +4356,12 @@ def run_diagnostic_failure(
             wall_time_seconds=time.monotonic() - start_time,
         )
         try:
-            verify_diagnostic_preflight_bindings(preflight_bindings, input_root, predecessor_diagnostic_roots)
-            verify_source_unchanged(source_snapshot, active_output_root=temp_root)
-            publish_diagnostic_root_or_leave_incomplete(temp_root, output_root, terminal_status="FAILED")
+            publish_diagnostic_root_or_leave_incomplete(
+                temp_root,
+                output_root,
+                terminal_status="FAILED",
+                final_callback=final_publication_callback,
+            )
         except Exception as post_terminal_exc:
             remove_diagnostic_terminal_markers(temp_root)
             raise DiagnosticPublicationError("Diagnostic FAILED terminal failed post-construction validation; temporary root is incomplete.") from post_terminal_exc

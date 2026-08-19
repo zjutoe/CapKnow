@@ -6,6 +6,7 @@ import importlib
 import json
 import math
 from pathlib import Path
+import random
 import re
 import subprocess
 import sys
@@ -2594,7 +2595,7 @@ def test_diagnostic_array_training_plan_is_exactly_three_small_3000_runs() -> No
         sf.validate_diagnostic_array_training_plan([{**plan[0], "steps": 1500}, *plan[1:]])
 
 
-def test_diagnostic_step1500_equality_gate_and_batch_stream(tmp_path: Path) -> None:
+def test_diagnostic_step1500_equality_gate_and_batch_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     records = sf.diagnostic_record_sets()["array_train512"]
     assert sf.deterministic_batch_indices(
@@ -2614,11 +2615,18 @@ def test_diagnostic_step1500_equality_gate_and_batch_stream(tmp_path: Path) -> N
     model = build_model("small")
     checkpoint = tmp_path / "checkpoint_step1500.pt"
     save_checkpoint(str(checkpoint), model, metadata={"family": "array_json", "model_size": "small", "seed": 0, "training_steps": 1500})
+    random.seed(1001)
     torch_rng = torch.random.get_rng_state()
+    python_rng = random.getstate()
+    cuda_rng = tuple(state.clone() for state in torch.cuda.get_rng_state_all()) if torch.cuda.is_available() else None
     optimizer = make_optimizer(model)
     optimizer_fingerprint = sf.optimizer_state_fingerprint(optimizer)
+    monkeypatch.setattr(sf, "build_model", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("gate must not instantiate a model")))
     sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
+    assert random.getstate() == python_rng
     assert torch.equal(torch.random.get_rng_state(), torch_rng)
+    if cuda_rng is not None:
+        assert all(torch.equal(actual, expected) for actual, expected in zip(torch.cuda.get_rng_state_all(), cuda_rng, strict=True))
     assert sf.optimizer_state_fingerprint(optimizer) == optimizer_fingerprint
     with torch.no_grad():
         next(model.parameters()).add_(1)
@@ -3507,6 +3515,376 @@ def test_diagnostic_done_validators_reject_fake_checkpoint_and_duplicate_scope(t
         sf.validate_diagnostic_completed_scope_artifacts(tmp_path, completed_matrix)
     (tmp_path / "named_diagnostic_matrix.jsonl").write_text("{}\n")
     sf.validate_diagnostic_completed_scope_artifacts(tmp_path, completed_matrix)
+    with pytest.raises(ValueError, match="Named diagnostic matrix|diagnostic_cell"):
+        sf.validate_diagnostic_completed_scope_semantics(tmp_path, completed_matrix, tmp_path / "feasibility_004")
+
+
+def _write_diagnostic_checkpoint_with_trajectory_evidence(
+    tmp_path: Path,
+    sf: object,
+    *,
+    seed: int = 0,
+    final_loss: float = 1.25,
+) -> tuple[Path, Path, dict[str, object], dict[str, object]]:
+    step1500_checkpoint = tmp_path / f"checkpoint_step1500_seed{seed}.pt"
+    step1500_model = build_model("small")
+    save_checkpoint(
+        str(step1500_checkpoint),
+        step1500_model,
+        metadata={"family": "array_json", "model_size": "small", "seed": seed, "training_steps": 1500},
+    )
+    final_checkpoint = tmp_path / f"checkpoint_step3000_seed{seed}.pt"
+    final_model = build_model("small")
+    schedule = sf.diagnostic_training_schedule_evidence(seed, sf.TRAIN_RECORDS_PER_FAMILY)
+    loss_evidence = sf.loss_scalar_evidence(torch.tensor(final_loss, dtype=torch.float32), final_loss)
+    step1500_fingerprint = sf.checkpoint_model_state_fingerprint(step1500_checkpoint)
+    evidence = {
+        "serialization": sf.DIAGNOSTIC_TRAJECTORY_EVIDENCE_SCHEMA,
+        "claimed_seed": seed,
+        "family": "array_json",
+        "model_size": "small",
+        "training_steps": sf.DIAGNOSTIC_STEPS,
+        "authorized_new_training_run_count": len(sf.SEEDS),
+        "schedule": schedule,
+        "initial_model_state_fingerprint": sf.expected_initial_model_state_fingerprint(seed),
+        "step1500": {
+            "step": sf.TRAINING_STEPS,
+            "model_state_fingerprint": step1500_fingerprint,
+            "checkpoint_state_fingerprint": step1500_fingerprint,
+            "model_matches_checkpoint": True,
+            "optimizer_state_fingerprint": sf.optimizer_state_fingerprint(make_optimizer(step1500_model)),
+        },
+        "trace": {
+            "serialization": sf.DIAGNOSTIC_TRAINING_TRACE_SCHEMA,
+            "seed": seed,
+            "step_count": sf.DIAGNOSTIC_STEPS,
+            "schedule_sha256": schedule["sha256"],
+            "sha256": "a" * 64,
+            "final_loss": loss_evidence,
+        },
+        "step_count": sf.DIAGNOSTIC_STEPS,
+        "step1501_executed": True,
+        "final_model_state_fingerprint": sf.model_state_fingerprint(final_model),
+        "final_optimizer_state_fingerprint": sf.optimizer_state_fingerprint(make_optimizer(final_model)),
+        "retained_final_loss": final_loss,
+    }
+    save_checkpoint(
+        str(final_checkpoint),
+        final_model,
+        metadata={
+            "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
+            "feasibility_selection_eligible": False,
+            "task_010d_authorized": False,
+            "family": "array_json",
+            "model_size": "small",
+            "seed": seed,
+            "training_steps": sf.DIAGNOSTIC_STEPS,
+            "training_loss": final_loss,
+            "step1501_executed": True,
+            "training_trajectory_evidence": evidence,
+        },
+    )
+    training_metrics = {
+        "final_loss": final_loss,
+        "checkpoint_path": f"array_json__small__3000__seed{seed}/checkpoint_step3000.pt",
+        "step1501_executed": True,
+        "trajectory_evidence": evidence,
+    }
+    return final_checkpoint, step1500_checkpoint, training_metrics, evidence
+
+
+def test_diagnostic_trajectory_validation_does_not_call_training(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf)
+
+    def forbidden_training(**_kwargs: object) -> dict[str, object]:
+        raise AssertionError("validators must not run optimizer training")
+
+    monkeypatch.setattr(sf, "train_array_small_3000_diagnostic", forbidden_training)
+    sf.validate_diagnostic_training_trajectory_evidence(
+        checkpoint,
+        seed=0,
+        training_metrics=training_metrics,
+        frozen_step1500_checkpoint=step1500_checkpoint,
+    )
+
+
+def test_diagnostic_trajectory_rejects_seed_substitution_with_outer_relabel(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf, seed=0)
+    substituted = tmp_path / "checkpoint_step3000_seed1_relabel.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    payload["metadata"] = {**payload["metadata"], "seed": 1}
+    torch.save(payload, substituted)
+    with pytest.raises(ValueError, match="claimed_seed|schedule|initial"):
+        sf.validate_diagnostic_training_trajectory_evidence(
+            substituted,
+            seed=1,
+            training_metrics=training_metrics,
+            frozen_step1500_checkpoint=step1500_checkpoint,
+        )
+
+
+def test_diagnostic_trajectory_rejects_unused_checkpoint_tensor_mutation(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf)
+    mutated = tmp_path / "checkpoint_step3000_mutated.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    payload["model_state_dict"]["position_embedding.weight"][255, 0] += torch.tensor(1.0)
+    torch.save(payload, mutated)
+    with pytest.raises(ValueError, match="final model-state fingerprint"):
+        sf.validate_diagnostic_training_trajectory_evidence(
+            mutated,
+            seed=0,
+            training_metrics=training_metrics,
+            frozen_step1500_checkpoint=step1500_checkpoint,
+        )
+
+
+def test_diagnostic_initial_fingerprint_validation_restores_rng_states(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf, seed=2)
+    random.seed(123456)
+    torch.manual_seed(654321)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(111222)
+    python_rng = random.getstate()
+    torch_rng = torch.random.get_rng_state()
+    cuda_rng = tuple(state.clone() for state in torch.cuda.get_rng_state_all()) if torch.cuda.is_available() else None
+    sf.validate_diagnostic_training_trajectory_evidence(
+        checkpoint,
+        seed=2,
+        training_metrics=training_metrics,
+        frozen_step1500_checkpoint=step1500_checkpoint,
+    )
+    assert random.getstate() == python_rng
+    assert torch.equal(torch.random.get_rng_state(), torch_rng)
+    if cuda_rng is not None:
+        assert all(torch.equal(actual, expected) for actual, expected in zip(torch.cuda.get_rng_state_all(), cuda_rng, strict=True))
+
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    broken_evidence = {
+        **payload["metadata"]["training_trajectory_evidence"],
+        "initial_model_state_fingerprint": "0" * 64,
+    }
+    payload["metadata"]["training_trajectory_evidence"] = broken_evidence
+    torch.save(payload, checkpoint)
+    broken_metrics = {**training_metrics, "trajectory_evidence": broken_evidence}
+    with pytest.raises(ValueError, match="initial model-state fingerprint"):
+        sf.validate_diagnostic_training_trajectory_evidence(
+            checkpoint,
+            seed=2,
+            training_metrics=broken_metrics,
+            frozen_step1500_checkpoint=step1500_checkpoint,
+        )
+    assert random.getstate() == python_rng
+    assert torch.equal(torch.random.get_rng_state(), torch_rng)
+    if cuda_rng is not None:
+        assert all(torch.equal(actual, expected) for actual, expected in zip(torch.cuda.get_rng_state_all(), cuda_rng, strict=True))
+
+
+def test_diagnostic_trajectory_and_schedule_mutation_fail(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    checkpoint, step1500_checkpoint, training_metrics, evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf)
+    trace_mutated_metrics = {
+        **training_metrics,
+        "trajectory_evidence": {
+            **evidence,
+            "trace": {**evidence["trace"], "sha256": "b" * 64},
+        },
+    }
+    with pytest.raises(ValueError, match="metadata and metrics"):
+        sf.validate_diagnostic_training_trajectory_evidence(
+            checkpoint,
+            seed=0,
+            training_metrics=trace_mutated_metrics,
+            frozen_step1500_checkpoint=step1500_checkpoint,
+        )
+
+    loss_bytes_mutated = json.loads(json.dumps(evidence))
+    loss_bytes_mutated["trace"]["final_loss"]["tensor_bytes_hex"] = "00000000"
+    with pytest.raises(ValueError, match="encode the retained float32 loss value"):
+        sf.validate_diagnostic_trajectory_evidence(
+            loss_bytes_mutated,
+            seed=0,
+            final_model_state_fingerprint=evidence["final_model_state_fingerprint"],
+            expected_final_loss=evidence["retained_final_loss"],
+        )
+
+    schedule_mutated = tmp_path / "checkpoint_step3000_schedule_mutated.pt"
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    forged_evidence = json.loads(json.dumps(evidence))
+    forged_evidence["schedule"] = {**forged_evidence["schedule"], "sha256": "0" * 64}
+    payload["metadata"]["training_trajectory_evidence"] = forged_evidence
+    torch.save(payload, schedule_mutated)
+    forged_metrics = {**training_metrics, "trajectory_evidence": forged_evidence}
+    with pytest.raises(ValueError, match="schedule evidence"):
+        sf.validate_diagnostic_training_trajectory_evidence(
+            schedule_mutated,
+            seed=0,
+            training_metrics=forged_metrics,
+            frozen_step1500_checkpoint=step1500_checkpoint,
+        )
+
+
+def test_diagnostic_completed_scope_semantics_reject_empty_array_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    prefix = tmp_path / "array_json__small__1500__seed0__reused"
+    prefix.mkdir()
+    for name in ("greedy_metrics_rows.jsonl", "teacher_forced_train_rows.jsonl", "teacher_forced_eval_rows.jsonl"):
+        (prefix / name).write_text("")
+    (prefix / "metrics.json").write_text("{}\n")
+    monkeypatch.setattr(sf, "reused_feasibility_cell_binding", lambda *args: {})
+    monkeypatch.setattr(sf, "replay_array_artifacts", lambda *args, **kwargs: None)
+    with pytest.raises(ValueError, match="greedy artifact|wrong row count"):
+        sf.validate_diagnostic_completed_scope_semantics(
+            tmp_path,
+            [{"name": "array_baseline_reuse", "model_size": "small", "steps": sf.TRAINING_STEPS, "seed": 0, "rows": sf.EVAL_RECORDS_PER_FAMILY}],
+            tmp_path / "feasibility_004",
+        )
+
+
+def test_diagnostic_publish_final_callback_and_artifact_mutation_block_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+
+    def make_bound_root(root: Path) -> None:
+        root.mkdir()
+        (root / "rows.jsonl").write_text("{}\n")
+        common = {
+            "file_inventory": sf.diagnostic_inventory(root),
+        }
+        (root / "manifest.json").write_text(json.dumps(common, sort_keys=True) + "\n")
+        terminal = {
+            "status": "DONE",
+            "manifest_path": "manifest.json",
+            "manifest_sha256": sf.file_sha256(root / "manifest.json"),
+            "file_inventory": common["file_inventory"],
+        }
+        (root / "DONE.json").write_text(json.dumps(terminal, sort_keys=True) + "\n")
+        manifest = {"file_inventory": sf.diagnostic_inventory(root)}
+        (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
+        terminal["manifest_sha256"] = sf.file_sha256(root / "manifest.json")
+        terminal["file_inventory"] = manifest["file_inventory"]
+        (root / "DONE.json").write_text(json.dumps(terminal, sort_keys=True) + "\n")
+
+    callback_temp = tmp_path / "callback.tmp"
+    callback_target = tmp_path / "callback"
+    make_bound_root(callback_temp)
+    monkeypatch.setattr(sf, "validate_diagnostic_terminal_root", lambda *args, **kwargs: None)
+    with pytest.raises(RuntimeError, match="source changed"):
+        sf.publish_diagnostic_root(
+            callback_temp,
+            callback_target,
+            terminal_status="DONE",
+            final_callback=lambda: (_ for _ in ()).throw(RuntimeError("source changed")),
+        )
+    assert callback_temp.exists()
+    assert not callback_target.exists()
+
+    mutation_temp = tmp_path / "mutation.tmp"
+    mutation_target = tmp_path / "mutation"
+    make_bound_root(mutation_temp)
+
+    def mutate_after_semantic_validation(*args: object, **kwargs: object) -> None:
+        (mutation_temp / "rows.jsonl").write_text('{"mutated": true}\n')
+
+    monkeypatch.setattr(sf, "validate_diagnostic_terminal_root", mutate_after_semantic_validation)
+    with pytest.raises(ValueError, match="inventory|checksum"):
+        sf.publish_diagnostic_root(mutation_temp, mutation_target, terminal_status="DONE")
+    assert mutation_temp.exists()
+    assert not mutation_target.exists()
+
+
+def test_diagnostic_failed_progress_replaces_stale_generation_and_teacher_fields(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
+    preflight = {
+        "input_root": str(tmp_path / "feasibility_004"),
+        "predecessors": [],
+        "diagnostic_lineage": [],
+        "repair_transition": None,
+        "handoff": {},
+        "input_root_binding": {},
+        "record_hashes": {},
+        "core_blobs": {},
+        "environment": {},
+    }
+
+    def configure_common(output_root: Path) -> Path:
+        monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
+        monkeypatch.setattr(sf, "validate_diagnostic_cli_contract", lambda **kwargs: None)
+        monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
+        monkeypatch.setattr(sf, "diagnostic_preflight_bindings", lambda *args: preflight)
+        monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda *args, **kwargs: {})
+        monkeypatch.setattr(sf, "verify_diagnostic_preflight_bindings", lambda *args: None)
+        monkeypatch.setattr(sf, "verify_source_unchanged", lambda *args, **kwargs: None)
+        monkeypatch.setattr(sf, "SEEDS", (0,))
+        monkeypatch.setattr(sf, "NAMED_DIAGNOSTIC_CELLS", ())
+        monkeypatch.setattr(sf, "MODEL_SIZES", ())
+        monkeypatch.setattr(sf, "build_named_diagnostic_matrix", lambda: {})
+        monkeypatch.setattr(sf, "publish_diagnostic_root_or_leave_incomplete", lambda *args, **kwargs: None)
+        monkeypatch.setattr(sf, "reused_feasibility_cell_binding", lambda *args: {"checkpoint_path": "checkpoint_step1500.pt", "checkpoint_sha256": "a" * 64})
+        monkeypatch.setattr(sf, "load_checkpoint_model", lambda *args, **kwargs: torch.nn.Linear(1, 1).eval())
+        return output_root.with_name(output_root.name + ".tmp")
+
+    def train_stub(**kwargs: object) -> dict[str, object]:
+        callback = kwargs["progress_callback"]
+        assert callable(callback)
+        callback({"subphase": "array_training", "completed_steps": 3000})
+        Path(kwargs["checkpoint_path"]).write_bytes(b"checkpoint")
+        return {"final_loss": 1.0, "checkpoint_path": str(kwargs["checkpoint_path"]), "step1501_executed": True}
+
+    monkeypatch.setattr(sf, "train_array_small_3000_diagnostic", train_stub)
+    generation_output = tmp_path / "generation"
+    generation_temp = configure_common(generation_output)
+
+    def generation_failure(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        callback = kwargs["progress_callback"]
+        assert callable(callback)
+        callback({"subphase": "array_generation", "completed_rows": 7})
+        raise RuntimeError("generation boom")
+
+    monkeypatch.setattr(sf, "generate_array_rows", generation_failure)
+    with pytest.raises(RuntimeError, match="generation boom"):
+        sf.run_diagnostic_failure(device="cuda:0", input_root=tmp_path / "feasibility_004", output_root=generation_output)
+    partial = json.loads((generation_temp / "FAILED.json").read_text())["partial_scope"][0]
+    assert partial["subphase"] == "array_generation"
+    assert partial["completed_rows"] == 7
+    assert "completed_steps" not in partial
+
+    teacher_output = tmp_path / "teacher"
+    teacher_temp = configure_common(teacher_output)
+    monkeypatch.setattr(sf, "generate_array_rows", lambda *args, **kwargs: [])
+
+    def teacher_failure(*args: object, split: str, **kwargs: object) -> tuple[list[dict[str, object]], dict[str, object]]:
+        callback = kwargs["progress_callback"]
+        assert callable(callback)
+        callback({"subphase": "teacher_forced", "split": split, "completed_batches": 3})
+        if split == "eval":
+            raise RuntimeError("teacher boom")
+        return [], {"split": split}
+
+    monkeypatch.setattr(sf, "teacher_forced_rows", teacher_failure)
+    with pytest.raises(RuntimeError, match="teacher boom"):
+        sf.run_diagnostic_failure(device="cuda:0", input_root=tmp_path / "feasibility_004", output_root=teacher_output)
+    partial = json.loads((teacher_temp / "FAILED.json").read_text())["partial_scope"][0]
+    assert partial["subphase"] == "teacher_forced"
+    assert partial["split"] == "eval"
+    assert partial["completed_batches"] == 3
+    assert "completed_rows" not in partial
+    assert "completed_steps" not in partial
 
 
 def test_diagnostic_flags_reject_each_false_deterministic_state() -> None:
@@ -3626,7 +4004,12 @@ def test_diagnostic_terminal_markers_are_removed_after_post_terminal_failures(tm
     monkeypatch.setattr(sf, "build_named_diagnostic_matrix", lambda: {})
     monkeypatch.setattr(sf, "validate_diagnostic_array_training_plan", lambda plan: None)
     monkeypatch.setattr(sf, "diagnostic_array_training_plan", lambda: [])
-    monkeypatch.setattr(sf, "publish_diagnostic_root_or_leave_incomplete", lambda *args, **kwargs: None)
+    def publication_stub(*args: object, **kwargs: object) -> None:
+        callback = kwargs.get("final_callback")
+        if callback is not None:
+            callback()
+
+    monkeypatch.setattr(sf, "publish_diagnostic_root_or_leave_incomplete", publication_stub)
 
     calls = {"source": 0}
 
@@ -3693,3 +4076,9 @@ def test_diagnostic_frozen_configuration_expands_protocol_and_training_constants
     assert config["model_configs"]["medium"]["parameter_count"] == build_model("medium").parameter_count
     assert config["optimizer"]["class"] == "torch.optim.AdamW"
     assert config["optimizer"]["learning_rate"] == 0.0003
+    assert config["validation"] == {
+        "authorized_new_training_runs": 3,
+        "validation_training_or_replay_runs": 0,
+        "trajectory_evidence_source": "in_run_checkpoint_metadata_and_metrics",
+        "selection_evidence": False,
+    }
