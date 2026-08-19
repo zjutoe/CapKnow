@@ -2629,6 +2629,7 @@ def test_diagnostic_step1500_equality_gate_and_batch_stream(tmp_path: Path) -> N
 def test_diagnostic_step_loop_gate_occurs_after_1500_before_1501() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     events: list[str] = []
+    progress: list[int] = []
 
     def step_callback(step_index: int, _batch: object) -> None:
         events.append(f"step{step_index}")
@@ -2637,14 +2638,17 @@ def test_diagnostic_step_loop_gate_occurs_after_1500_before_1501() -> None:
         events.append("gate")
 
     result = sf.run_diagnostic_step_loop_with_gate(
-        ((0,), (1,), (2,)),
-        gate_step=2,
+        ((index,) for index in range(sf.TRAINING_STEPS + 1)),
+        gate_step=sf.TRAINING_STEPS,
         step_callback=step_callback,
         gate_callback=gate_callback,
+        progress_callback=lambda row: progress.append(row["completed_steps"]),
     )
-    assert events == ["step1", "step2", "gate", "step3"]
+    assert events[-4:] == ["step1499", "step1500", "gate", "step1501"]
+    assert progress[-3:] == [1500, 1500, 1501]
     assert result["step_after_gate_executed"] is True
     mismatch_events: list[str] = []
+    mismatch_progress: list[int] = []
 
     def mismatch_gate() -> None:
         mismatch_events.append("gate")
@@ -2652,12 +2656,14 @@ def test_diagnostic_step_loop_gate_occurs_after_1500_before_1501() -> None:
 
     with pytest.raises(ValueError, match="mismatch"):
         sf.run_diagnostic_step_loop_with_gate(
-            ((0,), (1,), (2,)),
-            gate_step=2,
+            ((index,) for index in range(sf.TRAINING_STEPS + 1)),
+            gate_step=sf.TRAINING_STEPS,
             step_callback=lambda step_index, _batch: mismatch_events.append(f"step{step_index}"),
             gate_callback=mismatch_gate,
+            progress_callback=lambda row: mismatch_progress.append(row["completed_steps"]),
         )
-    assert mismatch_events == ["step1", "step2", "gate"]
+    assert mismatch_events[-3:] == ["step1499", "step1500", "gate"]
+    assert mismatch_progress[-1] == sf.TRAINING_STEPS
 
 
 def test_diagnostic_frozen_blobs_record_hashes_and_reused_bindings() -> None:
@@ -2784,10 +2790,10 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
     ]
 
     with pytest.raises(ValueError, match="cuda:0"):
-        sf.validate_diagnostic_cli_contract(device="cpu", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=(), raw_argv=exact_argv, environ=exact_env)
+        sf.validate_diagnostic_cli_contract(device="cpu", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=(), environ=exact_env)
     assert not output_root.exists()
     with pytest.raises(ValueError, match="repository-relative"):
-        sf.validate_diagnostic_cli_contract(device="cuda:0", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=(), raw_argv=exact_argv, environ=exact_env)
+        sf.validate_diagnostic_cli_contract(device="cuda:0", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=(), environ=exact_env)
     validate_new_root = sf.validate_new_diagnostic_root
     monkeypatch.setattr(sf, "validate_new_diagnostic_root", lambda input_root, output_root, predecessor_diagnostic_roots=(): None)
     command_input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
@@ -2803,30 +2809,30 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
         "--output-root",
         str(command_output_root),
     ]
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
     sf.validate_diagnostic_cli_contract(
         device="cuda:0",
         input_root=command_input_root,
         output_root=command_output_root,
         predecessor_diagnostic_roots=(),
-        raw_argv=exact_argv,
         environ=exact_env,
     )
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: [*exact_argv[:-2], str(command_output_root), "--device", "cuda:0"])
     with pytest.raises(ValueError, match="process argv"):
         sf.validate_diagnostic_cli_contract(
             device="cuda:0",
             input_root=command_input_root,
             output_root=command_output_root,
             predecessor_diagnostic_roots=(),
-            raw_argv=[*exact_argv[:-2], str(command_output_root), "--device", "cuda:0"],
             environ=exact_env,
         )
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
     with pytest.raises(ValueError, match="PYTHONPATH"):
         sf.validate_diagnostic_cli_contract(
             device="cuda:0",
             input_root=command_input_root,
             output_root=command_output_root,
             predecessor_diagnostic_roots=(),
-            raw_argv=exact_argv,
             environ={**exact_env, "PYTHONPATH": str(REPO_ROOT)},
         )
     with pytest.raises(ValueError, match="repository-relative"):
@@ -2835,7 +2841,6 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
             input_root=command_input_root.resolve(),
             output_root=command_output_root.resolve(),
             predecessor_diagnostic_roots=(),
-            raw_argv=exact_argv,
             environ=exact_env,
         )
     monkeypatch.setattr(sf, "validate_new_diagnostic_root", validate_new_root)
@@ -2861,6 +2866,7 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
         "record_hashes": {},
         "core_blobs": {},
         "diagnostic_lineage": [],
+        "repair_transition": None,
         "completed_scope": [],
         "partial_scope": [],
         "failure_classification": None,
@@ -2881,7 +2887,7 @@ def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(tmp_path: Pa
             **{key: common[key] for key in (
             "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
             "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
-            "core_blobs", "diagnostic_lineage", "completed_scope", "partial_scope", "failure_classification",
+            "core_blobs", "diagnostic_lineage", "repair_transition", "completed_scope", "partial_scope", "failure_classification",
         )},
         "file_inventory": manifest["file_inventory"],
     }
@@ -2992,9 +2998,10 @@ def test_diagnostic_publish_done_requires_exact_paths_and_no_clobber(tmp_path: P
             "configuration": {},
             "environment": {},
             "record_hashes": {},
-            "core_blobs": {},
-            "diagnostic_lineage": [],
-            "completed_scope": [
+        "core_blobs": {},
+        "diagnostic_lineage": [],
+        "repair_transition": None,
+        "completed_scope": [
                 *({"name": "named_cell"} for _ in range(12)),
                 *({"name": "array_diagnostic_training"} for _ in range(3)),
                 *({"name": "array_baseline_reuse"} for _ in range(6)),
@@ -3015,7 +3022,7 @@ def test_diagnostic_publish_done_requires_exact_paths_and_no_clobber(tmp_path: P
                 **{key: common[key] for key in (
                     "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
                     "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
-                "core_blobs", "diagnostic_lineage", "completed_scope", "partial_scope", "failure_classification",
+                "core_blobs", "diagnostic_lineage", "repair_transition", "completed_scope", "partial_scope", "failure_classification",
             )},
             "file_inventory": manifest["file_inventory"],
         }
@@ -3058,16 +3065,7 @@ def test_diagnostic_predecessor_inventory_lineage_and_retry_contracts(tmp_path: 
     monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
     monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
     monkeypatch.setattr(sf, "current_source_commit", lambda: "b" * 40)
-    configuration = {
-        "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-        "feasibility_selection_eligible": False,
-        "task_010d_authorized": False,
-        "named_cells": list(sf.NAMED_DIAGNOSTIC_CELLS),
-        "array_new_training": sf.diagnostic_array_training_plan(),
-        "diagnostic_steps": sf.DIAGNOSTIC_STEPS,
-        "formal_training_steps": sf.TRAINING_STEPS,
-        "pass_threshold": sf.PASS_THRESHOLD,
-    }
+    configuration = sf.frozen_diagnostic_configuration()
 
     def make_failed(root: Path, *, lineage: list[dict[str, object]], source_commit: str, failure_classification: str) -> dict[str, object]:
         root.mkdir()
@@ -3094,6 +3092,7 @@ def test_diagnostic_predecessor_inventory_lineage_and_retry_contracts(tmp_path: 
             "completed_scope": [],
             "partial_scope": [],
             "failure_classification": failure_classification,
+            "repair_transition": None,
         }
         (root / "summary.json").write_text(json.dumps(common, sort_keys=True) + "\n")
         manifest = {**common, "file_inventory": sf.diagnostic_inventory(root)}
@@ -3108,7 +3107,7 @@ def test_diagnostic_predecessor_inventory_lineage_and_retry_contracts(tmp_path: 
                 **{key: common[key] for key in (
                     "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
                     "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
-                "core_blobs", "diagnostic_lineage", "completed_scope", "partial_scope", "failure_classification",
+                "core_blobs", "diagnostic_lineage", "repair_transition", "completed_scope", "partial_scope", "failure_classification",
             )},
             "file_inventory": manifest["file_inventory"],
         }
@@ -3338,21 +3337,21 @@ def test_diagnostic_real_process_command_rejects_direct_main_and_flags(monkeypat
         "--output-root",
         str(command_output_root),
     ]
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
     sf.validate_diagnostic_cli_contract(
         device="cuda:0",
         input_root=command_input_root,
         output_root=command_output_root,
         predecessor_diagnostic_roots=(),
-        raw_argv=exact_argv,
         environ=exact_env,
     )
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: ["python", "-O", *exact_argv[1:]])
     with pytest.raises(ValueError, match="process argv"):
         sf.validate_diagnostic_cli_contract(
             device="cuda:0",
             input_root=command_input_root,
             output_root=command_output_root,
             predecessor_diagnostic_roots=(),
-            raw_argv=["python", "-O", *exact_argv[1:]],
             environ=exact_env,
         )
     with pytest.raises(ValueError, match="main\\(argv"):
@@ -3365,6 +3364,14 @@ def test_diagnostic_real_process_command_rejects_direct_main_and_flags(monkeypat
             "--output-root",
             str(command_output_root),
         ])
+    with pytest.raises(ValueError, match="real __main__"):
+        sf.run_diagnostic_failure(
+            device="cuda:0",
+            input_root=command_input_root,
+            output_root=command_output_root,
+            predecessor_diagnostic_roots=(),
+            environ=exact_env,
+        )
 
 
 @pytest.mark.parametrize(
@@ -3437,7 +3444,7 @@ def test_diagnostic_common_semantic_validator_rejects_provenance_protocol_and_co
             "cuda_tf32": False,
             "cudnn_tf32": False,
         },
-        "handoff": {"path": sf.DIAGNOSTIC_HANDOFF_PATH, "sha256": sf.file_sha256(REPO_ROOT / sf.DIAGNOSTIC_HANDOFF_PATH)},
+        "handoff": sf.handoff_binding_for_commit(source_commit),
         "input_root": {
             "path": str(input_root),
             "manifest_sha256": sf.DIAGNOSTIC_INPUT_CHECKSUMS["manifest.json"],
@@ -3452,7 +3459,8 @@ def test_diagnostic_common_semantic_validator_rejects_provenance_protocol_and_co
         "core_blobs": sf.DIAGNOSTIC_CORE_BLOBS,
         "environment": {"python": "x", "platform": "x", "torch": "x", "cuda_available": True, "cuda": "x", "gpu": "x", "gpu_driver": "x"},
         "completed_scope": [],
-        "partial_scope": [{"name": "failed"}],
+        "partial_scope": [{"name": "diagnostic_initialization"}],
+        "repair_transition": None,
         "file_inventory": [],
         "summary": {"done": False, "completed_scope_count": 0, "partial_scope_count": 1},
     }
@@ -3485,11 +3493,203 @@ def test_diagnostic_done_validators_reject_fake_checkpoint_and_duplicate_scope(t
     fake_checkpoint.write_bytes(b"checkpoint")
     with pytest.raises(ValueError, match="checkpoint"):
         sf.validate_diagnostic_checkpoint_3000(fake_checkpoint, seed=0)
-    duplicate_named_scope = [
-        *({"name": "named_cell", "seed": seed, "cell": cell, "rows": sf.EVAL_RECORDS_PER_FAMILY} for seed in sf.SEEDS for cell in sf.NAMED_DIAGNOSTIC_CELLS),
-        {"name": "named_cell", "seed": 0, "cell": "seen_surface_seen_operand", "rows": sf.EVAL_RECORDS_PER_FAMILY},
-        *({"name": "array_baseline_reuse", "model_size": model_size, "steps": sf.TRAINING_STEPS, "seed": seed, "rows": sf.EVAL_RECORDS_PER_FAMILY} for model_size in sf.MODEL_SIZES for seed in sf.SEEDS),
-        *({"name": "array_diagnostic_training", "model_size": "small", "steps": sf.DIAGNOSTIC_STEPS, "seed": seed, "rows": sf.EVAL_RECORDS_PER_FAMILY} for seed in sf.SEEDS),
+    fabricated_scope = [{"name": "array_training_plan", "runs": len(sf.SEEDS)}]
+    with pytest.raises(ValueError, match="prefix"):
+        sf.validate_diagnostic_completed_scope(fabricated_scope, terminal_status="FAILED")
+    duplicate_scope = [
+        {"name": "named_matrix_construction", "rows": len(sf.NAMED_DIAGNOSTIC_CELLS) * sf.EVAL_RECORDS_PER_FAMILY},
+        {"name": "named_matrix_construction", "rows": len(sf.NAMED_DIAGNOSTIC_CELLS) * sf.EVAL_RECORDS_PER_FAMILY},
     ]
-    with pytest.raises(ValueError, match="duplicates"):
-        sf.validate_diagnostic_completed_scope(duplicate_named_scope, terminal_status="DONE")
+    with pytest.raises(ValueError, match="prefix"):
+        sf.validate_diagnostic_completed_scope(duplicate_scope, terminal_status="FAILED")
+    completed_matrix = [{"name": "named_matrix_construction", "rows": len(sf.NAMED_DIAGNOSTIC_CELLS) * sf.EVAL_RECORDS_PER_FAMILY}]
+    with pytest.raises(ValueError, match="lacks retained artifact"):
+        sf.validate_diagnostic_completed_scope_artifacts(tmp_path, completed_matrix)
+    (tmp_path / "named_diagnostic_matrix.jsonl").write_text("{}\n")
+    sf.validate_diagnostic_completed_scope_artifacts(tmp_path, completed_matrix)
+
+
+def test_diagnostic_flags_reject_each_false_deterministic_state() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    flags = {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        "PYTHONPATH": ".",
+        "torch_deterministic_algorithms": True,
+        "cudnn_deterministic": True,
+        "cudnn_benchmark": False,
+        "cuda_tf32": False,
+        "cudnn_tf32": False,
+    }
+    sf.validate_diagnostic_flags(flags)
+    flips = {
+        "torch_deterministic_algorithms": False,
+        "cudnn_deterministic": False,
+        "cudnn_benchmark": True,
+        "cuda_tf32": True,
+        "cudnn_tf32": True,
+        "PYTHONDONTWRITEBYTECODE": "0",
+        "CUBLAS_WORKSPACE_CONFIG": ":16:8",
+        "PYTHONPATH": str(REPO_ROOT),
+    }
+    for key, value in flips.items():
+        with pytest.raises(ValueError, match=key):
+            sf.validate_diagnostic_flags({**flags, key: value})
+
+
+def test_diagnostic_failed_partial_scope_rejects_impossible_progress_and_missing_identity() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    failure = "synthetic failure"
+    completed = [{"name": "named_matrix_construction", "rows": len(sf.NAMED_DIAGNOSTIC_CELLS) * sf.EVAL_RECORDS_PER_FAMILY}]
+    valid = [{
+        "name": "named_cell",
+        "seed": 0,
+        "cell": sf.NAMED_DIAGNOSTIC_CELLS[0],
+        "subphase": "named_generation",
+        "completed_rows": sf.EVAL_RECORDS_PER_FAMILY,
+        "error": failure,
+    }]
+    sf.validate_diagnostic_partial_scope(valid, completed_scope=completed, terminal_status="FAILED", failure=failure)
+    for partial, match in (
+        ([{**valid[0], "completed_rows": -1}], "out of range"),
+        ([{**valid[0], "completed_rows": sf.EVAL_RECORDS_PER_FAMILY + 1}], "out of range"),
+        ([{"name": "named_cell", "subphase": "named_generation", "completed_rows": 1, "error": failure}], "identity"),
+        ([valid[0], valid[0]], "exactly one"),
+        ([{**valid[0], "error": "different"}], "failure error"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            sf.validate_diagnostic_partial_scope(partial, completed_scope=completed, terminal_status="FAILED", failure=failure)
+
+
+def test_diagnostic_replay_validators_reject_rows_not_from_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    model = torch.nn.Linear(1, 1)
+    model.eval()
+    monkeypatch.setattr(sf, "diagnostic_replay_device", lambda: torch.device("cuda:0"))
+    monkeypatch.setattr(sf, "load_checkpoint_model", lambda checkpoint_path, model_size, device: model)
+    monkeypatch.setattr(sf, "generate_array_rows", lambda *args, **kwargs: [{"row": "replayed"}])
+    monkeypatch.setattr(sf, "teacher_forced_rows", lambda *args, split, **kwargs: ([{"split": split}], {"split": split}))
+    with pytest.raises(ValueError, match="greedy rows"):
+        sf.replay_array_artifacts(
+            tmp_path / "checkpoint.pt",
+            model_size="small",
+            comparison_source="diagnostic_small_3000",
+            steps=sf.DIAGNOSTIC_STEPS,
+            seed=0,
+            retained_greedy_rows=[{"row": "retained"}],
+            retained_train_rows=[{"split": "train"}],
+            retained_eval_rows=[{"split": "eval"}],
+            retained_train_aggregate={"split": "train"},
+            retained_eval_aggregate={"split": "eval"},
+        )
+    monkeypatch.setattr(sf, "generate_array_rows", lambda *args, **kwargs: [{"row": "retained"}])
+    sf.replay_array_artifacts(
+        tmp_path / "checkpoint.pt",
+        model_size="small",
+        comparison_source="diagnostic_small_3000",
+        steps=sf.DIAGNOSTIC_STEPS,
+        seed=0,
+        retained_greedy_rows=[{"row": "retained"}],
+        retained_train_rows=[{"split": "train"}],
+        retained_eval_rows=[{"split": "eval"}],
+        retained_train_aggregate={"split": "train"},
+        retained_eval_aggregate={"split": "eval"},
+    )
+    monkeypatch.setattr(sf, "generate_named_diagnostic_rows", lambda *args, **kwargs: [{"row": "replayed"}])
+    with pytest.raises(ValueError, match="Named retained rows"):
+        sf.replay_named_generation_artifact(tmp_path / "checkpoint.pt", matrix_rows=[], retained_rows=[{"row": "retained"}])
+
+
+def test_diagnostic_terminal_markers_are_removed_after_post_terminal_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    input_root = tmp_path / "feasibility_004"
+    output_root = tmp_path / "feasibility_diagnostic_001"
+    source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
+    preflight = {
+        "input_root": str(input_root),
+        "predecessors": [],
+        "diagnostic_lineage": [],
+        "repair_transition": None,
+        "handoff": {},
+        "input_root_binding": {},
+        "record_hashes": {},
+        "core_blobs": {},
+        "environment": {},
+    }
+    monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
+    monkeypatch.setattr(sf, "validate_diagnostic_cli_contract", lambda **kwargs: None)
+    monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
+    monkeypatch.setattr(sf, "diagnostic_preflight_bindings", lambda *args: preflight)
+    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda *args, **kwargs: {})
+    monkeypatch.setattr(sf, "SEEDS", ())
+    monkeypatch.setattr(sf, "NAMED_DIAGNOSTIC_CELLS", ())
+    monkeypatch.setattr(sf, "build_named_diagnostic_matrix", lambda: {})
+    monkeypatch.setattr(sf, "validate_diagnostic_array_training_plan", lambda plan: None)
+    monkeypatch.setattr(sf, "diagnostic_array_training_plan", lambda: [])
+    monkeypatch.setattr(sf, "publish_diagnostic_root_or_leave_incomplete", lambda *args, **kwargs: None)
+
+    calls = {"source": 0}
+
+    def source_changed_after_done(snapshot: object, *, active_output_root: Path | None = None) -> None:
+        calls["source"] += 1
+        if calls["source"] == 2:
+            raise sf.SourceChangedError("changed after terminal")
+
+    monkeypatch.setattr(sf, "verify_diagnostic_preflight_bindings", lambda *args: None)
+    monkeypatch.setattr(sf, "verify_source_unchanged", source_changed_after_done)
+    with pytest.raises(sf.DiagnosticPublicationError):
+        sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=output_root)
+    assert not (output_root.with_name(output_root.name + ".tmp") / "DONE.json").exists()
+    assert not (output_root.with_name(output_root.name + ".tmp") / "FAILED.json").exists()
+
+    second_output = tmp_path / "feasibility_diagnostic_002"
+    calls = {"preflight": 0}
+
+    def preflight_changed_after_done(*args: object) -> None:
+        calls["preflight"] += 1
+        if calls["preflight"] == 2:
+            raise ValueError("changed after terminal")
+
+    monkeypatch.setattr(sf, "verify_diagnostic_preflight_bindings", preflight_changed_after_done)
+    monkeypatch.setattr(sf, "verify_source_unchanged", lambda *args, **kwargs: None)
+    with pytest.raises(sf.DiagnosticPublicationError):
+        sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=second_output)
+    assert not (second_output.with_name(second_output.name + ".tmp") / "DONE.json").exists()
+    assert not (second_output.with_name(second_output.name + ".tmp") / "FAILED.json").exists()
+
+
+def test_diagnostic_repair_transition_binds_predecessor_current_and_allowed_diff(monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    superseded = "b" * 40
+    repaired = "c" * 40
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(sf, "validate_diagnostic_repair_diff_confined", lambda old, new: calls.append((old, new)))
+    lineage = [{"source_commit": superseded, "failure_classification": "diagnostic_implementation_defect"}]
+    transition = sf.diagnostic_repair_transition(lineage, repaired_source_commit=repaired)
+    assert transition == {
+        "superseded_source_commit": superseded,
+        "repaired_source_commit": repaired,
+        "allowed_diff_paths": sorted(sf.DIAGNOSTIC_REPAIR_ALLOWED_DIFF_PATHS),
+    }
+    sf.validate_diagnostic_repair_transition(transition, lineage=lineage, source_commit=repaired)
+    assert calls == [(superseded, repaired), (superseded, repaired)]
+    with pytest.raises(ValueError, match="superseded"):
+        sf.validate_diagnostic_repair_transition({**transition, "superseded_source_commit": "d" * 40}, lineage=lineage, source_commit=repaired)
+    with pytest.raises(ValueError, match="repaired"):
+        sf.validate_diagnostic_repair_transition({**transition, "repaired_source_commit": "d" * 40}, lineage=lineage, source_commit=repaired)
+    sf.validate_diagnostic_repair_transition(None, lineage=[{"source_commit": superseded, "failure_classification": "transient_infrastructure"}], source_commit=superseded)
+    with pytest.raises(ValueError, match="repair_transition=null"):
+        sf.validate_diagnostic_repair_transition(transition, lineage=[], source_commit=repaired)
+
+
+def test_diagnostic_frozen_configuration_expands_protocol_and_training_constants() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    config = sf.frozen_diagnostic_configuration()
+    assert config["accepted_protocol_commit"] == sf.DIAGNOSTIC_ACCEPTED_PROTOCOL_COMMIT
+    assert config["handoff_blob"] == sf.DIAGNOSTIC_HANDOFF_BLOB
+    assert config["tokenizer"]["eos_id"] == EOS_ID
+    assert config["batch_size"] == sf.BATCH_SIZE
+    assert config["model_configs"]["small"]["parameter_count"] == build_model("small").parameter_count
+    assert config["model_configs"]["medium"]["parameter_count"] == build_model("medium").parameter_count
+    assert config["optimizer"]["class"] == "torch.optim.AdamW"
+    assert config["optimizer"]["learning_rate"] == 0.0003
