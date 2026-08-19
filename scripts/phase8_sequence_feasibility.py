@@ -107,6 +107,7 @@ DIAGNOSTIC_REQUIRED_ENV = {
     "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
     "PYTHONPATH": ".",
 }
+DIAGNOSTIC_BACKEND_SEED = 0
 DIAGNOSTIC_INPUT_CHECKSUMS = {
     "manifest.json": "19cf2db4df6f6928d0afa7ab8aef8d891e944152e480541f5aaf8702565e8d00",
     "summary.json": "4eaf7b5742161ff6ea5612f7c53668ee71c38f598e18da27a375fafebb6dc506",
@@ -2025,6 +2026,10 @@ def validate_diagnostic_flags(value: object) -> None:
     for key, expected in expected_backend.items():
         if value.get(key) is not expected:
             raise ValueError(f"Diagnostic deterministic backend flag {key} must be exactly {expected!r}.")
+
+
+def configure_diagnostic_deterministic_backend() -> None:
+    set_deterministic_backend(DIAGNOSTIC_BACKEND_SEED)
 
 
 def validate_diagnostic_environment_schema(value: object) -> None:
@@ -4108,6 +4113,7 @@ def run_diagnostic_failure(
         predecessor_diagnostic_roots=predecessor_diagnostic_roots,
         environ=environ,
     )
+    configure_diagnostic_deterministic_backend()
     source_snapshot = capture_diagnostic_source_provenance(input_root, output_root, predecessor_diagnostic_roots)
     preflight_bindings = diagnostic_preflight_bindings(input_root, predecessor_diagnostic_roots)
     start_time = time.monotonic()

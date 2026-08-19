@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import replace
 import importlib
+import inspect
 import json
 import math
+import os
 from pathlib import Path
 import random
 import re
@@ -3885,6 +3887,141 @@ def test_diagnostic_failed_progress_replaces_stale_generation_and_teacher_fields
     assert partial["completed_batches"] == 3
     assert "completed_rows" not in partial
     assert "completed_steps" not in partial
+
+
+def test_diagnostic_early_failed_terminal_uses_backend_before_model_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    original_rng_states = sf.snapshot_rng_states()
+    original_num_threads = torch.get_num_threads()
+    original_mkldnn_enabled = torch.backends.mkldnn.enabled
+    original_deterministic_algorithms = torch.are_deterministic_algorithms_enabled()
+    original_deterministic_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    original_cudnn_deterministic = torch.backends.cudnn.deterministic
+    original_cudnn_benchmark = torch.backends.cudnn.benchmark
+    original_cuda_tf32 = torch.backends.cuda.matmul.allow_tf32
+    original_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+
+    def restore_torch_process_state() -> None:
+        sf.restore_rng_states(original_rng_states)
+        torch.set_num_threads(original_num_threads)
+        torch.backends.mkldnn.enabled = original_mkldnn_enabled
+        torch.use_deterministic_algorithms(
+            original_deterministic_algorithms,
+            warn_only=original_deterministic_warn_only,
+        )
+        torch.backends.cudnn.deterministic = original_cudnn_deterministic
+        torch.backends.cudnn.benchmark = original_cudnn_benchmark
+        torch.backends.cuda.matmul.allow_tf32 = original_cuda_tf32
+        torch.backends.cudnn.allow_tf32 = original_cudnn_tf32
+
+    request.addfinalizer(restore_torch_process_state)
+    source = inspect.getsource(sf.run_diagnostic_failure)
+    backend_index = source.index("configure_diagnostic_deterministic_backend()")
+    assert backend_index < source.index("temp_root =")
+    for forward_capable_call in (
+        "load_checkpoint_model(",
+        "generate_named_diagnostic_rows(",
+        "teacher_forced_rows(",
+        "train_array_small_3000_diagnostic(",
+    ):
+        assert backend_index < source.index(forward_capable_call)
+
+    input_root = tmp_path / "feasibility_004"
+    output_root = tmp_path / "feasibility_diagnostic_001"
+    source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
+    preflight = {
+        "input_root": str(input_root),
+        "predecessors": [],
+        "diagnostic_lineage": [],
+        "repair_transition": None,
+        "handoff": {},
+        "input_root_binding": {},
+        "record_hashes": {},
+        "core_blobs": {},
+        "environment": {},
+    }
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    monkeypatch.setenv("PYTHONPATH", ".")
+    torch.use_deterministic_algorithms(False)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+    def current_flags() -> dict[str, object]:
+        return {
+            "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
+            "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+            "PYTHONPATH": os.environ.get("PYTHONPATH"),
+            "torch_deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "cudnn_deterministic": torch.backends.cudnn.deterministic,
+            "cudnn_benchmark": torch.backends.cudnn.benchmark,
+            "cuda_tf32": torch.backends.cuda.matmul.allow_tf32,
+            "cudnn_tf32": torch.backends.cudnn.allow_tf32,
+        }
+
+    events: list[object] = []
+    real_set_deterministic_backend = sf.set_deterministic_backend
+
+    def backend_probe(seed: int) -> None:
+        events.append(("backend", seed))
+        real_set_deterministic_backend(seed)
+
+    def early_matrix_failure() -> dict[str, list[dict[str, object]]]:
+        events.append("named_matrix_construction")
+        sf.validate_diagnostic_flags(current_flags())
+        raise RuntimeError("early backend probe")
+
+    def forbidden_model_work(*args: object, **kwargs: object) -> object:
+        raise AssertionError("model work ran before the early catchable failure")
+
+    def publish_probe(
+        temp_root: Path,
+        target_root: Path,
+        *,
+        terminal_status: str,
+        final_callback: object = None,
+    ) -> None:
+        assert target_root == output_root
+        assert terminal_status == "FAILED"
+        events.append("failed_publication")
+        for filename in ("summary.json", "manifest.json", "FAILED.json"):
+            record = json.loads((temp_root / filename).read_text())
+            sf.validate_diagnostic_flags(record["deterministic_flags"])
+        failed = json.loads((temp_root / "FAILED.json").read_text())
+        assert failed["partial_scope"] == [
+            {"name": "named_matrix_construction", "error": "RuntimeError('early backend probe')"}
+        ]
+
+    monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
+    monkeypatch.setattr(sf, "validate_diagnostic_cli_contract", lambda **kwargs: None)
+    monkeypatch.setattr(sf, "set_deterministic_backend", backend_probe)
+    monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
+    monkeypatch.setattr(sf, "diagnostic_preflight_bindings", lambda *args: preflight)
+    monkeypatch.setattr(sf, "verify_diagnostic_preflight_bindings", lambda *args: None)
+    monkeypatch.setattr(sf, "verify_source_unchanged", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda *args, **kwargs: {})
+    monkeypatch.setattr(sf, "build_named_diagnostic_matrix", early_matrix_failure)
+    monkeypatch.setattr(sf, "load_checkpoint_model", forbidden_model_work)
+    monkeypatch.setattr(sf, "generate_named_diagnostic_rows", forbidden_model_work)
+    monkeypatch.setattr(sf, "teacher_forced_rows", forbidden_model_work)
+    monkeypatch.setattr(sf, "generate_array_rows", forbidden_model_work)
+    monkeypatch.setattr(sf, "train_array_small_3000_diagnostic", forbidden_model_work)
+    monkeypatch.setattr(sf, "publish_diagnostic_root_or_leave_incomplete", publish_probe)
+
+    with pytest.raises(RuntimeError, match="early backend probe"):
+        sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=output_root)
+
+    assert events == [
+        ("backend", sf.DIAGNOSTIC_BACKEND_SEED),
+        "named_matrix_construction",
+        "failed_publication",
+    ]
 
 
 def test_diagnostic_flags_reject_each_false_deterministic_state() -> None:
