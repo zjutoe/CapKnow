@@ -132,6 +132,21 @@ manifest checksum, terminal checksum, manifest-bound terminal checksum, old exac
 configuration schema, old state schema, and old parameter count before constructing
 an untied model. A different path containing copied bytes is not allowlisted.
 
+The only additional historical untied checkpoints are the three D1-owned files below:
+
+| D1 inventory path | SHA-256 |
+| --- | --- |
+| `array_json__small__3000__seed0/checkpoint_step3000.pt` | `8311fb311fc9f7b707be4bb6fe82eed19b99c024c31341e9013052903f00365b` |
+| `array_json__small__3000__seed1/checkpoint_step3000.pt` | `b2684d53fde02136053d89090ef1595bb781a749c511f4c0a52a8c1c318d9d0a` |
+| `array_json__small__3000__seed2/checkpoint_step3000.pt` | `709d8c628d4835dfc0fe5ed8f382c80919539207c7ab63135f4c592f6d04ad2f` |
+
+They qualify only after the canonical diagnostic path, source commit,
+manifest/summary/DONE checksums, complete file inventory, and the individual inventory
+path/size/checksum have all matched the D1 binding below. D1 references to reused
+1500-step checkpoints still route through the exact `feasibility_004` allowance.
+No other diagnostic root, D1 file, checkpoint, or copied path qualifies for historical
+model loading.
+
 Use an explicit historical configuration/construction helper. Its in-memory marker
 may be `embedding_weight_tying=false` and
 `model_protocol_revision="phase8_untied_legacy_v1"`, but those marker fields are not
@@ -195,6 +210,14 @@ a predecessor root, selection, pass cell, selected root, or source of a new metr
 Source cleanliness may exclude only the exact inventory-bound files under all four
 predecessor roots and this diagnostic. Do not whitelist the parent artifact tree.
 
+Implement this as two ordered validation phases. First, perform only shallow canonical
+path, terminal, manifest, and complete inventory size/checksum validation sufficient
+to derive the exact allowed Git-status paths. This phase must not construct a model,
+build a training schedule, load a checkpoint tensor for semantic validation, perform
+a forward/replay, or create an output/temp root. Second, validate Git tracked/staged,
+untracked, and ignored source cleanliness against only those paths. Deep checkpoint,
+D1, lineage-semantic, and replay validation may begin only after cleanliness passes.
+
 ## Current feasibility schema
 
 The new `frozen_configuration()` must include the exact tying flag, revision literal,
@@ -242,11 +265,15 @@ PYTHONPATH=.
 ```
 
 Configure and verify deterministic algorithms, CUDA/cuDNN TF32 disabled, cuDNN
-benchmarking disabled, and cuDNN determinism enabled. All model construction,
-training, evaluation, publication replay, and current-root semantic validation use
-exactly `torch.device("cuda:0")`. Hashing and non-forward schema checks may use CPU.
-An environment/device mismatch fails preflight without creating the output or temp
-root.
+benchmarking disabled, and cuDNN determinism enabled. Retain the frozen construction
+semantics: initialize every production model on CPU with the accepted CPU RNG stream,
+complete the weight alias there, and only then move the completed model to
+`torch.device("cuda:0")`. Every production training forward, evaluation, generation,
+publication replay, and current-root semantic replay uses exactly `cuda:0`. Hashing,
+checkpoint-schema inspection, shallow cleanliness authorization, and other non-forward
+schema checks may use CPU. The test-local four-record smoke remains an explicitly
+non-evidence CPU test. An environment/device mismatch fails preflight without creating
+the output or temp root.
 
 The only future process command is exactly:
 
@@ -289,15 +316,18 @@ Add or update focused tests for:
    sizes/seeds;
 2. tied checkpoint save/load, state-key equality, post-load alias identity, and every
    divergent/missing/malformed revision/state rejection;
-3. exact legacy allowlist, untied config/count/state reconstruction, copied-path and
-   checksum rejection, plus successful deep validation of roots 001–004 and D1;
+3. exact legacy allowlist, including only the three checksum-bound D1-owned
+   checkpoints after full D1-root authorization, untied config/count/state
+   reconstruction, copied-path and checksum rejection, plus successful deep validation
+   of roots 001–004 and D1;
 4. all eight record hashes and mutation rejection before model construction;
 5. exact D1 binding, complete inventory, tamper/substitution rejection, and proof it
    cannot enter selection or cells;
 6. exact current manifest/summary/terminal/cell schemas and current-vs-historical
    validator routing;
-7. exact real argv, environment, `cuda:0`, backend flags, ordered roots, absent
-   selection, fresh root, and no-output preflight rejection;
+7. exact real argv, environment, CPU construction followed by `cuda:0` transfer,
+   backend flags, ordered roots, absent selection, fresh root, and no-output preflight
+   rejection;
 8. complete 24-cell execution/aggregation and all-cells pass semantics using test-local
    fakes only, never a real feasibility run;
 9. regression coverage for tokenizer, response-only loss, overfit smoke, deterministic
@@ -306,6 +336,12 @@ Add or update focused tests for:
 Use independently written expected dictionaries/hashes in tests; do not assert a
 function against itself. Tests may monkeypatch GPU/model work only after separately
 testing that production paths fail closed.
+
+Add a call-order sentinel test in which source cleanliness fails after shallow
+inventory authorization. It must prove that no model constructor, checkpoint tensor
+load, training schedule, forward/replay, output-root creation, or temp-root creation
+was reached. Add a separate passing-order test showing deep historical/D1 validation
+begins only after cleanliness succeeds.
 
 ## Verification
 
