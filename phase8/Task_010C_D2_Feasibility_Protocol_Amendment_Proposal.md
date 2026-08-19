@@ -86,11 +86,20 @@ and Task 010C so that both model sizes satisfy all of the following:
 1. `token_embedding` remains a learned `nn.Embedding` and `lm_head` remains a
    bias-free `nn.Linear`.
 2. `lm_head.weight` and `token_embedding.weight` are the same `nn.Parameter`, not
-   merely equal tensors or periodically synchronized values.
+   merely equal tensors or periodically synchronized values. Construction retains
+   the existing exact module order: initialize `token_embedding`,
+   `position_embedding`, every block, `final_norm`, and the independent `lm_head` in
+   that order; then assign the already initialized `token_embedding.weight` object to
+   `lm_head.weight`. The independent head initialization is consumed and discarded.
+   The shared parameter is never reinitialized, and the initialized head weight must
+   never replace the initialized token embedding.
 3. The explicit model/checkpoint configuration records
-   `embedding_weight_tying=true` and a protocol revision identifier. Absence of the
-   field means the historical untied revision only under the exact legacy rules
-   below; it must never silently default to the new revision.
+   `embedding_weight_tying=true` and
+   `model_protocol_revision="phase8_tied_io_v1"`. Both exact fields are required in
+   every new in-memory configuration, checkpoint configuration, feasibility manifest
+   configuration, summary configuration, and terminal cell/configuration binding.
+   Absence of either field means the historical untied revision only under the exact
+   legacy rules below; neither field may silently default for a new object.
 4. Parameter counts are computed from the constructed module after aliasing and are
    exactly `133120` for small and `859392` for medium. These values follow from
    removing one independent `260 x d_model` matrix from the accepted untied counts
@@ -102,6 +111,14 @@ and Task 010C so that both model sizes satisfy all of the following:
 6. Seed reset, deterministic backend, initialization, training, checkpoint,
    evaluation, and greedy-generation paths remain common to feasibility and future
    formal models. No feasibility-only model branch is allowed.
+
+Initialization tests must use both sizes and seeds `0,1,2`. For each pair, reset the
+accepted deterministic backend and construct an explicit historical untied reference,
+then reset identically and construct the tied model. The tied shared tensor must be
+bitwise equal to the reference model's initialized `token_embedding.weight`, and the
+post-construction PyTorch CPU and CUDA RNG states must be exactly equal between the
+two constructions. This reference oracle freezes both the source tensor and the
+otherwise discarded head's RNG consumption without deriving a choice from outcomes.
 
 The amendment changes model architecture and its exact parameter count. It does not
 claim comparison of new and historical exact-match counts is a controlled causal
@@ -123,6 +140,30 @@ No other scientific or engineering constant may change in the D2 implementation:
   per-cell `52/64` threshold, and the requirement that all 24 cells pass;
 - overwrite refusal, clean-source check, atomic terminal publication, retained
   checkpoints/generations, inventory checksums, and immutable lineage.
+
+The only authorized execution device is exactly `cuda:0`; CPU fallback, ambient
+default-device selection, another CUDA index, and a non-CUDA run are forbidden. Before
+creating the temporary output root or constructing a model, preflight must require
+the following complete runtime environment dictionary, which is identical in the
+checksum-bound `feasibility_004` and accepted D1 manifests:
+
+```json
+{
+  "cuda": "13.0",
+  "cuda_available": true,
+  "gpu": "NVIDIA A800 80GB PCIe",
+  "gpu_driver": "590.48.01",
+  "platform": "Linux-6.12.0-184.el10.x86_64-x86_64-with-glibc2.39",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "torch": "2.9.1+cu130"
+}
+```
+
+Preflight must also require `PYTHONDONTWRITEBYTECODE=1`,
+`CUBLAS_WORKSPACE_CONFIG=:4096:8`, and `PYTHONPATH=.` and must verify deterministic
+algorithms enabled, CUDA/cuDNN TF32 disabled, cuDNN benchmarking disabled, and cuDNN
+determinism enabled. Environment or device mismatch is a preflight refusal, not a
+reason to change the protocol or select a fallback.
 
 The canonical record hashes at prerequisite commit
 `cb49ebdf577df78e97b7748aadc48f8547a70f6a` are frozen as follows:
@@ -148,7 +189,9 @@ models. Compatibility is narrow:
 - their checkpoints remain untied, with parameter counts `149760` and `892672`, and
   must be reconstructed with an explicit historical untied configuration when deep
   validation or semantic replay is required;
-- a new root or arbitrary checkpoint with a missing tying field is rejected;
+- a new root or arbitrary checkpoint missing either `embedding_weight_tying` or
+  `model_protocol_revision`, or carrying a value other than `true` and
+  `"phase8_tied_io_v1"`, is rejected;
 - historical files are read-only. No migration, rewrite, replacement, or new hash is
   permitted.
 
@@ -183,8 +226,9 @@ not be rewritten during implementation.
 
 Required targeted tests include:
 
-- shared-parameter identity, exact counts, and single optimizer registration for both
-  sizes;
+- shared-parameter identity, exact counts, exact construction-order initialization
+  oracle/RNG-state equality, and single optimizer registration for both sizes and all
+  three seeds;
 - new tied checkpoint round trip plus rejection of divergent duplicate state entries;
 - explicit reconstruction and validation of a historical untied fixture;
 - exact eight record-set hashes and unchanged train/eval disjointness;
@@ -213,7 +257,7 @@ artifacts/phase8_toy_lm_bridge/feasibility_005
 The proposed command contract is:
 
 ```text
-PYTHONDONTWRITEBYTECODE=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_sequence_feasibility.py run --root artifacts/phase8_toy_lm_bridge/feasibility_005 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_001 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_002 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_003 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_004 --decision-diagnostic-root artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001
+PYTHONDONTWRITEBYTECODE=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_sequence_feasibility.py run --device cuda:0 --root artifacts/phase8_toy_lm_bridge/feasibility_005 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_001 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_002 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_003 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_004 --decision-diagnostic-root artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001
 ```
 
 The launcher must enforce the exact real process command, environment, CUDA device,
