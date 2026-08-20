@@ -105,12 +105,15 @@ For each family, model size, and seed:
   generation or produce replacement outputs.
 
 Record construction may use only the private local `random.Random` instances needed
-to reproduce the eight hash-bound record sets; they must not read or change the
-process-global Python RNG. Checkpoint loading may construct a model only inside an
-RNG-neutral scope. Snapshot the process-global Python RNG, Torch CPU RNG, and every
-CUDA RNG state before record reconstruction or model construction, restore them
-after loading, and require byte equality before the first forward and after all
-computation. Any other RNG-state change is a terminal validation failure.
+to reproduce the eight hash-bound record sets. Snapshot process-global Python, Torch
+CPU, and every CUDA RNG state immediately before reconstruction and compare all states
+immediately afterward, before any restore; any difference fails and no restore is
+permitted. Model construction is the sole exception: snapshot Torch CPU/all-CUDA
+states immediately before the constructor, construct on CPU, restore exactly once in
+the same scope, and verify equality immediately. Python RNG must remain unchanged.
+After that scope, no restore is allowed and all states must remain byte-equal through
+load, inference, and publication. Sentinels must reject global RNG API use outside the
+single constructor scope.
 
 All forward passes use exactly `torch.device("cuda:0")` on the frozen A800 runtime.
 CPU fallback and alternate devices are forbidden. Hashing, JSON validation, and
@@ -191,9 +194,10 @@ input root/top-level hashes, complete input inventory, source commit, command,
 environment, configuration, file inventory, and all aggregate identities.
 
 `DONE` means only that the complete postmortem was computed and validated. It is not
-a feasibility pass. An operational or validation error publishes `FAILED` if a valid
-terminal can be constructed; scientific values never cause postmortem failure and
-must never trigger a retry. No `feasibility_postmortem_002` fallback is proposed.
+a feasibility pass. A finalized FAILED root is forbidden. Any operational or
+validation error removes both terminal markers and preserves only an explicitly
+incomplete temporary root. Scientific values never cause failure and never trigger a
+retry. No `feasibility_postmortem_002` fallback is proposed.
 
 All JSON is UTF-8 with sorted keys, two-space indentation, and one trailing newline.
 JSONL is UTF-8 with sorted keys, compact separators, `ensure_ascii=false`, and one
@@ -212,7 +216,8 @@ newline per row. NaN and infinity are forbidden. `schema_version` is exactly
   object contains exactly `record_count,sequence_exact_numerator,selected_token_count,`
   `correct_token_count,nll_numerator_hex,nll_per_token_hex`; retained greedy contains
   `numerator,denominator`; paired eval contains integer `both_exact,tf_only,`
-  `greedy_only,neither_exact,denominator,count_difference`.
+  `greedy_only,neither_exact,denominator,count_difference`, where
+  `count_difference = tf_only - greedy_only`.
   `checkpoint_metadata` has exactly `family,model_size,seed,training_steps,`
   `training_loss,training_accuracy`, copied without reinterpretation from the bound
   checkpoint.
@@ -222,20 +227,55 @@ newline per row. NaN and infinity are forbidden. `schema_version` is exactly
   `prompt,expected_response,generated_response,raw_token_ids,generation_error,`
   `greedy_exact,decode_valid,has_eos,hits_generation_cap,hits_context_cap,`
   `generation_token_count,generation_utf8_bytes,target_utf8_bytes,length_matches,`
-  `hamming_distance,edit_distance,first_error`; `named` and `array` are null outside
-  their family and otherwise contain exactly the row-level fields in the bound metric
-  oracle, with `target_item_count` added to Array.
+  `hamming_distance,edit_distance,first_error`. `named` is null outside Named and
+  otherwise has exactly `surface_source,operand_source,valid_json_string,`
+  `valid_named_grammar,target_prefix,occurs_in_prompt,exact_target_value,`
+  `exact_distractor_value,suffix_positional_correct,suffix_positional_total,`
+  `suffix_hamming_distance,suffix_edit_distance,suffix_first_error`; source labels are
+  exactly `held_surface` and `held_operand`, positional total is 4 only for a parsed
+  target-prefix row, and all suffix fields are null when the bound oracle declares
+  them undefined. `array` is null outside Array and otherwise has exactly
+  `comparison_source,training_steps,target_item_count,valid_json_syntax,`
+  `valid_array_schema,correct_item_count,positional_exact_count,`
+  `positional_denominator,missing_items,extra_items,all_items_copied,`
+  `all_items_exact,first_wrong_item_position`. `comparison_source` is exactly
+  `feasibility_005_retained_eval`, `training_steps` is 1500, and target item count is
+  `1..4`. `all_items_exact` means valid schema, correct count, and positional exact
+  count equal to target count. `all_items_copied` means valid schema and the generated
+  item multiset is a sub-multiset of all literal string operands in the prompt;
+  duplicate multiplicity is respected. Invalid arrays have false booleans and null
+  positional/missing/extra/first-wrong fields. Missing/extra lists are the
+  lexicographically sorted expanded `Counter` differences. First wrong is the first
+  unequal position, the shorter length for a strict prefix, and null for exact or
+  invalid schema.
 - `summary.json`: exact keys `schema_version,artifact_class,input_binding,`
   `proposal_binding,implementation_binding,configuration,row_counts,cells,`
   `named_aggregates,array_aggregates,interpretation_limits,terminal_status`.
+  `cells` is the exact ordered 24-row `cell_metrics` content. `named_aggregates` is
+  exactly six rows ordered by model size and seed, each with exact keys
+  `model_size,seed,denominator,valid_json_string_count,valid_named_grammar_count,`
+  `target_prefix_count,occurs_in_prompt_count,exact_target_value_count,`
+  `exact_distractor_value_count,suffix_positional_correct,`
+  `suffix_positional_denominator,suffix_first_error_histogram,`
+  `suffix_first_error_observation_count`; the histogram has exactly string keys
+  `0,1,2,3,4`. `array_aggregates` is exactly 24 rows ordered by model size, seed, and
+  target item count, each with exact keys
+  `model_size,seed,target_item_count,denominator,valid_json_syntax_count,`
+  `valid_array_schema_count,correct_item_count_count,positional_exact_count,`
+  `positional_denominator,all_items_copied_count,all_items_exact_count,`
+  `missing_item_count,extra_item_count,first_wrong_histogram,`
+  `first_wrong_observation_count`; its histogram has exactly string keys
+  `0,1,2,3,4`. Every denominator is 64 for Named and 16 for an Array stratum.
+  `interpretation_limits` has exactly four true boolean keys
+  `non_evidence,no_causal_weight_tying_claim,no_verdict_change,no_010d_authority`.
 - `manifest.json`: exact keys `schema_version,artifact_class,input_binding,`
   `proposal_binding,implementation_binding,runner_path,exact_command,environment,`
   `deterministic_flags,rng_state_contract,configuration,row_counts,file_inventory,`
-  `terminal_status,failure`. Its inventory covers exactly the four non-manifest,
+  `terminal_status`. Its inventory covers exactly the four non-manifest,
   non-terminal files, including `summary.json`; it excludes itself and the terminal.
 - `DONE.json` exact keys are `schema_version,status,manifest_path,manifest_sha256,`
-  `input_manifest_sha256,row_counts`. `FAILED.json` has the same keys plus `error`.
-  The terminal binds the manifest in one direction; the manifest never embeds its own
+  `input_manifest_sha256,row_counts`. A finalized `FAILED.json` is invalid. The DONE
+  terminal binds the manifest in one direction; the manifest never embeds its own
   checksum.
 
 All identity/path/hash/NLL fields are strings; hashes are lowercase 64-hex and paths
@@ -252,15 +292,27 @@ records runtime HEAD and runner blob. `input_binding` separately records the 005
 source commit, three top-level hashes, terminal, full 49-entry inventory, and all 24
 cell/checkpoint/generation identities. No field may be omitted or added.
 
+Those nested schemas are also closed. `proposal_binding` has exactly
+`commit,path,blob`; `implementation_binding` has exactly `commit,runner_path,`
+`runner_blob`; `input_binding` has exactly `root,source_commit,manifest_path,`
+`manifest_sha256,summary_path,summary_sha256,terminal_path,terminal_sha256,`
+`configuration,record_hashes,file_inventory,cells`. `row_counts` has exactly
+`teacher_forced_rows:13824,cell_metrics:24,error_taxonomy:1536`.
+`rng_state_contract` has exactly true booleans
+`record_reconstruction_global_state_unchanged,constructor_scope_restored,`
+`post_load_state_unchanged,post_inference_state_unchanged`. `configuration`,
+`environment`, and `deterministic_flags` equal their 005 manifest objects exactly.
+Every `file_inventory` row has exactly `path,sha256,bytes`, is sorted by path, and
+binds the complete four-file set.
+
 Publication uses same-parent
 `artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001.tmp`. Both final and temp
 must be absent before exclusive no-clobber creation. DONE requires all cardinalities,
 schemas, checksums, aggregates, lineage, RNG-state equality, runtime/source equality,
 and inventory to validate before a final source/runtime check and atomic
-rename-no-replace. An operational failure may construct FAILED only from retained
-complete/partial rows and must validate every retained row. If a valid terminal
-cannot be constructed, remove both terminal markers and preserve an explicitly
-incomplete temp root. Scientific values never cause failure or retry.
+rename-no-replace. Any exception removes both terminal markers and preserves an
+explicitly incomplete temp root; it never renames. Scientific values never cause
+failure or retry.
 
 ## Frozen metrics and interpretations
 
@@ -281,8 +333,8 @@ Permitted interpretations are deliberately bounded:
 
 - train teacher-forced counts describe checkpoint fit but cannot distinguish
   incomplete optimization from capacity limits;
-- the train/eval count difference describes held-out generalization without assigning
-  a registered good/bad threshold;
+- the separately reported train and eval numerator/denominator pairs describe fit and
+  held-out behavior; raw count subtraction across denominators 512 and 64 is forbidden;
 - the paired eval four-cell table localizes teacher-forced/greedy discordance without
   assigning a registered materiality threshold;
 - item-count-stratified Array counts describe composition-length association without
