@@ -77,6 +77,10 @@ condition and must be returned to `main`.
   generation, no selection, and no `010D` authority. Proposal acceptance is required
   before a separate implementation handoff may be written; implementation acceptance
   is required before any postmortem command may run.
+- `010C-D3-I`: bounded implementation handoff for the accepted D3 proposal. It may
+  add only fail-closed checkpoint-read-only analysis to the existing Phase 8 runner
+  and tests. The handoff, implementation commit, and future command each require
+  separate acceptance; D3-I itself cannot run the postmortem or authorize `010D`.
 - `010D`: formal training/checkpoint primitives and isolated evaluator.
 - `010E`: behavioral response matrices and exact/adaptive certificate integration.
 - `010F`: frozen metrics, sensitivity matrices, aggregation, and report-ready
