@@ -1325,6 +1325,106 @@ def test_d2_legacy_and_d1_allowlists_accept_only_exact_frozen_artifact_paths(
         sf.validate_historical_checkpoint_allowlist(d1_checkpoint)
 
 
+def test_d2_shallow_inventory_schema_modes_bind_exact_keys_paths_and_hashes(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+
+    def make_root(name: str) -> Path:
+        root = tmp_path / name
+        root.mkdir()
+        (root / "summary.json").write_text("{}\n")
+        (root / "rows.jsonl").write_text("{}\n")
+        (root / "checkpoint.pt").write_bytes(b"checkpoint\n")
+        return root
+
+    for schema_mode, inventory_fn in (
+        ("historical", sf.inventory),
+        ("diagnostic", sf.diagnostic_inventory),
+    ):
+        root = make_root(schema_mode)
+        rows = inventory_fn(root)
+        expected_allowed = {(root / str(row["path"])).resolve() for row in rows}
+        assert sf.shallow_inventory_bound_paths_from_rows(root, rows, schema_mode=schema_mode) == expected_allowed
+
+        missing_path_rows = [dict(row) for row in rows[:-1]]
+        with pytest.raises(ValueError, match="exactly match root files"):
+            sf.shallow_inventory_bound_paths_from_rows(root, missing_path_rows, schema_mode=schema_mode)
+
+        bad_size_rows = [dict(row) for row in rows]
+        bad_size_rows[0]["bytes"] = int(bad_size_rows[0]["bytes"]) + 1
+        with pytest.raises(ValueError, match="byte count mismatch"):
+            sf.shallow_inventory_bound_paths_from_rows(root, bad_size_rows, schema_mode=schema_mode)
+
+        bad_hash_rows = [dict(row) for row in rows]
+        bad_hash_rows[0]["sha256"] = "0" * 64
+        with pytest.raises(ValueError, match="checksum mismatch"):
+            sf.shallow_inventory_bound_paths_from_rows(root, bad_hash_rows, schema_mode=schema_mode)
+
+        stale_rows = [dict(row) for row in rows]
+        (root / "extra.txt").write_text("extra\n")
+        with pytest.raises(ValueError, match="exactly match root files"):
+            sf.shallow_inventory_bound_paths_from_rows(root, stale_rows, schema_mode=schema_mode)
+
+
+def test_d2_shallow_inventory_schema_modes_reject_role_schema_mismatches(tmp_path: Path) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    root = tmp_path / "role_schema"
+    root.mkdir()
+    (root / "summary.json").write_text("{}\n")
+    (root / "rows.jsonl").write_text("{}\n")
+    (root / "checkpoint.pt").write_bytes(b"checkpoint\n")
+    historical_rows = sf.inventory(root)
+    diagnostic_rows = sf.diagnostic_inventory(root)
+
+    with pytest.raises(TypeError):
+        sf.shallow_inventory_bound_paths_from_rows(root, historical_rows)
+
+    historical_with_role = [{**row, "role": "diagnostic_artifact"} for row in historical_rows]
+    with pytest.raises(ValueError, match="exact schema"):
+        sf.shallow_inventory_bound_paths_from_rows(root, historical_with_role, schema_mode="historical")
+
+    with pytest.raises(ValueError, match="exact schema"):
+        sf.shallow_inventory_bound_paths_from_rows(root, historical_rows, schema_mode="diagnostic")
+
+    diagnostic_missing_role = [dict(row) for row in diagnostic_rows]
+    diagnostic_missing_role[0].pop("role")
+    with pytest.raises(ValueError, match="exact schema"):
+        sf.shallow_inventory_bound_paths_from_rows(root, diagnostic_missing_role, schema_mode="diagnostic")
+
+    diagnostic_extra_key = [dict(row) for row in diagnostic_rows]
+    diagnostic_extra_key[0]["unexpected"] = True
+    with pytest.raises(ValueError, match="exact schema"):
+        sf.shallow_inventory_bound_paths_from_rows(root, diagnostic_extra_key, schema_mode="diagnostic")
+
+    diagnostic_wrong_role = [dict(row) for row in diagnostic_rows]
+    diagnostic_wrong_role[0]["role"] = "wrong_role"
+    with pytest.raises(ValueError, match="role mismatch"):
+        sf.shallow_inventory_bound_paths_from_rows(root, diagnostic_wrong_role, schema_mode="diagnostic")
+
+    with pytest.raises(ValueError, match="exact schema"):
+        sf.shallow_inventory_bound_paths_from_rows(root, diagnostic_rows, schema_mode="historical")
+
+    with pytest.raises(ValueError, match="schema_mode"):
+        sf.shallow_inventory_bound_paths_from_rows(root, historical_rows, schema_mode="legacy")
+
+
+def test_d2_shallow_decision_diagnostic_paths_bind_real_frozen_d1_inventory() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    root = REPO_ROOT / sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT
+    manifest = root / "manifest.json"
+    summary = root / "summary.json"
+    terminal = root / "DONE.json"
+    manifest_data = json.loads(manifest.read_text())
+    file_inventory = manifest_data["file_inventory"]
+
+    assert file_inventory == sf.diagnostic_inventory(root)
+    assert all(set(row) == {"path", "sha256", "bytes", "role"} for row in file_inventory)
+
+    allowed = sf.shallow_decision_diagnostic_paths(root)
+    inventory_paths = {(root / str(row["path"])).resolve() for row in file_inventory}
+    assert allowed == {manifest.resolve(), summary.resolve(), terminal.resolve(), *inventory_paths}
+    assert (root / "array_json__small__3000__seed0" / "checkpoint_step3000.pt").resolve() in allowed
+
+
 def test_d2_decision_diagnostic_cannot_be_selected_or_used_as_current_cell() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     diagnostic_root = sf.ARTIFACT_PARENT / "feasibility_diagnostic_001"

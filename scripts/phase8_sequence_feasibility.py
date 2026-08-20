@@ -4151,15 +4151,19 @@ def train_array_small_3000_diagnostic(
     }
 
 
+def diagnostic_inventory_role(rel_path: str) -> str:
+    role = "summary" if rel_path == "summary.json" else "diagnostic_artifact"
+    if rel_path.endswith(".pt"):
+        role = "checkpoint"
+    elif rel_path.endswith(".jsonl"):
+        role = "retained_rows"
+    return role
+
+
 def diagnostic_inventory(root: Path) -> list[dict[str, object]]:
     rows = []
     for row in inventory(root):
-        role = "summary" if row["path"] == "summary.json" else "diagnostic_artifact"
-        if str(row["path"]).endswith(".pt"):
-            role = "checkpoint"
-        elif str(row["path"]).endswith(".jsonl"):
-            role = "retained_rows"
-        rows.append({**row, "role": role})
+        rows.append({**row, "role": diagnostic_inventory_role(str(row["path"]))})
     return rows
 
 
@@ -5268,19 +5272,31 @@ def capture_source_provenance(
     )
 
 
-def shallow_inventory_bound_paths_from_rows(root: Path, rows: object) -> set[Path]:
+def shallow_inventory_bound_paths_from_rows(root: Path, rows: object, *, schema_mode: str) -> set[Path]:
     if not isinstance(rows, list):
         raise ValueError("Shallow inventory authorization requires a file_inventory list.")
+    if schema_mode == "historical":
+        expected_keys = {"path", "sha256", "bytes"}
+    elif schema_mode == "diagnostic":
+        expected_keys = {"path", "sha256", "bytes", "role"}
+    else:
+        raise ValueError("Shallow inventory authorization requires explicit schema_mode 'historical' or 'diagnostic'.")
     allowed: set[Path] = set()
     root_resolved = root.resolve()
     seen_paths: set[str] = set()
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             raise ValueError("Shallow file_inventory entries must be JSON objects.")
+        if set(row) != expected_keys:
+            raise ValueError("Shallow file_inventory entries do not match the exact schema for the requested mode.")
         rel_path = require_canonical_relative_path(row.get("path"), f"file_inventory[{index}].path")
         if rel_path in seen_paths:
             raise ValueError("Shallow file_inventory must not contain duplicate paths.")
         seen_paths.add(rel_path)
+        if schema_mode == "diagnostic":
+            role = require_exact_str(row.get("role"), f"file_inventory[{index}].role")
+            if role != diagnostic_inventory_role(rel_path):
+                raise ValueError("Shallow diagnostic file_inventory role mismatch.")
         raw_candidate = root / rel_path
         if raw_candidate.is_symlink():
             raise ValueError("Shallow file_inventory must not bind symlink files.")
@@ -5298,7 +5314,8 @@ def shallow_inventory_bound_paths_from_rows(root: Path, rows: object) -> set[Pat
         if file_sha256(candidate) != expected_sha:
             raise ValueError("Shallow file_inventory checksum mismatch.")
         allowed.add(candidate)
-    if sorted(rows, key=lambda row: row["path"]) != inventory(root):
+    expected_inventory = inventory(root) if schema_mode == "historical" else diagnostic_inventory(root)
+    if sorted(rows, key=lambda row: row["path"]) != expected_inventory:
         raise ValueError("Shallow file_inventory does not exactly match root files.")
     return allowed
 
@@ -5320,7 +5337,11 @@ def shallow_inventory_bound_root_paths(root: Path) -> set[Path]:
         raise ValueError("Predecessor root is not an exact historical D2 allowlist root.")
     if manifest_data.get("configuration") != HISTORICAL_FEASIBILITY_CONFIGURATION:
         raise ValueError("Historical predecessor root configuration mismatch.")
-    return {manifest.resolve(), terminal.resolve(), *shallow_inventory_bound_paths_from_rows(root, manifest_data.get("file_inventory"))}
+    return {
+        manifest.resolve(),
+        terminal.resolve(),
+        *shallow_inventory_bound_paths_from_rows(root, manifest_data.get("file_inventory"), schema_mode="historical"),
+    }
 
 
 def shallow_decision_diagnostic_paths(root: Path) -> set[Path]:
@@ -5335,7 +5356,7 @@ def shallow_decision_diagnostic_paths(root: Path) -> set[Path]:
         manifest.resolve(),
         summary.resolve(),
         terminal.resolve(),
-        *shallow_inventory_bound_paths_from_rows(root, manifest_data.get("file_inventory")),
+        *shallow_inventory_bound_paths_from_rows(root, manifest_data.get("file_inventory"), schema_mode="diagnostic"),
     }
 
 
