@@ -32,6 +32,7 @@ working tree are not valid bindings.
 010C feasibility FAIL -> 010C-D1 non-selection/fixed-factor diagnostic -> main decision
     -> 010C-D2 independently reviewed one-shot protocol-amendment proposal
     -> 010C-D2-I weight-tying implementation -> independent implementation review
+    -> feasibility_005 FAIL -> 010C-D3 read-only postmortem proposal -> review
 ```
 
 The post-010C feasibility decision is an early engineering gate. Because later tasks
@@ -71,6 +72,11 @@ condition and must be returned to `main`.
   and a real-`__main__` one-shot `feasibility_005` gate. The implementation must be
   committed and independently reviewed before `feasibility_005` can be launched; it
   cannot run the experiment or authorize `010D`.
+- `010C-D3`: source-controlled proposal for a checkpoint-read-only postmortem of the
+  accepted `feasibility_005` failure. It freezes no training, no new records, no new
+  generation, no selection, and no `010D` authority. Proposal acceptance is required
+  before a separate implementation handoff may be written; implementation acceptance
+  is required before any postmortem command may run.
 - `010D`: formal training/checkpoint primitives and isolated evaluator.
 - `010E`: behavioral response matrices and exact/adaptive certificate integration.
 - `010F`: frozen metrics, sensitivity matrices, aggregation, and report-ready

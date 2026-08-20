@@ -716,6 +716,25 @@ without a new protocol choice, Phase 8 stops before `010D`. Only a reviewed pass
 `feasibility_005`, followed by independent artifact review, a reviewed selection
 record, and an explicit `main` decision can authorize `010D`.
 
+The formal `feasibility_005` run from source commit
+`2dc8c50fab9ece27a07eb0dc04021b78de52895c` published an independently reviewed,
+valid `FAILED` root. Its manifest, summary, and terminal SHA-256 values are,
+respectively,
+`51b43e3f3eba98b31c3574a9720c0df3f8e2a72c94d22730d70eb8682e8f516b`,
+`bfea56b52dfd1ffe094feb0774ce7895f4dd703770451aeda4d899aafdfef785`, and
+`6ac97f081586ca7fb8d7d8297dae4e0c7a3d0314a0567bbc493fce1b5dcc4c08`.
+Exactly `11/24` cells passed: Hex Copy `5/6`, Named-value JSON `0/6`, Boolean JSON
+`6/6`, and Array JSON `0/6`. This result permanently blocks selection and `010D`
+under the current Phase 8 protocol; there is no `feasibility_006` fallback.
+
+Any postmortem is non-evidence and cannot reopen that gate. Task 010C-D3 may propose
+checkpoint-read-only teacher-forced and retained-generation analyses using only the
+exact 005 artifacts and source-controlled records. It may not train, construct a new
+evaluation distribution, regenerate outputs, change the feasibility verdict, create
+a selection, or authorize `010D`. The proposal, any later implementation handoff,
+the implementation commit, and any future command each require their own explicit
+review/authorization boundary.
+
 ### 9.5 Non-scientific resource benchmark and authorization
 
 After the complete training/evaluation/shard implementation is accepted but before
