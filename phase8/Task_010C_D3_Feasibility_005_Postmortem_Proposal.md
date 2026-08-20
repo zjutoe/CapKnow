@@ -95,8 +95,9 @@ For each family, model size, and seed:
 
 - load the tied checkpoint fail-closed under its exact configuration and metadata;
 - use `model.eval()` and `torch.inference_mode()`;
-- perform no optimizer construction, gradient computation, backward pass, parameter
-  update, stochastic inference, selection, or checkpoint write;
+- perform no optimizer construction, gradient computation, backward pass,
+  post-checkpoint-load parameter update, stochastic inference, selection, or
+  checkpoint write;
 - evaluate response-only shifted labels on all `512` training and `64` evaluation
   records in their frozen order with the frozen batch size and padding semantics;
 - record sequence exactness, correct/total response tokens, token accuracy, summed
@@ -188,8 +189,9 @@ It may contain only:
 - `summary.json`, `manifest.json`, and exactly one terminal marker.
 
 No checkpoint, generated replacement, corpus, model-facing record, selection record,
-or scientific evidence may be written. Every row binds its input checkpoint and
-generation path/hash and the original record identity. The manifest binds the exact
+or scientific evidence may be written. Teacher-forced rows bind their checkpoint;
+taxonomy rows bind their retained generation; cell rows and the manifest bind both
+under the same exact cell identity. Every row binds the original record identity. The manifest binds the exact
 input root/top-level hashes, complete input inventory, source commit, command,
 environment, configuration, file inventory, and all aggregate identities.
 
@@ -242,12 +244,18 @@ newline per row. NaN and infinity are forbidden. `schema_version` is exactly
   `feasibility_005_retained_eval`, `training_steps` is 1500, and target item count is
   `1..4`. `all_items_exact` means valid schema, correct count, and positional exact
   count equal to target count. `all_items_copied` means valid schema and the generated
-  item multiset is a sub-multiset of all literal string operands in the prompt;
-  duplicate multiplicity is respected. Invalid arrays have false booleans and null
+  item multiset is a sub-multiset of the exact case-sensitive match strings returned,
+  in occurrence order, by the frozen `ARRAY_ITEM_RE` over the prompt; duplicate
+  multiplicity is respected and no other quoted prompt text is an operand. Invalid arrays have false booleans and null
   positional/missing/extra/first-wrong fields. Missing/extra lists are the
   lexicographically sorted expanded `Counter` differences. First wrong is the first
   unequal position, the shorter length for a strict prefix, and null for exact or
   invalid schema.
+
+After the exact checkpoint state is loaded and validated, snapshot every named model
+parameter as dtype, shape, layout, and contiguous bytes. Require exact equality after
+each split and before publication. Loading into a newly constructed model is not a
+prohibited parameter update; any later parameter change is.
 - `summary.json`: exact keys `schema_version,artifact_class,input_binding,`
   `proposal_binding,implementation_binding,configuration,row_counts,cells,`
   `named_aggregates,array_aggregates,interpretation_limits,terminal_status`.
@@ -257,15 +265,29 @@ newline per row. NaN and infinity are forbidden. `schema_version` is exactly
   `target_prefix_count,occurs_in_prompt_count,exact_target_value_count,`
   `exact_distractor_value_count,suffix_positional_correct,`
   `suffix_positional_denominator,suffix_first_error_histogram,`
-  `suffix_first_error_observation_count`; the histogram has exactly string keys
-  `0,1,2,3,4`. `array_aggregates` is exactly 24 rows ordered by model size, seed, and
+  `suffix_first_error_observation_count,eos_present_count,generation_cap_count,`
+  `target_length_match_count,first_error_histogram,first_error_observation_count,`
+  `generation_token_count_histogram,generation_utf8_bytes_histogram`.
+  `array_aggregates` is exactly 24 rows ordered by model size, seed, and
   target item count, each with exact keys
   `model_size,seed,target_item_count,denominator,valid_json_syntax_count,`
   `valid_array_schema_count,correct_item_count_count,positional_exact_count,`
   `positional_denominator,all_items_copied_count,all_items_exact_count,`
   `missing_item_count,extra_item_count,first_wrong_histogram,`
-  `first_wrong_observation_count`; its histogram has exactly string keys
-  `0,1,2,3,4`. Every denominator is 64 for Named and 16 for an Array stratum.
+  `first_wrong_observation_count,greedy_exact_count,eos_present_count,`
+  `generation_cap_count,target_length_match_count,first_error_histogram,`
+  `first_error_observation_count,generation_token_count_histogram,`
+  `generation_utf8_bytes_histogram`. Every histogram is sparse: keys are canonical
+  non-negative decimal integer strings for observed values only, values are positive
+  integer counts, and zero observations require `{}`. Suffix/first-wrong keys are
+  therefore within `0..4`; common first-error and length histogram keys use their
+  observed non-negative range.
+
+Only the field literally named `denominator` is fixed at 64 for each Named row and 16
+for each Array stratum. Named `suffix_positional_denominator` is exactly
+`4 * target_prefix_count`. For a valid Array schema row, row-level
+`positional_denominator = target_item_count`; for an invalid schema it is null. The
+Array aggregate positional denominator is the integer sum of its non-null row values.
   `interpretation_limits` has exactly four true boolean keys
   `non_evidence,no_causal_weight_tying_claim,no_verdict_change,no_010d_authority`.
 - `manifest.json`: exact keys `schema_version,artifact_class,input_binding,`
@@ -304,6 +326,12 @@ Those nested schemas are also closed. `proposal_binding` has exactly
 `environment`, and `deterministic_flags` equal their 005 manifest objects exactly.
 Every `file_inventory` row has exactly `path,sha256,bytes`, is sorted by path, and
 binds the complete four-file set.
+
+`input_binding.configuration`, `input_binding.record_hashes`,
+`input_binding.file_inventory`, and `input_binding.cells` are exact field-for-field
+copies of the corresponding 005 manifest values, with cells in the frozen 24-cell
+order and no added or removed nested keys. The top-level `runner_path` must exactly
+equal `implementation_binding.runner_path`.
 
 Publication uses same-parent
 `artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001.tmp`. Both final and temp
@@ -380,8 +408,9 @@ A future D3 implementation handoff must require tests for:
    integer aggregates, and loss reconstruction;
 4. independent recomputation of Named and Array taxonomies, including item-count
    strata and first-error positions;
-5. sentinels proving no optimizer, backward, parameter mutation, checkpoint save, or
-   generation call can occur, plus byte-identical process-global Python, Torch CPU,
+5. sentinels proving no optimizer, backward, post-load parameter mutation, checkpoint
+   save, or generation call can occur, plus byte-identical loaded parameters and
+   process-global Python, Torch CPU,
    and all-CUDA RNG states across reconstruction, load, inference, and publication;
 6. source-clean preflight before CUDA construction or output creation, no-clobber
    temporary-root publication, terminal/inventory validation, and source-unchanged
