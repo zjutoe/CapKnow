@@ -2130,7 +2130,7 @@ def validate_diagnostic_input_root(
     actual_environment = current_environment_dict() if environment is None else environment
     if actual_environment != manifest_data.get("environment"):
         raise ValueError("Diagnostic execution environment must exactly match feasibility_004.")
-    validate_diagnostic_core_blobs()
+    validate_diagnostic_core_blobs(DIAGNOSTIC_INPUT_SOURCE_COMMIT)
     validate_diagnostic_record_hashes()
     return manifest_data
 

@@ -3819,14 +3819,24 @@ def test_diagnostic_step_loop_gate_occurs_after_1500_before_1501() -> None:
     assert mismatch_progress[-1] == sf.TRAINING_STEPS
 
 
-def test_diagnostic_frozen_blobs_record_hashes_and_reused_bindings() -> None:
+def test_diagnostic_frozen_blobs_record_hashes_and_reused_bindings(monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     assert sf.validate_diagnostic_record_hashes() == sf.DIAGNOSTIC_RECORD_HASHES
-    assert sf.validate_diagnostic_core_blobs() == sf.DIAGNOSTIC_CORE_BLOBS
+    assert sf.validate_diagnostic_core_blobs(sf.DIAGNOSTIC_INPUT_SOURCE_COMMIT) == sf.DIAGNOSTIC_CORE_BLOBS
 
     input_root = sf.ARTIFACT_PARENT / "feasibility_004"
     manifest = json.loads((input_root / "manifest.json").read_text())
+    core_blob_commits: list[str] = []
+
+    def validate_input_core_blobs(commit: str = "HEAD") -> dict[str, str]:
+        core_blob_commits.append(commit)
+        if commit != sf.DIAGNOSTIC_INPUT_SOURCE_COMMIT:
+            raise AssertionError(f"frozen diagnostic input core blobs checked {commit}, not DIAGNOSTIC_INPUT_SOURCE_COMMIT")
+        return sf.DIAGNOSTIC_CORE_BLOBS
+
+    monkeypatch.setattr(sf, "validate_diagnostic_core_blobs", validate_input_core_blobs)
     sf.validate_diagnostic_input_root(input_root, environment=manifest["environment"])
+    assert core_blob_commits == [sf.DIAGNOSTIC_INPUT_SOURCE_COMMIT]
     for model_size in ("small", "medium"):
         for seed in (0, 1, 2):
             binding = sf.reused_feasibility_cell_binding(input_root, "array_json", model_size, seed)
@@ -4572,13 +4582,19 @@ def test_diagnostic_parameter_count_comparator_is_isolated_from_formal_helper(mo
 
 def test_diagnostic_common_semantic_validator_rejects_provenance_protocol_and_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    source_commit = _test_source_commit()
+    source_commit = sf.DECISION_DIAGNOSTIC_ROOT_BINDING["source_commit"]
     output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
     input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
     input_manifest = json.loads((input_root / "manifest.json").read_text())
+    core_blob_commits: list[str] = []
+
+    def validate_manifest_core_blobs(commit: str = "HEAD") -> dict[str, str]:
+        core_blob_commits.append(commit)
+        return sf.DIAGNOSTIC_CORE_BLOBS
+
     monkeypatch.setattr(sf, "validate_git_commit_exists", lambda commit: None)
     monkeypatch.setattr(sf, "validate_diagnostic_record_hashes", lambda: sf.DIAGNOSTIC_RECORD_HASHES)
-    monkeypatch.setattr(sf, "validate_diagnostic_core_blobs", lambda commit="HEAD": sf.DIAGNOSTIC_CORE_BLOBS)
+    monkeypatch.setattr(sf, "validate_diagnostic_core_blobs", validate_manifest_core_blobs)
     monkeypatch.setattr(sf, "validate_diagnostic_environment", lambda environment, input_root: None)
     common = {
         "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
@@ -4625,6 +4641,8 @@ def test_diagnostic_common_semantic_validator_rejects_provenance_protocol_and_co
     }
     common["partial_scope"][0]["error"] = "synthetic"
     sf.validate_diagnostic_common_semantics(output_root, terminal_status="FAILED", terminal_data=common, manifest_data=common, summary_data=common)
+    assert core_blob_commits == [source_commit]
+    core_blob_commits.clear()
     mutations = (
         ("protocol", "wrong"),
         ("source_commit", "0" * 40),
@@ -5191,6 +5209,48 @@ def test_diagnostic_early_failed_terminal_uses_backend_before_model_work(
         "named_matrix_construction",
         "failed_publication",
     ]
+
+
+def test_diagnostic_native_preflight_retains_head_blob_gate_before_tmp_or_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
+    output_root = tmp_path / "feasibility_diagnostic_001"
+    source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
+    core_blob_commits: list[str] = []
+
+    def reject_native_head_gate(commit: str = "HEAD") -> dict[str, str]:
+        core_blob_commits.append(commit)
+        if commit != "HEAD":
+            raise AssertionError(f"native diagnostic preflight checked {commit}, not HEAD")
+        raise ValueError("native diagnostic HEAD core blob gate")
+
+    def forbidden_model_work(*args: object, **kwargs: object) -> object:
+        raise AssertionError("model or artifact construction ran after rejected native HEAD preflight")
+
+    monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
+    monkeypatch.setattr(sf, "validate_diagnostic_cli_contract", lambda **kwargs: None)
+    monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
+    monkeypatch.setattr(sf, "current_source_commit", lambda: source_snapshot.commit)
+    monkeypatch.setattr(sf, "handoff_binding_for_commit", lambda source_commit: {})
+    monkeypatch.setattr(sf, "current_environment_dict", lambda: {})
+    monkeypatch.setattr(sf, "validate_diagnostic_record_hashes", lambda: {})
+    monkeypatch.setattr(sf, "validate_diagnostic_core_blobs", reject_native_head_gate)
+    monkeypatch.setattr(sf, "build_named_diagnostic_matrix", forbidden_model_work)
+    monkeypatch.setattr(sf, "load_checkpoint_model", forbidden_model_work)
+    monkeypatch.setattr(sf, "generate_named_diagnostic_rows", forbidden_model_work)
+    monkeypatch.setattr(sf, "teacher_forced_rows", forbidden_model_work)
+    monkeypatch.setattr(sf, "generate_array_rows", forbidden_model_work)
+    monkeypatch.setattr(sf, "train_array_small_3000_diagnostic", forbidden_model_work)
+
+    with pytest.raises(ValueError, match="native diagnostic HEAD core blob gate"):
+        sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=output_root)
+
+    assert core_blob_commits == ["HEAD"]
+    assert not output_root.exists()
+    assert not output_root.with_name(output_root.name + ".tmp").exists()
 
 
 def test_diagnostic_retry_preflight_root_stage_runs_after_backend_from_defaults(
