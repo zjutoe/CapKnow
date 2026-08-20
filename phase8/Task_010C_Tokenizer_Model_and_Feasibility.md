@@ -13,6 +13,13 @@ working directory: /home/mye/src/llm/CapKnow
 8, 9.3–9.4, 12–13, and 15. The feasibility suite is isolated from all Phase 8
 scientific tasks and cannot be tuned using future scientific outcomes.
 
+Post-010C amendment: the independently accepted 010C-D2 proposal at commit
+`9a767c6708c7c69f5ba98848250afcf50c8c5a6f` replaces the current model/checkpoint
+revision with the tied `phase8_tied_io_v1` protocol for future feasibility and
+formal paths. The retained `feasibility_001` through `feasibility_004` roots and the
+accepted D1 diagnostic remain historical untied artifacts only under their exact
+allowlists.
+
 ## Objective
 
 Implement the fixed byte tokenizer, small/medium causal Transformer, response-only
@@ -37,7 +44,10 @@ Do not modify corpus semantics or any other file.
   placement, byte-perfect UTF-8 round trip, padding, and hard sequence-length gates.
 - Implement only the frozen small and medium decoder-only configurations using
   PyTorch public APIs, pre-norm causal blocks, learned position embeddings, GELU,
-  dropout zero, and parameter-count recording.
+  dropout zero, input/output weight tying, explicit
+  `embedding_weight_tying=true` and
+  `model_protocol_revision="phase8_tied_io_v1"` fields, and parameter-count
+  recording. The exact tied counts are `133120` for small and `859392` for medium.
 - Implement causal response-only shifted labels, exact AdamW settings, gradient
   clipping, deterministic RNG/backend setup, and greedy decoding bounded by the
   master protocol.
@@ -75,9 +85,19 @@ independently reviewing this stage from a clean worktree. An early accepted pass
 an engineering continuation decision; after later implementation stages, formal
 execution requires a newly selected pass from the exact final source commit.
 
+Under the accepted D2 amendment, the next current feasibility candidate is exactly
+`artifacts/phase8_toy_lm_bridge/feasibility_005`, with all four historical
+predecessor roots, the D1 decision diagnostic bound separately, exact `cuda:0`
+argv/environment gates, all eight frozen record hashes, and all 24 cells executed.
+This task text still does not authorize that run; it becomes runnable only after the
+D2 implementation is committed and independently accepted.
+
 ## Stop boundary
 
 Do not implement formal state-specific training, the 512-prompt Phase 8 evaluator,
 certificate logic, resource benchmark, shard runner, or formal experiment. A
 feasibility failure is not permission to alter architecture or budget; return it to
-`main`. Do not commit unless explicitly authorized. Return using the common format.
+`main`. The accepted D2 implementation also does not authorize `010D`; `010D`
+remains blocked until a reviewed passing `feasibility_005`, reviewed selection, and
+explicit `main` decision exist. Do not commit unless explicitly authorized. Return
+using the common format.

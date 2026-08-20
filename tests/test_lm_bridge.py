@@ -22,7 +22,14 @@ import torch
 
 from capability_certificate_lab.lm_bridge import corpus_generator as cg
 from capability_certificate_lab.dsl.executor import MissingCapabilityError
-from capability_certificate_lab.lm_bridge.model import ToyCausalTransformer, TransformerConfig, build_model, transformer_config
+from capability_certificate_lab.lm_bridge.model import (
+    TIED_MODEL_PROTOCOL_REVISION,
+    ToyCausalTransformer,
+    TransformerConfig,
+    build_historical_model,
+    build_model,
+    transformer_config,
+)
 from capability_certificate_lab.lm_bridge.tokenizer import BOS_ID, EOS_ID, PAD_ID, SEP_ID, ByteTokenizer
 from capability_certificate_lab.lm_bridge.train import (
     TextRecord,
@@ -35,7 +42,20 @@ from capability_certificate_lab.lm_bridge.train import (
     save_checkpoint,
     set_deterministic_backend,
     training_accuracy,
+    validate_tied_checkpoint_payload,
 )
+
+
+def _tied_config(name: str = "test-tiny", d_model: int = 16, n_heads: int = 2, n_layers: int = 1, d_ff: int = 32) -> TransformerConfig:
+    return TransformerConfig(
+        name=name,
+        d_model=d_model,
+        n_heads=n_heads,
+        n_layers=n_layers,
+        d_ff=d_ff,
+        embedding_weight_tying=True,
+        model_protocol_revision=TIED_MODEL_PROTOCOL_REVISION,
+    )
 
 
 def _snapshot_diagnostic_process_state(sf: object) -> dict[str, object]:
@@ -576,23 +596,80 @@ def test_byte_tokenizer_round_trip_specials_padding_length_gates_and_response_ma
 
 
 def test_frozen_small_medium_model_constants_and_recorded_parameter_counts() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     small_config = transformer_config("small")
     medium_config = transformer_config("medium")
     assert (small_config.d_model, small_config.n_heads, small_config.n_layers, small_config.d_ff) == (64, 4, 2, 256)
     assert (medium_config.d_model, medium_config.n_heads, medium_config.n_layers, medium_config.d_ff) == (128, 4, 4, 512)
     assert small_config.max_seq_len == medium_config.max_seq_len == 256
     assert small_config.dropout == medium_config.dropout == 0.0
+    assert small_config.embedding_weight_tying is True
+    assert medium_config.embedding_weight_tying is True
+    assert small_config.model_protocol_revision == TIED_MODEL_PROTOCOL_REVISION
+    assert medium_config.model_protocol_revision == TIED_MODEL_PROTOCOL_REVISION
 
     small = build_model("small")
     medium = build_model("medium")
+    assert small.lm_head.weight is small.token_embedding.weight
+    assert medium.lm_head.weight is medium.token_embedding.weight
     assert small.parameter_count == sum(parameter.numel() for parameter in small.parameters())
     assert medium.parameter_count == sum(parameter.numel() for parameter in medium.parameters())
+    assert small.parameter_count == sf.FROZEN_PARAMETER_COUNTS["small"] == 133120
+    assert medium.parameter_count == sf.FROZEN_PARAMETER_COUNTS["medium"] == 859392
     assert medium.parameter_count > small.parameter_count
+
+
+def test_d2_tied_constructor_matches_historical_token_embedding_rng_and_optimizer(
+    request: pytest.FixtureRequest,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    process_state = _snapshot_diagnostic_process_state(sf)
+    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
+
+    for model_size in ("small", "medium"):
+        for seed in (0, 1, 2):
+            set_deterministic_backend(seed)
+            historical = build_historical_model(model_size)
+            historical_token_embedding = historical.token_embedding.weight.detach().clone()
+            historical_rng = sf.snapshot_rng_states()
+
+            set_deterministic_backend(seed)
+            tied = build_model(model_size)
+            tied_rng = sf.snapshot_rng_states()
+
+            assert tied.config.embedding_weight_tying is True
+            assert tied.config.model_protocol_revision == TIED_MODEL_PROTOCOL_REVISION
+            assert tied.lm_head.weight is tied.token_embedding.weight
+            assert tied.parameter_count == sf.FROZEN_PARAMETER_COUNTS[model_size]
+            torch.testing.assert_close(tied.token_embedding.weight, historical_token_embedding, atol=0.0, rtol=0.0)
+            assert repr(tied_rng[0]) == repr(historical_rng[0])
+            torch.testing.assert_close(tied_rng[1], historical_rng[1], atol=0, rtol=0)
+            if historical_rng[2] is None:
+                assert tied_rng[2] is None
+            else:
+                assert tied_rng[2] is not None
+                assert len(tied_rng[2]) == len(historical_rng[2])
+                for tied_cuda_state, historical_cuda_state in zip(tied_rng[2], historical_rng[2], strict=True):
+                    torch.testing.assert_close(tied_cuda_state, historical_cuda_state, atol=0, rtol=0)
+
+            optimizer_params = list(make_optimizer(tied).param_groups[0]["params"])
+            assert len({id(parameter) for parameter in optimizer_params}) == len(optimizer_params)
+            assert sum(parameter is tied.token_embedding.weight for parameter in optimizer_params) == 1
+
+            set_deterministic_backend(seed)
+            replay_a = build_model(model_size)
+            set_deterministic_backend(seed)
+            replay_b = build_model(model_size)
+            sample = torch.tensor([[BOS_ID, ord("x"), SEP_ID, ord("y"), EOS_ID]], dtype=torch.long)
+            with torch.no_grad():
+                torch.testing.assert_close(replay_a(sample), replay_b(sample), atol=0.0, rtol=0.0)
+            prefix = torch.tensor([[BOS_ID, ord("x"), SEP_ID]], dtype=torch.long)
+            torch.testing.assert_close(replay_a.greedy_decode(prefix), replay_b.greedy_decode(prefix), atol=0, rtol=0)
 
 
 def test_causal_mask_prevents_future_token_access() -> None:
     set_deterministic_backend(0)
-    model = ToyCausalTransformer(TransformerConfig(name="test-tiny", d_model=16, n_heads=2, n_layers=1, d_ff=32))
+    model = ToyCausalTransformer(_tied_config())
     model.eval()
     left = torch.tensor([[BOS_ID, ord("a"), ord("b"), ord("c"), ord("d"), EOS_ID]])
     right = left.clone()
@@ -607,7 +684,7 @@ def test_causal_mask_prevents_future_token_access() -> None:
 
 
 def test_deterministic_initialization_optimizer_step_and_greedy_decode() -> None:
-    config = TransformerConfig(name="test-tiny", d_model=16, n_heads=2, n_layers=1, d_ff=32)
+    config = _tied_config()
     set_deterministic_backend(3)
     model_a = ToyCausalTransformer(config)
     set_deterministic_backend(3)
@@ -640,7 +717,7 @@ def test_deterministic_initialization_optimizer_step_and_greedy_decode() -> None
 
 def test_model_save_load_round_trip_preserves_state_dict_and_logits(tmp_path: Path) -> None:
     set_deterministic_backend(4)
-    model = ToyCausalTransformer(TransformerConfig(name="test-tiny", d_model=16, n_heads=2, n_layers=1, d_ff=32))
+    model = ToyCausalTransformer(_tied_config())
     path = tmp_path / "checkpoint.pt"
     save_checkpoint(str(path), model, metadata={"purpose": "unit-test"})
 
@@ -654,11 +731,71 @@ def test_model_save_load_round_trip_preserves_state_dict_and_logits(tmp_path: Pa
         torch.testing.assert_close(model(sample), loaded(sample), atol=0.0, rtol=0.0)
 
 
+def test_d2_tied_checkpoint_schema_rejects_ambiguous_or_divergent_payloads(tmp_path: Path) -> None:
+    set_deterministic_backend(0)
+    model = build_model("small")
+    path = tmp_path / "checkpoint.pt"
+    save_checkpoint(str(path), model, metadata={"purpose": "unit-test"})
+    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+
+    assert validate_tied_checkpoint_payload(checkpoint).model_protocol_revision == TIED_MODEL_PROTOCOL_REVISION
+    assert set(checkpoint["model_state_dict"]) == set(model.state_dict())
+    assert torch.equal(
+        checkpoint["model_state_dict"]["token_embedding.weight"],
+        checkpoint["model_state_dict"]["lm_head.weight"],
+    )
+    loaded = load_model_from_checkpoint(str(path))
+    assert loaded.lm_head.weight is loaded.token_embedding.weight
+
+    def reject(mutator: object, match: str) -> None:
+        mutated = {
+            "model_state_dict": dict(checkpoint["model_state_dict"]),
+            "config": dict(checkpoint["config"]),
+            "parameter_count": checkpoint["parameter_count"],
+            "metadata": dict(checkpoint["metadata"]),
+        }
+        assert callable(mutator)
+        mutator(mutated)
+        mutated_path = tmp_path / f"mutated_{len(list(tmp_path.iterdir()))}.pt"
+        torch.save(mutated, mutated_path)
+        with pytest.raises(ValueError, match=match):
+            load_model_from_checkpoint(str(mutated_path))
+
+    reject(lambda payload: payload["config"].pop("model_protocol_revision"), "schema|revision")
+    reject(lambda payload: payload["config"].pop("embedding_weight_tying"), "schema|tying")
+    reject(lambda payload: payload["config"].__setitem__("embedding_weight_tying", False), "tying=true")
+    reject(lambda payload: payload["config"].__setitem__("model_protocol_revision", "phase8_untied_legacy_v1"), "revision")
+    reject(lambda payload: payload["model_state_dict"].pop("lm_head.weight"), "keys")
+    reject(lambda payload: payload["model_state_dict"].__setitem__("lm_head.weight", [0]), "tensor")
+    reject(
+        lambda payload: payload["model_state_dict"].__setitem__(
+            "lm_head.weight",
+            payload["model_state_dict"]["lm_head.weight"].to(torch.float64),
+        ),
+        "dtype|shape",
+    )
+    reject(
+        lambda payload: payload["model_state_dict"].__setitem__(
+            "lm_head.weight",
+            payload["model_state_dict"]["lm_head.weight"][:1],
+        ),
+        "shape",
+    )
+    reject(
+        lambda payload: payload["model_state_dict"].__setitem__(
+            "lm_head.weight",
+            payload["model_state_dict"]["lm_head.weight"].clone().add_(1.0),
+        ),
+        "byte-equal",
+    )
+    reject(lambda payload: payload.__setitem__("unexpected", True), "schema")
+
+
 def test_four_record_cpu_byte_copy_overfit_control() -> None:
     result = run_byte_copy_overfit_control(
         seed=0,
         max_steps=500,
-        config=TransformerConfig(name="test-tiny", d_model=32, n_heads=4, n_layers=1, d_ff=128),
+        config=_tied_config(d_model=32, n_heads=4, n_layers=1, d_ff=128),
     )
 
     assert result.steps <= 500
@@ -678,6 +815,8 @@ def _passing_feasibility_cells() -> list[dict[str, object]]:
             "generations_path": f"{family}__{model_size}__seed{seed}/generations.jsonl",
             "checkpoint_path": f"{family}__{model_size}__seed{seed}/checkpoint_step1500.pt",
             "parameter_count": sf.expected_parameter_count(model_size),
+            "embedding_weight_tying": True,
+            "model_protocol_revision": TIED_MODEL_PROTOCOL_REVISION,
         }
         for family in sf.FAMILIES
         for model_size in sf.MODEL_SIZES
@@ -688,6 +827,23 @@ def _passing_feasibility_cells() -> list[dict[str, object]]:
 def _source_snapshot(source_commit: str | None = None) -> object:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     return sf.SourceSnapshot(commit=_test_source_commit() if source_commit is None else source_commit, status_lines=(), ignored_inputs=())
+
+
+def _current_deterministic_flags() -> dict[str, object]:
+    return {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+        "PYTHONPATH": ".",
+        "torch_deterministic_algorithms": True,
+        "cudnn_deterministic": True,
+        "cudnn_benchmark": False,
+        "cuda_tf32": False,
+        "cudnn_tf32": False,
+    }
+
+
+def _allow_synthetic_historical_checkpoints(monkeypatch: pytest.MonkeyPatch, sf: object) -> None:
+    monkeypatch.setattr(sf, "validate_historical_checkpoint_allowlist", lambda path: None)
 
 
 def _test_source_commit() -> str:
@@ -752,6 +908,10 @@ def _write_feasibility_root(
                     "training_steps": sf.TRAINING_STEPS,
                 },
             )
+    command_roots = tuple(
+        Path(str(binding["path"]))
+        for binding in sf.complete_predecessor_root_bindings(predecessor_roots, predecessor_selections)
+    )
     sf.write_terminal(
         root,
         status,
@@ -760,7 +920,16 @@ def _write_feasibility_root(
         predecessor_selections,
         failure=None if status == "DONE" else "synthetic failure",
         source_snapshot=_source_snapshot(source_commit),
+        decision_diagnostic=sf.DECISION_DIAGNOSTIC_ROOT_BINDING,
+        exact_command=sf.feasibility_exact_command(root, command_roots, Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT)),
+        deterministic_flags=_current_deterministic_flags(),
+        record_hashes=sf.FEASIBILITY_RECORD_HASHES,
     )
+    manifest = root / "manifest.json"
+    manifest_data = json.loads(manifest.read_text())
+    manifest_data["environment"] = dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)
+    sf.write_json(manifest, manifest_data)
+    _rewrite_terminal_manifest_sha(root, status)
     return root / "manifest.json", root / f"{status}.json"
 
 
@@ -793,7 +962,7 @@ def _historical_failed_cell() -> dict[str, object]:
         "passed": False,
         "generations_path": "hex_copy__small__seed0/generations.jsonl",
         "checkpoint_path": "hex_copy__small__seed0/checkpoint_step1500.pt",
-        "parameter_count": sf.expected_parameter_count("small"),
+        "parameter_count": sf.HISTORICAL_PARAMETER_COUNTS["small"],
     }
 
 
@@ -837,9 +1006,9 @@ def _write_historical_generation_root(
     checkpoint = root / str(cell["checkpoint_path"])
     generations.parent.mkdir(parents=True, exist_ok=True)
     generations.write_text("\n".join(json.dumps(row) for row in (rows or _legacy_generation_rows())) + "\n")
-    save_checkpoint(
+    sf.save_historical_checkpoint(
         str(checkpoint),
-        build_model("small"),
+        build_historical_model("small"),
         metadata={
             "family": cell["family"],
             "model_size": cell["model_size"],
@@ -904,6 +1073,772 @@ def _rewrite_terminal_manifest_sha(root: Path, status: str) -> None:
     terminal_data = json.loads(terminal.read_text())
     terminal_data["manifest_sha256"] = sf.file_sha256(root / "manifest.json")
     sf.write_json(terminal, terminal_data)
+
+
+def _rewrite_current_publication_command(
+    root: Path,
+    status: str,
+    output_root: Path,
+    predecessor_roots: tuple[Path, ...] = (),
+    predecessor_selections: tuple[Path, ...] = (),
+    decision_diagnostic_root: Path | None = None,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    decision_root = decision_diagnostic_root or Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT)
+    exact_command = sf.feasibility_exact_command(output_root, predecessor_roots, decision_root)
+    summary_path = root / "summary.json"
+    manifest_path = root / "manifest.json"
+    terminal_path = root / f"{status}.json"
+
+    summary = json.loads(summary_path.read_text())
+    summary["exact_command"] = exact_command
+    sf.write_json(summary_path, summary)
+
+    manifest = json.loads(manifest_path.read_text())
+    manifest["exact_command"] = exact_command
+    manifest["file_inventory"] = sf.inventory(root)
+    sf.write_json(manifest_path, manifest)
+
+    terminal = json.loads(terminal_path.read_text())
+    terminal["exact_command"] = exact_command
+    terminal["manifest_sha256"] = sf.file_sha256(manifest_path)
+    sf.write_json(terminal_path, terminal)
+
+
+def _refresh_current_publication_hashes(root: Path, status: str) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["file_inventory"] = sf.inventory(root)
+    sf.write_json(manifest_path, manifest)
+    _rewrite_terminal_manifest_sha(root, status)
+
+
+def test_d2_current_configuration_and_record_hashes_are_exact(monkeypatch: pytest.MonkeyPatch) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    expected_hashes = {
+        "hex_train512": "8798d57c3bdde6693d8046e3a7525687f06976074dc0cceffaf1c674a0f8c390",
+        "hex_eval64": "be97a3a2877fa5f8e6c2e85a4213f975ccc89de6b3c61338dff100d1d1f21868",
+        "named_train512": "9b55084d281a9420e12a1b6a35c3eb199abd74f4b766a14a833e6241c59564b8",
+        "named_eval64": "6cc73c98616430a12a357de99702e8cb4db95258225adab80fd11212aa203d20",
+        "boolean_train512": "52b5d74bec65bc903938b8b1993c1bf6df489d9c13659ad62aca76336c2d77f1",
+        "boolean_eval64": "3c2ce21e86dd88ce85c6d2927c8ff09eb8f87cecb223bdeb1009debff68dff3b",
+        "array_train512": "6bbcae6203dfcf443f9871f30b48c29580fa721317387ff26b757b4066a98e94",
+        "array_eval64": "8d504dd63ad2538aedc8195a4f3c0729ed38ec95a078b9c9895fbf93cf8c173a",
+    }
+    expected_configuration = {
+        "protocol_revision": "phase8_tied_io_v1",
+        "embedding_weight_tying": True,
+        "device": "cuda:0",
+        "families": ["hex_copy", "named_value_json", "boolean_json", "array_json"],
+        "model_sizes": ["small", "medium"],
+        "seeds": [0, 1, 2],
+        "train_records_per_family": 512,
+        "eval_records_per_family": 64,
+        "training_steps": 1500,
+        "batch_size": 64,
+        "pass_threshold": 52,
+        "context_window_tokens": 256,
+        "generation_window_tokens": 64,
+        "record_hashes": expected_hashes,
+        "model_parameter_counts": {"small": 133120, "medium": 859392},
+    }
+
+    assert sf.FEASIBILITY_RECORD_HASHES == expected_hashes
+    assert sf.validate_feasibility_record_hashes() == expected_hashes
+    assert sf.frozen_configuration() == expected_configuration
+
+    records = sf.feasibility_record_sets()
+    tampered = dict(records)
+    tampered["hex_train512"] = (replace(records["hex_train512"][0], prompt="tampered prompt"), *records["hex_train512"][1:])
+    monkeypatch.setattr(sf, "feasibility_record_sets", lambda: tampered)
+    with pytest.raises(ValueError, match="record hash mismatch"):
+        sf.validate_feasibility_record_hashes()
+
+
+def test_d2_current_manifest_summary_terminal_and_cell_schemas_are_exact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
+    artifact_parent.mkdir(parents=True)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
+    monkeypatch.setattr(sf, "source_provenance_allowed_paths", lambda manifest_data, context=None: set())
+    monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+
+    root = artifact_parent / "feasibility_001"
+    manifest, terminal = _write_feasibility_root(root, "DONE", _passing_feasibility_cells(), lightweight=True)
+    manifest_data = json.loads(manifest.read_text())
+    manifest_data["environment"] = dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)
+    sf.write_json(manifest, manifest_data)
+    _rewrite_terminal_manifest_sha(root, "DONE")
+
+    sf.validate_feasibility_root_artifacts(root, require_passing=True)
+    summary_data = json.loads((root / "summary.json").read_text())
+    terminal_data = json.loads(terminal.read_text())
+    assert set(manifest_data) == set(sf.CURRENT_MANIFEST_KEYS)
+    assert set(summary_data) == set(sf.CURRENT_SUMMARY_KEYS)
+    assert set(terminal_data) == set(sf.CURRENT_TERMINAL_KEYS)
+    assert all(set(cell) == set(sf.CURRENT_CELL_KEYS) for cell in manifest_data["cells"])
+
+    bad_cell = dict(_passing_feasibility_cells()[0])
+    bad_cell.pop("embedding_weight_tying")
+    with pytest.raises(ValueError, match="exact current tied schema"):
+        sf.validate_cell_counts([bad_cell])
+
+    extra_cell = {**_passing_feasibility_cells()[0], "extra": True}
+    with pytest.raises(ValueError, match="exact current tied schema"):
+        sf.validate_cell_counts([extra_cell])
+
+    historical_cell = _historical_failed_cell()
+    sf.validate_cell_artifact_schema([historical_cell], require_pass=False, historical=True)
+    with pytest.raises(ValueError, match="exact protocol schema"):
+        sf.validate_cell_artifact_schema([{**historical_cell, "embedding_weight_tying": False}], require_pass=False, historical=True)
+
+    manifest_data = json.loads(manifest.read_text())
+    manifest_data["unexpected"] = True
+    sf.write_json(manifest, manifest_data)
+    _rewrite_terminal_manifest_sha(root, "DONE")
+    with pytest.raises(ValueError, match="Current manifest"):
+        sf.validate_feasibility_root_artifacts(root, require_passing=True)
+
+
+def test_d2_legacy_and_d1_allowlists_accept_only_exact_frozen_artifact_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    original_checkpoint_validator = sf.validate_checkpoint_artifact
+    monkeypatch.setattr(sf, "validate_historical_generation_artifact", lambda path, cell: [])
+    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+    for root_name, expected in sf.HISTORICAL_FEASIBILITY_ROOTS.items():
+        root = sf.ARTIFACT_PARENT / root_name
+        terminal, _terminal_data, manifest, manifest_sha = sf.load_terminal_binding(root)
+        assert manifest_sha == expected["manifest_sha256"]
+        assert sf.file_sha256(terminal) == expected["terminal_sha256"]
+        assert sf.validate_historical_feasibility_identity(
+            root,
+            source_commit=expected["source_commit"],
+            manifest_sha=manifest_sha,
+            terminal_path=terminal,
+        ) is True
+        sf.validate_feasibility_root_artifacts(root, require_passing=False)
+
+    root_004 = sf.ARTIFACT_PARENT / "feasibility_004"
+    root_004_manifest = json.loads((root_004 / "manifest.json").read_text())
+    original_checkpoint_validator(root_004 / root_004_manifest["cells"][0]["checkpoint_path"], root_004_manifest["cells"][0])
+
+    expected_decision = {
+        "path": "artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001",
+        "source_commit": "cb49ebdf577df78e97b7748aadc48f8547a70f6a",
+        "artifact_class": "non_evidence_feasibility_diagnostic",
+        "feasibility_selection_eligible": False,
+        "task_010d_authorized": False,
+        "manifest_sha256": "5589ac3a1215ea4cf451bd14f75ab64ab53b183548d1d42134e3f52b6ad12241",
+        "summary_sha256": "91582eda4629f29436289896c9f3802fe243c2b86a8f622c98c6c97e579a34ac",
+        "terminal_sha256": "39f3893627d24162d94f541217f4f754c2e193fe4a61361dacc6156b84826f92",
+        "accepted_proposal_commit": "9a767c6708c7c69f5ba98848250afcf50c8c5a6f",
+        "independent_review_verdict": "ACCEPT",
+    }
+    decision_root = sf.ARTIFACT_PARENT / "feasibility_diagnostic_001"
+    deep_calls: list[Path] = []
+
+    def deep_loader(root: Path) -> tuple[Path, dict[str, object], Path, str]:
+        deep_calls.append(root)
+        return root / "DONE.json", {}, root / "manifest.json", expected_decision["manifest_sha256"]
+
+    monkeypatch.setattr(sf, "load_diagnostic_terminal_binding", deep_loader)
+    assert sf.validate_decision_diagnostic_binding(decision_root, deep=True) == expected_decision
+    assert deep_calls == [decision_root]
+    assert sf.validate_decision_diagnostic_binding(decision_root.resolve(), deep=False) == expected_decision
+
+    d1_checkpoint = decision_root / "array_json__small__3000__seed0" / "checkpoint_step3000.pt"
+    sf.validate_historical_checkpoint_allowlist(d1_checkpoint)
+    copied_checkpoint = tmp_path / "checkpoint_step3000.pt"
+    copied_checkpoint.write_bytes(d1_checkpoint.read_bytes())
+    with pytest.raises(ValueError, match="allowlist"):
+        sf.validate_historical_checkpoint_allowlist(copied_checkpoint)
+
+    original_file_sha256 = sf.file_sha256
+
+    def tampered_sha(path: Path) -> str:
+        if path == d1_checkpoint:
+            return "0" * 64
+        return original_file_sha256(path)
+
+    monkeypatch.setattr(sf, "file_sha256", tampered_sha)
+    with pytest.raises(ValueError, match="checksum|inventory"):
+        sf.validate_historical_checkpoint_allowlist(d1_checkpoint)
+
+
+def test_d2_decision_diagnostic_cannot_be_selected_or_used_as_current_cell() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    diagnostic_root = sf.ARTIFACT_PARENT / "feasibility_diagnostic_001"
+    with pytest.raises(ValueError, match="Feasibility root basename"):
+        sf.validate_feasibility_root_artifacts(diagnostic_root, require_passing=True)
+
+    checkpoint = diagnostic_root / "array_json__small__3000__seed0" / "checkpoint_step3000.pt"
+    with pytest.raises(ValueError, match="parameter_count|Current checkpoint"):
+        sf.validate_checkpoint_artifact(checkpoint, _passing_feasibility_cells()[0])
+
+
+def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    root = Path("artifacts/phase8_toy_lm_bridge/feasibility_005")
+    predecessors = tuple(Path(path) for path in sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS)
+    diagnostic_root = Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT)
+    exact_env = dict(sf.FEASIBILITY_REQUIRED_ENV)
+    monkeypatch.setattr(sf, "current_environment_dict", lambda: dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV))
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: sf.feasibility_exact_argv(root, predecessors, diagnostic_root))
+
+    sf.validate_feasibility_cli_contract(
+        device="cuda:0",
+        root=root,
+        predecessor_roots=predecessors,
+        predecessor_selections=(),
+        decision_diagnostic_root=diagnostic_root,
+        environ=exact_env,
+    )
+
+    for bad_device in ("cpu", "cuda"):
+        with pytest.raises(ValueError, match="cuda:0"):
+            sf.validate_feasibility_cli_contract(
+                device=bad_device,
+                root=root,
+                predecessor_roots=predecessors,
+                predecessor_selections=(),
+                decision_diagnostic_root=diagnostic_root,
+                environ=exact_env,
+            )
+    with pytest.raises(ValueError, match="predecessor selections"):
+        sf.validate_feasibility_cli_contract(
+            device="cuda:0",
+            root=root,
+            predecessor_roots=predecessors,
+            predecessor_selections=(Path("artifacts/phase8_toy_lm_bridge/feasibility_selection_001.json"),),
+            decision_diagnostic_root=diagnostic_root,
+            environ=exact_env,
+        )
+    with pytest.raises(ValueError, match="root"):
+        sf.validate_feasibility_cli_contract(
+            device="cuda:0",
+            root=Path("artifacts/phase8_toy_lm_bridge/feasibility_006"),
+            predecessor_roots=predecessors,
+            predecessor_selections=(),
+            decision_diagnostic_root=diagnostic_root,
+            environ=exact_env,
+        )
+    with pytest.raises(ValueError, match="predecessor roots"):
+        sf.validate_feasibility_cli_contract(
+            device="cuda:0",
+            root=root,
+            predecessor_roots=tuple(reversed(predecessors)),
+            predecessor_selections=(),
+            decision_diagnostic_root=diagnostic_root,
+            environ=exact_env,
+        )
+    with pytest.raises(ValueError, match="decision diagnostic"):
+        sf.validate_feasibility_cli_contract(
+            device="cuda:0",
+            root=root,
+            predecessor_roots=predecessors,
+            predecessor_selections=(),
+            decision_diagnostic_root=Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_002"),
+            environ=exact_env,
+        )
+    with pytest.raises(ValueError, match="PYTHONPATH"):
+        sf.validate_feasibility_cli_contract(
+            device="cuda:0",
+            root=root,
+            predecessor_roots=predecessors,
+            predecessor_selections=(),
+            decision_diagnostic_root=diagnostic_root,
+            environ={**exact_env, "PYTHONPATH": str(REPO_ROOT)},
+        )
+    monkeypatch.setattr(sf, "current_environment_dict", lambda: {**sf.FEASIBILITY_REQUIRED_RUNTIME_ENV, "gpu": "different"})
+    with pytest.raises(ValueError, match="environment dictionary"):
+        sf.validate_feasibility_cli_contract(
+            device="cuda:0",
+            root=root,
+            predecessor_roots=predecessors,
+            predecessor_selections=(),
+            decision_diagnostic_root=diagnostic_root,
+            environ=exact_env,
+        )
+
+    monkeypatch.setattr(sf, "current_environment_dict", lambda: dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV))
+    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: ["python", "-O", *sf.feasibility_exact_argv(root, predecessors, diagnostic_root)[1:]])
+    with pytest.raises(ValueError, match="process argv"):
+        sf.validate_feasibility_cli_contract(
+            device="cuda:0",
+            root=root,
+            predecessor_roots=predecessors,
+            predecessor_selections=(),
+            decision_diagnostic_root=diagnostic_root,
+            environ=exact_env,
+        )
+    with pytest.raises(ValueError, match="main\\(argv"):
+        sf.main([
+            "run",
+            "--device",
+            "cuda:0",
+            "--root",
+            str(root),
+            *[item for predecessor in predecessors for item in ("--predecessor-root", str(predecessor))],
+            "--decision-diagnostic-root",
+            str(diagnostic_root),
+        ])
+
+
+def test_d2_record_hash_mismatch_stops_before_model_construction_and_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    events: list[str] = []
+    root = tmp_path / "feasibility_005"
+    predecessors = tuple(tmp_path / f"feasibility_{index:03d}" for index in range(1, 5))
+    diagnostic_root = tmp_path / "feasibility_diagnostic_001"
+
+    monkeypatch.setattr(sf, "validate_current_run_root_contract", lambda *args: events.append("root_contract"))
+    monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: events.append("shallow") or set())
+    monkeypatch.setattr(
+        sf,
+        "capture_source_provenance",
+        lambda *args, **kwargs: events.append("clean") or sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
+    )
+    monkeypatch.setattr(sf, "validate_feasibility_environment", lambda **kwargs: events.append("env"))
+    monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: events.append("backend"))
+
+    def hash_mismatch() -> dict[str, str]:
+        events.append("record_hashes")
+        raise ValueError("record hash mismatch")
+
+    monkeypatch.setattr(sf, "validate_feasibility_record_hashes", hash_mismatch)
+    monkeypatch.setattr(sf, "build_model", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model constructed")))
+    with pytest.raises(ValueError, match="record hash mismatch"):
+        sf.run_current_suite(
+            root,
+            predecessors,
+            (),
+            device="cuda:0",
+            decision_diagnostic_root=diagnostic_root,
+            environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
+            environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
+        )
+    assert events == ["root_contract", "shallow", "clean", "env", "backend", "record_hashes"]
+    assert not root.exists()
+    assert not root.with_name(root.name + ".tmp").exists()
+
+
+def test_d2_shallow_inventory_then_source_cleanliness_precedes_deep_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    root = Path("artifacts/phase8_toy_lm_bridge/feasibility_005")
+    predecessors = tuple(Path(path) for path in sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS)
+    diagnostic_root = Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT)
+    events: list[str] = []
+
+    monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: events.append("shallow") or set())
+
+    def dirty_source(*args: object, **kwargs: object) -> object:
+        events.append("clean")
+        raise RuntimeError("dirty source")
+
+    monkeypatch.setattr(sf, "capture_source_provenance", dirty_source)
+    for name in (
+        "validate_feasibility_environment",
+        "configure_feasibility_deterministic_backend",
+        "validate_feasibility_record_hashes",
+        "validate_feasibility_root_artifacts",
+        "validate_decision_diagnostic_binding",
+        "build_model",
+        "deterministic_batch_indices",
+        "load_model_from_checkpoint",
+    ):
+        monkeypatch.setattr(sf, name, lambda *args, _name=name, **kwargs: (_ for _ in ()).throw(AssertionError(f"{_name} ran before source cleanliness failed")))
+
+    with pytest.raises(RuntimeError, match="dirty source"):
+        sf.run_current_suite(
+            root,
+            predecessors,
+            (),
+            device="cuda:0",
+            decision_diagnostic_root=diagnostic_root,
+            environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
+            environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
+        )
+    assert events == ["shallow", "clean"]
+    assert not (REPO_ROOT / root).exists()
+    assert not (REPO_ROOT / root.with_name(root.name + ".tmp")).exists()
+
+    events.clear()
+    monkeypatch.setattr(
+        sf,
+        "capture_source_provenance",
+        lambda *args, **kwargs: events.append("clean") or sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
+    )
+    monkeypatch.setattr(sf, "validate_feasibility_environment", lambda **kwargs: events.append("env"))
+    monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: events.append("backend"))
+    monkeypatch.setattr(sf, "validate_feasibility_record_hashes", lambda: events.append("record_hashes") or dict(sf.FEASIBILITY_RECORD_HASHES))
+    monkeypatch.setattr(sf, "validate_feasibility_root_artifacts", lambda predecessor_root, **kwargs: events.append(f"deep:{predecessor_root.name}"))
+
+    def d1_probe(root: Path, *, deep: bool) -> dict[str, object]:
+        events.append(f"d1_deep:{deep}")
+        raise RuntimeError("deep validation probe")
+
+    monkeypatch.setattr(sf, "validate_decision_diagnostic_binding", d1_probe)
+    with pytest.raises(RuntimeError, match="deep validation probe"):
+        sf.run_current_suite(
+            root,
+            predecessors,
+            (),
+            device="cuda:0",
+            decision_diagnostic_root=diagnostic_root,
+            environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
+            environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
+        )
+    assert events == [
+        "shallow",
+        "clean",
+        "env",
+        "backend",
+        "record_hashes",
+        "deep:feasibility_001",
+        "deep:feasibility_002",
+        "deep:feasibility_003",
+        "deep:feasibility_004",
+        "d1_deep:True",
+    ]
+    assert not (REPO_ROOT / root).exists()
+    assert not (REPO_ROOT / root.with_name(root.name + ".tmp")).exists()
+
+
+def test_d2_run_current_suite_uses_cpu_initialized_tied_models_and_all_24_fake_cells(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+
+    class FakeModel(torch.nn.Module):
+        def __init__(self, model_size: str) -> None:
+            super().__init__()
+            self.model_size = model_size
+            self.token_embedding = torch.nn.Embedding(1, 1)
+            self.lm_head = torch.nn.Linear(1, 1, bias=False)
+            self.lm_head.weight = self.token_embedding.weight
+            self.parameter_count = sf.FROZEN_PARAMETER_COUNTS[model_size]
+            self.transfers: list[str] = []
+
+        def to(self, device: object) -> "FakeModel":
+            self.transfers.append(str(device))
+            return self
+
+    def fake_records() -> dict[str, dict[str, tuple[object, ...]]]:
+        return {
+            family: {
+                "train": (sf.FeasibilityRecord(family, "train", 0, f"{family}_train", f"{family}_train", "prompt", "answer"),),
+                "eval": (sf.FeasibilityRecord(family, "eval", 0, f"{family}_eval", f"{family}_eval", "prompt", "answer"),),
+            }
+            for family in sf.FAMILIES
+        }
+
+    def configure_common(match_overrides: dict[tuple[str, str, int], int]) -> tuple[Path, tuple[Path, ...], Path, list[tuple[str, str, int]], list[FakeModel]]:
+        root = tmp_path / f"feasibility_005_{len(match_overrides)}"
+        predecessors = tuple(tmp_path / f"feasibility_{index:03d}" for index in range(1, 5))
+        diagnostic_root = tmp_path / "feasibility_diagnostic_001"
+        executed: list[tuple[str, str, int]] = []
+        models: list[FakeModel] = []
+        original_build_manifest = sf.build_manifest
+        monkeypatch.setattr(sf, "validate_current_run_root_contract", lambda *args: None)
+        monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: set())
+        monkeypatch.setattr(
+            sf,
+            "capture_source_provenance",
+            lambda *args, **kwargs: sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
+        )
+        monkeypatch.setattr(sf, "validate_feasibility_environment", lambda **kwargs: None)
+        monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: None)
+        monkeypatch.setattr(sf, "validate_feasibility_record_hashes", lambda: dict(sf.FEASIBILITY_RECORD_HASHES))
+        monkeypatch.setattr(sf, "validate_feasibility_root_artifacts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(sf, "validate_decision_diagnostic_binding", lambda root, *, deep: dict(sf.DECISION_DIAGNOSTIC_ROOT_BINDING))
+        monkeypatch.setattr(sf, "grouped_records", fake_records)
+        monkeypatch.setattr(sf, "verify_source_unchanged", lambda *args, **kwargs: None)
+        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+        monkeypatch.setattr(sf, "expected_parameter_count", lambda model_size: sf.FROZEN_PARAMETER_COUNTS[model_size])
+
+        def build_manifest_with_required_environment(*args: object, **kwargs: object) -> dict[str, object]:
+            manifest = original_build_manifest(*args, **kwargs)
+            manifest["environment"] = dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)
+            return manifest
+
+        monkeypatch.setattr(sf, "build_manifest", build_manifest_with_required_environment)
+        monkeypatch.setattr(
+            sf,
+            "complete_predecessor_root_bindings",
+            lambda roots, selections, context=None: [
+                {
+                    "path": str(path),
+                    "terminal_state": "FAILED",
+                    "terminal_sha256": f"{index}" * 64,
+                    "manifest_sha256": f"{index + 4}" * 64,
+                }
+                for index, path in enumerate(roots, start=1)
+            ],
+        )
+
+        def build_fake_model(model_size: str) -> FakeModel:
+            model = FakeModel(model_size)
+            models.append(model)
+            assert all(parameter.device.type == "cpu" for parameter in model.parameters())
+            return model
+
+        def fake_train(model: FakeModel, records: object, *, seed: int, **kwargs: object) -> object:
+            assert model.transfers == ["cuda:0"]
+            return type("FakeTrainResult", (), {"final_loss": 0.0, "training_accuracy": 1.0})()
+
+        def fake_evaluate(model: FakeModel, records: tuple[object, ...], tokenizer: object, device: torch.device) -> tuple[int, list[dict[str, object]]]:
+            assert model.transfers == ["cuda:0"]
+            assert str(device) == "cuda:0"
+            family = records[0].family
+            key = (family, model.model_size, len([item for item in executed if item[0] == family and item[1] == model.model_size]))
+            seed = key[2]
+            executed.append((family, model.model_size, seed))
+            exact_matches = match_overrides.get((family, model.model_size, seed), sf.PASS_THRESHOLD)
+            return exact_matches, [{"family": family, "index": 0, "exact_match": exact_matches >= sf.PASS_THRESHOLD}]
+
+        monkeypatch.setattr(sf, "build_model", build_fake_model)
+        monkeypatch.setattr(sf, "train_text_records", fake_train)
+        monkeypatch.setattr(sf, "evaluate_model", fake_evaluate)
+        monkeypatch.setattr(sf, "save_checkpoint", lambda path, model, metadata: Path(path).write_bytes(b"checkpoint"))
+        return root, predecessors, diagnostic_root, executed, models
+
+    root, predecessors, diagnostic_root, executed, models = configure_common({})
+    sf.run_current_suite(
+        root,
+        predecessors,
+        (),
+        device="cuda:0",
+        decision_diagnostic_root=diagnostic_root,
+        environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
+        environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
+    )
+    assert len(executed) == len(sf.FAMILIES) * len(sf.MODEL_SIZES) * len(sf.SEEDS) == 24
+    assert all(model.transfers == ["cuda:0"] for model in models)
+    assert (root / "DONE.json").exists()
+    assert json.loads((root / "summary.json").read_text())["summary"]["all_cells_passed"] is True
+
+    fail_key = (sf.FAMILIES[-1], sf.MODEL_SIZES[-1], sf.SEEDS[-1])
+    root, predecessors, diagnostic_root, executed, _models = configure_common({fail_key: sf.PASS_THRESHOLD - 1})
+    sf.run_current_suite(
+        root,
+        predecessors,
+        (),
+        device="cuda:0",
+        decision_diagnostic_root=diagnostic_root,
+        environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
+        environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
+    )
+    assert len(executed) == 24
+    assert (root / "FAILED.json").exists()
+    failed = json.loads((root / "FAILED.json").read_text())
+    assert len(failed["cells"]) == 24
+    assert any(cell["passed"] is False for cell in failed["cells"])
+    assert failed["error"] == "complete feasibility matrix did not satisfy all 24 pass thresholds."
+    assert json.loads((root / "summary.json").read_text())["summary"]["all_cells_passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "cause_match"),
+    (
+        ("generation", "Generation artifact raw_token_ids prefix|Generation artifact row prompt"),
+        ("checkpoint", "Checkpoint artifact is not a loadable"),
+        ("cell_schema", "exact current tied schema"),
+        ("lineage", "predecessor_roots"),
+        ("replay", "Checkpoint replay mismatch probe"),
+    ),
+)
+def test_d2_current_publication_gate_rejects_mutated_artifacts_schema_lineage_or_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+    cause_match: str,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    status = "FAILED"
+    root_dir = tmp_path / mutation
+    temp_root = root_dir / "feasibility_005.tmp"
+    output_root = root_dir / "feasibility_005"
+    cell = dict(_passing_feasibility_cells()[0])
+    use_real_generation = mutation == "generation"
+    _write_feasibility_root(temp_root, status, [cell], lightweight=not use_real_generation)
+    _rewrite_current_publication_command(temp_root, status, output_root)
+
+    if mutation == "generation":
+        generation_path = temp_root / str(cell["generations_path"])
+        rows = [json.loads(line) for line in generation_path.read_text().splitlines()]
+        rows[0]["prompt"] = f"{rows[0]['prompt']} tampered"
+        generation_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        _refresh_current_publication_hashes(temp_root, status)
+        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+    elif mutation == "checkpoint":
+        checkpoint_path = temp_root / str(cell["checkpoint_path"])
+        checkpoint_path.write_bytes(b"tampered checkpoint")
+        _refresh_current_publication_hashes(temp_root, status)
+        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+    elif mutation == "cell_schema":
+        for filename in ("summary.json", "manifest.json", f"{status}.json"):
+            path = temp_root / filename
+            data = json.loads(path.read_text())
+            for row in data["cells"]:
+                row.pop("model_protocol_revision")
+            if filename == "manifest.json":
+                data["file_inventory"] = sf.inventory(temp_root)
+            sf.write_json(path, data)
+        _refresh_current_publication_hashes(temp_root, status)
+        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+    elif mutation == "lineage":
+        manifest_path = temp_root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["predecessor_roots"] = [
+            {
+                "path": "artifacts/phase8_toy_lm_bridge/feasibility_001",
+                "terminal_state": "FAILED",
+                "terminal_sha256": "0" * 64,
+                "manifest_sha256": "1" * 64,
+            }
+        ]
+        sf.write_json(manifest_path, manifest)
+        _rewrite_terminal_manifest_sha(temp_root, status)
+        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+    elif mutation == "replay":
+        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+
+        def replay_mismatch(path: Path, cell: dict[str, object], rows: list[dict[str, object]]) -> None:
+            raise ValueError("Checkpoint replay mismatch probe")
+
+        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", replay_mismatch)
+    else:  # pragma: no cover - parametrization guard
+        raise AssertionError(mutation)
+
+    with pytest.raises(sf.FeasibilityPublicationError) as excinfo:
+        sf.publish_current_feasibility_root_or_leave_incomplete(
+            temp_root,
+            output_root,
+            terminal_status=status,
+            predecessor_roots=(),
+            predecessor_selections=(),
+            decision_diagnostic_root=Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT),
+            source_snapshot=_source_snapshot(),
+            allowed_source_paths=set(),
+        )
+    assert excinfo.value.__cause__ is not None
+    assert re.search(cause_match, str(excinfo.value.__cause__))
+    assert not output_root.exists()
+    assert temp_root.exists()
+    assert not (temp_root / "DONE.json").exists()
+    assert not (temp_root / "FAILED.json").exists()
+    assert (temp_root / "manifest.json").exists()
+
+
+def test_d2_current_publication_success_validates_before_rename_and_replays_on_cuda0(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    status = "FAILED"
+    temp_root = tmp_path / "feasibility_005.tmp"
+    output_root = tmp_path / "feasibility_005"
+    _write_feasibility_root(temp_root, status, [dict(_passing_feasibility_cells()[0])], lightweight=True)
+    _rewrite_current_publication_command(temp_root, status, output_root)
+    events: list[str] = []
+    replay_devices: list[str] = []
+
+    monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: events.append("generation") or [])
+    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: events.append("checkpoint"))
+    monkeypatch.setattr(sf.torch.cuda, "is_available", lambda: True)
+
+    def replay_probe(path: Path, cell: dict[str, object], rows: list[dict[str, object]]) -> None:
+        events.append("replay")
+        replay_devices.append(str(sf.feasibility_replay_device()))
+
+    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", replay_probe)
+
+    def source_callback() -> None:
+        events.append("callback")
+
+    def rename_probe(source: Path, destination: Path) -> None:
+        events.append("rename")
+        source.rename(destination)
+
+    monkeypatch.setattr(sf, "atomic_rename_noreplace", rename_probe)
+    sf.publish_current_feasibility_root_or_leave_incomplete(
+        temp_root,
+        output_root,
+        terminal_status=status,
+        predecessor_roots=(),
+        predecessor_selections=(),
+        decision_diagnostic_root=Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT),
+        source_snapshot=_source_snapshot(),
+        allowed_source_paths=set(),
+        final_callback=source_callback,
+    )
+    assert output_root.exists()
+    assert not temp_root.exists()
+    assert events == ["generation", "checkpoint", "replay", "callback", "callback", "rename"]
+    assert replay_devices == ["cuda:0"]
+
+
+def test_d2_current_publication_callback_failure_blocks_rename_and_leaves_tmp_incomplete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    status = "FAILED"
+    temp_root = tmp_path / "feasibility_005.tmp"
+    output_root = tmp_path / "feasibility_005"
+    _write_feasibility_root(temp_root, status, [dict(_passing_feasibility_cells()[0])], lightweight=True)
+    _rewrite_current_publication_command(temp_root, status, output_root)
+
+    monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
+    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
+    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+    monkeypatch.setattr(sf, "atomic_rename_noreplace", lambda source, destination: (_ for _ in ()).throw(AssertionError("rename after failed callback")))
+
+    with pytest.raises(sf.FeasibilityPublicationError) as excinfo:
+        sf.publish_current_feasibility_root_or_leave_incomplete(
+            temp_root,
+            output_root,
+            terminal_status=status,
+            predecessor_roots=(),
+            predecessor_selections=(),
+            decision_diagnostic_root=Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT),
+            source_snapshot=_source_snapshot(),
+            allowed_source_paths=set(),
+            final_callback=lambda: (_ for _ in ()).throw(sf.SourceChangedError("source changed probe")),
+        )
+    assert isinstance(excinfo.value.__cause__, sf.SourceChangedError)
+    assert not output_root.exists()
+    assert temp_root.exists()
+    assert not (temp_root / "DONE.json").exists()
+    assert not (temp_root / "FAILED.json").exists()
 
 
 def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_rejection(tmp_path: Path) -> None:
@@ -1526,8 +2461,12 @@ def test_training_accuracy_counts_malformed_generations_as_incorrect() -> None:
     assert model.training is True
 
 
-def test_checkpoint_replay_rejects_generation_rows_not_produced_by_checkpoint(tmp_path: Path) -> None:
+def test_checkpoint_replay_rejects_generation_rows_not_produced_by_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    monkeypatch.setattr(sf, "feasibility_replay_device", lambda: torch.device("cpu"))
     cell = _passing_feasibility_cells()[0]
     checkpoint = tmp_path / "checkpoint.pt"
     save_checkpoint(
@@ -1765,7 +2704,25 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(
     with pytest.raises(ValueError, match="canonical path spelling"):
         sf.validate_new_root(artifact_parent / "alias" / ".." / "feasibility_001")
     with pytest.raises(ValueError, match="canonical path spelling"):
-        sf.main(["run", "--root", f"{artifact_parent}//feasibility_001"])
+        sf.require_canonical_path_string(f"{artifact_parent}//feasibility_001", "root", sf.ROOT_RE)
+    with pytest.raises(ValueError, match="real process command"):
+        sf.main([
+            "run",
+            "--device",
+            "cuda:0",
+            "--root",
+            sf.FEASIBILITY_REQUIRED_ROOT,
+            "--predecessor-root",
+            sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS[0],
+            "--predecessor-root",
+            sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS[1],
+            "--predecessor-root",
+            sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS[2],
+            "--predecessor-root",
+            sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS[3],
+            "--decision-diagnostic-root",
+            sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT,
+        ])
     with pytest.raises(ValueError, match="located directly"):
         sf.validate_new_root(tmp_path / "feasibility_001")
 
@@ -1781,6 +2738,7 @@ def test_feasibility_root_numbering_refuses_overwrite_and_skips(
         source_snapshot=_source_snapshot(),
     )
 
+    monkeypatch.setattr(sf, "terminal_binding", lambda root, context=None: _unchecked_terminal_binding(root))
     sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
     with pytest.raises(ValueError, match="complete and continuous"):
         sf.validate_new_root(artifact_parent / "feasibility_003", (predecessor,), ())
@@ -1881,7 +2839,8 @@ def test_historical_predecessor_generation_rows_are_not_reinterpreted_as_current
     assert historical_first["prompt"] != current_first.prompt
     assert historical_first["expected"] != current_first.answer
 
-    sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
+    with pytest.raises(ValueError, match="decision_diagnostic|configuration|allowlist"):
+        sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
 
 
 def test_historical_predecessor_generation_internal_inconsistency_is_rejected(
@@ -1909,7 +2868,7 @@ def test_historical_predecessor_generation_internal_inconsistency_is_rejected(
         source_snapshot=_source_snapshot(historical_commit),
     )
 
-    with pytest.raises(ValueError, match="raw_token_ids prefix"):
+    with pytest.raises(ValueError, match="decision_diagnostic|configuration|allowlist"):
         sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
 
 
@@ -1937,7 +2896,7 @@ def test_current_source_generation_prompt_mismatch_is_still_rejected(
     ]
     _write_historical_generation_root(current_source_root, source_commit=_test_source_commit(), rows=rows)
 
-    with pytest.raises(ValueError, match="row prompt"):
+    with pytest.raises(ValueError, match="decision_diagnostic|configuration|allowlist"):
         sf.validate_new_root(artifact_parent / "feasibility_002", (current_source_root,), ())
 
 
@@ -1951,6 +2910,7 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
     monkeypatch.setattr(sf, "validate_historical_generation_artifact", lambda path, cell: [])
     monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
     monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+    monkeypatch.setattr(sf, "validate_feasibility_root_artifacts", lambda *args, **kwargs: None)
     artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
     artifact_parent.mkdir(parents=True)
     monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
@@ -1990,7 +2950,7 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
     extra = selected_root / "unbound_extra.txt"
     extra.write_text("not bound\n")
     set_git_status([*allowed_paths, extra])
-    with pytest.raises(ValueError, match="file_inventory|Expecting value"):
+    with pytest.raises((RuntimeError, ValueError), match="exact supplied|file_inventory|Expecting value"):
         sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
     extra.unlink()
 
@@ -2120,6 +3080,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
     monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
     monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
+    monkeypatch.setattr(sf, "shallow_decision_diagnostic_paths", lambda root: set())
 
     def set_parent(name: str) -> Path:
         parent = tmp_path / name / "artifacts" / "phase8_toy_lm_bridge"
@@ -2374,19 +3335,8 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
     manifest_data = json.loads(bad_manifest.read_text())
     manifest_data["configuration"] = {"training_steps": 1500}
-    bad_manifest.write_text(json.dumps(manifest_data, sort_keys=True) + "\n")
-    (bad_root / "DONE.json").write_text(
-        json.dumps(
-            {
-                "status": "DONE",
-                "manifest_path": "manifest.json",
-                "manifest_sha256": sf.file_sha256(bad_manifest),
-                "pass_threshold": sf.PASS_THRESHOLD,
-                "cells": cells,
-            }
-        )
-        + "\n"
-    )
+    sf.write_json(bad_manifest, manifest_data)
+    _rewrite_terminal_manifest_sha(bad_root, "DONE")
     bad_selection = parent / "feasibility_selection_001.json"
     _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
     with pytest.raises(ValueError, match="frozen feasibility schema"):
@@ -2397,19 +3347,8 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
     manifest_data = json.loads(bad_manifest.read_text())
     manifest_data["source_provenance"]["commit"] = "b" * 40
-    bad_manifest.write_text(json.dumps(manifest_data, sort_keys=True) + "\n")
-    (bad_root / "DONE.json").write_text(
-        json.dumps(
-            {
-                "status": "DONE",
-                "manifest_path": "manifest.json",
-                "manifest_sha256": sf.file_sha256(bad_manifest),
-                "pass_threshold": sf.PASS_THRESHOLD,
-                "cells": cells,
-            }
-        )
-        + "\n"
-    )
+    sf.write_json(bad_manifest, manifest_data)
+    _rewrite_terminal_manifest_sha(bad_root, "DONE")
     bad_selection = parent / "feasibility_selection_001.json"
     _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
     with pytest.raises(ValueError, match="source_provenance"):
@@ -2650,9 +3589,8 @@ def test_diagnostic_step1500_equality_gate_and_batch_stream(tmp_path: Path, monk
         steps=sf.TRAINING_STEPS,
     )
 
-    model = build_model("small")
-    checkpoint = tmp_path / "checkpoint_step1500.pt"
-    save_checkpoint(str(checkpoint), model, metadata={"family": "array_json", "model_size": "small", "seed": 0, "training_steps": 1500})
+    checkpoint = Path("artifacts/phase8_toy_lm_bridge/feasibility_004/array_json__small__seed0/checkpoint_step1500.pt")
+    model = sf.load_checkpoint_model(checkpoint, "small", torch.device("cpu"))
     random.seed(1001)
     torch_rng = torch.random.get_rng_state()
     python_rng = random.getstate()
@@ -3456,13 +4394,8 @@ def test_diagnostic_parameter_count_comparator_is_isolated_from_formal_helper(mo
         calls.append(model_size)
         raise AssertionError("diagnostic comparator must not call formal expected_parameter_count")
 
-    checkpoint = tmp_path / "checkpoint.pt"
-    model = build_model("small")
-    save_checkpoint(
-        str(checkpoint),
-        model,
-        metadata={"family": "array_json", "model_size": "small", "seed": 0, "training_steps": sf.TRAINING_STEPS},
-    )
+    checkpoint = Path("artifacts/phase8_toy_lm_bridge/feasibility_004/array_json__small__seed0/checkpoint_step1500.pt")
+    model = sf.load_checkpoint_model(checkpoint, "small", torch.device("cpu"))
     monkeypatch.setattr(sf, "expected_parameter_count", forbidden_helper)
     sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
     assert calls == []
@@ -3576,14 +4509,14 @@ def _write_diagnostic_checkpoint_with_trajectory_evidence(
     final_loss: float = 1.25,
 ) -> tuple[Path, Path, dict[str, object], dict[str, object]]:
     step1500_checkpoint = tmp_path / f"checkpoint_step1500_seed{seed}.pt"
-    step1500_model = build_model("small")
-    save_checkpoint(
+    step1500_model = build_historical_model("small")
+    sf.save_historical_checkpoint(
         str(step1500_checkpoint),
         step1500_model,
         metadata={"family": "array_json", "model_size": "small", "seed": seed, "training_steps": 1500},
     )
     final_checkpoint = tmp_path / f"checkpoint_step3000_seed{seed}.pt"
-    final_model = build_model("small")
+    final_model = build_historical_model("small")
     schedule = sf.diagnostic_training_schedule_evidence(seed, sf.TRAIN_RECORDS_PER_FAMILY)
     loss_evidence = sf.loss_scalar_evidence(torch.tensor(final_loss, dtype=torch.float32), final_loss)
     step1500_fingerprint = sf.checkpoint_model_state_fingerprint(step1500_checkpoint)
@@ -3617,7 +4550,7 @@ def _write_diagnostic_checkpoint_with_trajectory_evidence(
         "final_optimizer_state_fingerprint": sf.optimizer_state_fingerprint(make_optimizer(final_model)),
         "retained_final_loss": final_loss,
     }
-    save_checkpoint(
+    sf.save_historical_checkpoint(
         str(final_checkpoint),
         final_model,
         metadata={
@@ -3647,6 +4580,7 @@ def test_diagnostic_trajectory_validation_does_not_call_training(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    _allow_synthetic_historical_checkpoints(monkeypatch, sf)
     checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf)
 
     def forbidden_training(**_kwargs: object) -> dict[str, object]:
@@ -3661,8 +4595,9 @@ def test_diagnostic_trajectory_validation_does_not_call_training(
     )
 
 
-def test_diagnostic_trajectory_rejects_seed_substitution_with_outer_relabel(tmp_path: Path) -> None:
+def test_diagnostic_trajectory_rejects_seed_substitution_with_outer_relabel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    _allow_synthetic_historical_checkpoints(monkeypatch, sf)
     checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf, seed=0)
     substituted = tmp_path / "checkpoint_step3000_seed1_relabel.pt"
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
@@ -3677,8 +4612,9 @@ def test_diagnostic_trajectory_rejects_seed_substitution_with_outer_relabel(tmp_
         )
 
 
-def test_diagnostic_trajectory_rejects_unused_checkpoint_tensor_mutation(tmp_path: Path) -> None:
+def test_diagnostic_trajectory_rejects_unused_checkpoint_tensor_mutation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    _allow_synthetic_historical_checkpoints(monkeypatch, sf)
     checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf)
     mutated = tmp_path / "checkpoint_step3000_mutated.pt"
     payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
@@ -3693,8 +4629,9 @@ def test_diagnostic_trajectory_rejects_unused_checkpoint_tensor_mutation(tmp_pat
         )
 
 
-def test_diagnostic_initial_fingerprint_validation_restores_rng_states(tmp_path: Path) -> None:
+def test_diagnostic_initial_fingerprint_validation_restores_rng_states(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    _allow_synthetic_historical_checkpoints(monkeypatch, sf)
     checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf, seed=2)
     random.seed(123456)
     torch.manual_seed(654321)
@@ -3735,8 +4672,9 @@ def test_diagnostic_initial_fingerprint_validation_restores_rng_states(tmp_path:
         assert all(torch.equal(actual, expected) for actual, expected in zip(torch.cuda.get_rng_state_all(), cuda_rng, strict=True))
 
 
-def test_diagnostic_trajectory_and_schedule_mutation_fail(tmp_path: Path) -> None:
+def test_diagnostic_trajectory_and_schedule_mutation_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    _allow_synthetic_historical_checkpoints(monkeypatch, sf)
     checkpoint, step1500_checkpoint, training_metrics, evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf)
     trace_mutated_metrics = {
         **training_metrics,
@@ -4417,8 +5355,8 @@ def test_diagnostic_frozen_configuration_expands_protocol_and_training_constants
     assert config["handoff_blob"] == sf.DIAGNOSTIC_HANDOFF_BLOB
     assert config["tokenizer"]["eos_id"] == EOS_ID
     assert config["batch_size"] == sf.BATCH_SIZE
-    assert config["model_configs"]["small"]["parameter_count"] == build_model("small").parameter_count
-    assert config["model_configs"]["medium"]["parameter_count"] == build_model("medium").parameter_count
+    assert config["model_configs"]["small"]["parameter_count"] == sf.HISTORICAL_PARAMETER_COUNTS["small"] == build_historical_model("small").parameter_count
+    assert config["model_configs"]["medium"]["parameter_count"] == sf.HISTORICAL_PARAMETER_COUNTS["medium"] == build_historical_model("medium").parameter_count
     assert config["optimizer"]["class"] == "torch.optim.AdamW"
     assert config["optimizer"]["learning_rate"] == 0.0003
     assert config["validation"] == {

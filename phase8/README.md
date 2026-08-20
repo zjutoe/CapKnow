@@ -63,11 +63,13 @@ condition and must be returned to `main`.
 - `010C-D2`: source-controlled one-shot protocol-amendment proposal based only on the
   accepted D1 diagnostic. The proposal has no implementation or experiment authority;
   acceptance at an exact reviewed commit is required before a separate implementation
-  handoff may be frozen.
+  handoff may be frozen. The accepted proposal commit is
+  `9a767c6708c7c69f5ba98848250afcf50c8c5a6f`.
 - `010C-D2-I`: implementation of the independently accepted D2 weight-tying proposal,
   including exact historical validation, D1 decision-provenance binding, and the
-  future one-shot `feasibility_005` gate. It cannot run the experiment or authorize
-  `010D`.
+  future one-shot `feasibility_005` gate. The implementation must be committed and
+  independently reviewed before `feasibility_005` can be launched; it cannot run the
+  experiment or authorize `010D`.
 - `010D`: formal training/checkpoint primitives and isolated evaluator.
 - `010E`: behavioral response matrices and exact/adaptive certificate integration.
 - `010F`: frozen metrics, sensitivity matrices, aggregation, and report-ready

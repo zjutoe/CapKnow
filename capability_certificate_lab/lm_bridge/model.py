@@ -13,6 +13,9 @@ from capability_certificate_lab.lm_bridge.tokenizer import (
     VOCAB_SIZE,
 )
 
+TIED_MODEL_PROTOCOL_REVISION = "phase8_tied_io_v1"
+LEGACY_UNTIED_MODEL_PROTOCOL_REVISION = "phase8_untied_legacy_v1"
+
 
 @dataclass(frozen=True)
 class TransformerConfig:
@@ -21,13 +24,49 @@ class TransformerConfig:
     n_heads: int
     n_layers: int
     d_ff: int
+    embedding_weight_tying: bool
+    model_protocol_revision: str
     max_seq_len: int = MAX_SEQUENCE_LENGTH
     vocab_size: int = VOCAB_SIZE
     dropout: float = 0.0
 
 
-SMALL_CONFIG = TransformerConfig(name="small", d_model=64, n_heads=4, n_layers=2, d_ff=256)
-MEDIUM_CONFIG = TransformerConfig(name="medium", d_model=128, n_heads=4, n_layers=4, d_ff=512)
+SMALL_CONFIG = TransformerConfig(
+    name="small",
+    d_model=64,
+    n_heads=4,
+    n_layers=2,
+    d_ff=256,
+    embedding_weight_tying=True,
+    model_protocol_revision=TIED_MODEL_PROTOCOL_REVISION,
+)
+MEDIUM_CONFIG = TransformerConfig(
+    name="medium",
+    d_model=128,
+    n_heads=4,
+    n_layers=4,
+    d_ff=512,
+    embedding_weight_tying=True,
+    model_protocol_revision=TIED_MODEL_PROTOCOL_REVISION,
+)
+LEGACY_SMALL_CONFIG = TransformerConfig(
+    name="small",
+    d_model=64,
+    n_heads=4,
+    n_layers=2,
+    d_ff=256,
+    embedding_weight_tying=False,
+    model_protocol_revision=LEGACY_UNTIED_MODEL_PROTOCOL_REVISION,
+)
+LEGACY_MEDIUM_CONFIG = TransformerConfig(
+    name="medium",
+    d_model=128,
+    n_heads=4,
+    n_layers=4,
+    d_ff=512,
+    embedding_weight_tying=False,
+    model_protocol_revision=LEGACY_UNTIED_MODEL_PROTOCOL_REVISION,
+)
 
 
 def transformer_config(name: Literal["small", "medium"]) -> TransformerConfig:
@@ -36,6 +75,28 @@ def transformer_config(name: Literal["small", "medium"]) -> TransformerConfig:
     if name == "medium":
         return MEDIUM_CONFIG
     raise ValueError(f"Unknown frozen model size: {name!r}.")
+
+
+def historical_transformer_config(name: Literal["small", "medium"]) -> TransformerConfig:
+    if name == "small":
+        return LEGACY_SMALL_CONFIG
+    if name == "medium":
+        return LEGACY_MEDIUM_CONFIG
+    raise ValueError(f"Unknown historical model size: {name!r}.")
+
+
+def legacy_serialized_config(name: Literal["small", "medium"]) -> dict[str, object]:
+    config = historical_transformer_config(name)
+    return {
+        "name": config.name,
+        "d_model": config.d_model,
+        "n_heads": config.n_heads,
+        "n_layers": config.n_layers,
+        "d_ff": config.d_ff,
+        "max_seq_len": config.max_seq_len,
+        "vocab_size": config.vocab_size,
+        "dropout": config.dropout,
+    }
 
 
 class CausalSelfAttentionBlock(nn.Module):
@@ -72,12 +133,19 @@ class ToyCausalTransformer(nn.Module):
             raise ValueError("Phase 8 frozen Transformer dropout must be 0.0.")
         if config.max_seq_len != MAX_SEQUENCE_LENGTH:
             raise ValueError("Phase 8 frozen Transformer context window must be 256 tokens.")
+        if config.embedding_weight_tying:
+            if config.model_protocol_revision != TIED_MODEL_PROTOCOL_REVISION:
+                raise ValueError("Tied Phase 8 models must use protocol revision phase8_tied_io_v1.")
+        elif config.model_protocol_revision != LEGACY_UNTIED_MODEL_PROTOCOL_REVISION:
+            raise ValueError("Untied Phase 8 models must use the explicit legacy protocol revision.")
         self.config = config
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
         self.position_embedding = nn.Embedding(config.max_seq_len, config.d_model)
         self.blocks = nn.ModuleList(CausalSelfAttentionBlock(config) for _ in range(config.n_layers))
         self.final_norm = nn.LayerNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        if config.embedding_weight_tying:
+            self.lm_head.weight = self.token_embedding.weight
         self.parameter_count = sum(parameter.numel() for parameter in self.parameters())
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -126,3 +194,7 @@ class ToyCausalTransformer(nn.Module):
 
 def build_model(size: Literal["small", "medium"]) -> ToyCausalTransformer:
     return ToyCausalTransformer(transformer_config(size))
+
+
+def build_historical_model(size: Literal["small", "medium"]) -> ToyCausalTransformer:
+    return ToyCausalTransformer(historical_transformer_config(size))

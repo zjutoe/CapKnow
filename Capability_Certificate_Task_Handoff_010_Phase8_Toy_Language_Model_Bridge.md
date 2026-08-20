@@ -466,6 +466,22 @@ Implement the model with PyTorch `2.9.1` public APIs:
 - maximum sequence length `256` bytes including special tokens;
 - greedy autoregressive decoding with a maximum of `64` generated tokens.
 
+The current Phase 8 model protocol revision is exactly
+`phase8_tied_io_v1`. Every new small or medium configuration and checkpoint must
+record:
+
+```text
+embedding_weight_tying=true
+model_protocol_revision="phase8_tied_io_v1"
+```
+
+The language-model head remains bias-free, but `lm_head.weight` is the same
+`nn.Parameter` object as `token_embedding.weight`. Construction first initializes
+`token_embedding`, `position_embedding`, all blocks, `final_norm`, and an independent
+bias-free `lm_head` in that order, then assigns `lm_head.weight =
+token_embedding.weight`. The initialized token embedding is the retained tensor; the
+independent head initialization is consumed only to preserve the frozen RNG stream.
+
 The small configuration is:
 
 ```text
@@ -486,6 +502,21 @@ d_ff=512
 
 Parameter counts must be computed from the constructed modules and recorded; do not
 claim an approximate size as evidence.
+
+The tied current counts are exact:
+
+```text
+small=133120
+medium=859392
+```
+
+The pre-D2 untied historical feasibility and D1 diagnostic artifacts remain valid
+only through their explicit legacy allowlists and retain the old counts:
+
+```text
+small=149760
+medium=892672
+```
 
 ### 8.3 Training
 
@@ -595,6 +626,16 @@ Each configuration/seed/family must reach at least `52/64` held-out exact matche
 Retain per-record generations and counts; aggregate success cannot hide a failing
 family or seed.
 
+After the accepted 010C-D2 amendment at commit
+`9a767c6708c7c69f5ba98848250afcf50c8c5a6f`, the only current feasibility revision is
+the tied `phase8_tied_io_v1` revision from Section 8.2. The four failed roots
+`feasibility_001` through `feasibility_004` remain untied historical inputs and may
+be read only under their exact path/source/manifest/terminal checksum allowlist. The
+accepted D1 diagnostic
+`artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001` is decision provenance
+only: it is not a predecessor feasibility root, not a selection, not a pass cell, and
+not authorization for `010D`.
+
 The suite is feasibility evidence, not Phase 8 scientific evidence. A failure blocks
 formal training and returns to `main`. Architecture, training budget, tokenizer, or
 generation changes are allowed only in a new source-controlled protocol commit based
@@ -616,10 +657,37 @@ checkpoints, file inventory, and checksums. Preserve failed roots. Any retry or
 reviewed repair uses the next root such as `feasibility_002`; never overwrite or
 delete earlier evidence.
 
+The next and only D2-amended run candidate is exactly
+`artifacts/phase8_toy_lm_bridge/feasibility_005`. It must bind all four historical
+predecessor roots in numerical order, bind the accepted D1 diagnostic under a
+dedicated `decision_diagnostic` object, and run all 24 family/model/seed cells. No
+pilot, early stop, threshold relaxation, model-size selection, step/data increase,
+surface change, same-root retry after semantic execution, or `feasibility_006`
+fallback exists.
+
+The only authorized D2 run command is:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_sequence_feasibility.py run --device cuda:0 --root artifacts/phase8_toy_lm_bridge/feasibility_005 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_001 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_002 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_003 --predecessor-root artifacts/phase8_toy_lm_bridge/feasibility_004 --decision-diagnostic-root artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001
+```
+
+Before creating `feasibility_005.tmp`, constructing a model, or generating a training
+schedule, the runner must enforce exact real argv, exact `--device cuda:0`, no
+predecessor selections, the required environment variables, deterministic backend
+flags, and the frozen A800 CUDA environment dictionary recorded by
+`feasibility_004` and the accepted D1 diagnostic. CPU fallback, implicit `cuda`, and
+any alternate device index are forbidden.
+
 For source cleanliness, no tracked or staged change is allowed. A later numbered run
 may exclude from untracked-file checks only exact earlier finalized Phase 8 evidence
 roots or selection records supplied as manifest/checksum-bound inputs; no broad
 artifact-directory exclusion is allowed. The new output root must not exist.
+
+For `feasibility_005`, source cleanliness may exclude only the exact
+inventory-bound files under the four historical predecessor roots and the accepted
+D1 diagnostic. Shallow path, terminal, manifest, size, and checksum inventory binding
+must derive that allowlist first; only after source cleanliness passes may deep
+historical checkpoint, D1 semantic, lineage, and replay validation begin.
 
 After a passing run, `main` creates a separate immutable selection record such as:
 
@@ -636,6 +704,11 @@ selected for formal execution must come from the exact final implementation comm
 used by formal `prepare`; an earlier post-010C feasibility decision may allow
 engineering to continue, but it is not sufficient after later source changes and
 must be rerun from the final commit.
+
+If `feasibility_005` publishes `FAILED` or any required validation cannot be satisfied
+without a new protocol choice, Phase 8 stops before `010D`. Only a reviewed passing
+`feasibility_005`, followed by independent artifact review, a reviewed selection
+record, and an explicit `main` decision can authorize `010D`.
 
 ### 9.5 Non-scientific resource benchmark and authorization
 

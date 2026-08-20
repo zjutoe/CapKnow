@@ -10,6 +10,7 @@ import torch
 from torch.nn import functional as F
 
 from capability_certificate_lab.lm_bridge.model import (
+    TIED_MODEL_PROTOCOL_REVISION,
     ToyCausalTransformer,
     TransformerConfig,
     build_model,
@@ -242,6 +243,7 @@ def run_byte_copy_overfit_control(
 
 
 def save_checkpoint(path: str, model: ToyCausalTransformer, *, metadata: dict[str, object]) -> None:
+    validate_tied_model_checkpoint_state(model)
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -255,7 +257,70 @@ def save_checkpoint(path: str, model: ToyCausalTransformer, *, metadata: dict[st
 
 def load_model_from_checkpoint(path: str, *, map_location: str | torch.device = "cpu") -> ToyCausalTransformer:
     checkpoint = torch.load(path, map_location=map_location, weights_only=True)
-    config = TransformerConfig(**checkpoint["config"])
+    config = validate_tied_checkpoint_payload(checkpoint)
     model = ToyCausalTransformer(config)
     model.load_state_dict(checkpoint["model_state_dict"])
+    if model.lm_head.weight is not model.token_embedding.weight:
+        raise ValueError("Loaded tied checkpoint did not preserve lm_head/token_embedding parameter identity.")
     return model
+
+
+def validate_tied_model_checkpoint_state(model: ToyCausalTransformer) -> None:
+    if model.config.embedding_weight_tying is not True:
+        raise ValueError("New Phase 8 checkpoints may only save embedding_weight_tying=true models.")
+    if model.config.model_protocol_revision != TIED_MODEL_PROTOCOL_REVISION:
+        raise ValueError("New Phase 8 checkpoints must use protocol revision phase8_tied_io_v1.")
+    if model.lm_head.weight is not model.token_embedding.weight:
+        raise ValueError("New Phase 8 checkpoints require lm_head/token_embedding parameter identity.")
+    validate_tied_state_dict(model.state_dict(), model)
+
+
+def validate_tied_checkpoint_payload(checkpoint: object) -> TransformerConfig:
+    if not isinstance(checkpoint, dict):
+        raise ValueError("Checkpoint payload must be a mapping.")
+    required_checkpoint_keys = {"model_state_dict", "config", "parameter_count", "metadata"}
+    if set(checkpoint) != required_checkpoint_keys:
+        raise ValueError("Checkpoint payload must use the exact tied checkpoint schema.")
+    config_value = checkpoint.get("config")
+    if not isinstance(config_value, dict):
+        raise ValueError("Checkpoint config must be a mapping.")
+    required_config_keys = set(TransformerConfig.__dataclass_fields__)
+    if set(config_value) != required_config_keys:
+        raise ValueError("Checkpoint config must use the exact tied TransformerConfig schema.")
+    if config_value.get("embedding_weight_tying") is not True:
+        raise ValueError("Checkpoint config must declare embedding_weight_tying=true.")
+    if config_value.get("model_protocol_revision") != TIED_MODEL_PROTOCOL_REVISION:
+        raise ValueError("Checkpoint config must declare protocol revision phase8_tied_io_v1.")
+    config = TransformerConfig(**config_value)
+    model = ToyCausalTransformer(config)
+    parameter_count = checkpoint.get("parameter_count")
+    if parameter_count != model.parameter_count:
+        raise ValueError("Checkpoint parameter_count does not match the tied model configuration.")
+    if not isinstance(checkpoint.get("metadata"), dict):
+        raise ValueError("Checkpoint metadata must be a mapping.")
+    validate_tied_state_dict(checkpoint.get("model_state_dict"), model)
+    return config
+
+
+def validate_tied_state_dict(state: object, expected_model: ToyCausalTransformer) -> None:
+    if not isinstance(state, dict):
+        raise ValueError("Checkpoint model_state_dict must be a mapping.")
+    expected_state = expected_model.state_dict()
+    if set(state) != set(expected_state):
+        raise ValueError("Checkpoint state_dict keys do not match the tied model.")
+    token_weight = state.get("token_embedding.weight")
+    head_weight = state.get("lm_head.weight")
+    if not isinstance(token_weight, torch.Tensor) or not isinstance(head_weight, torch.Tensor):
+        raise ValueError("Tied checkpoint must contain tensor token_embedding.weight and lm_head.weight.")
+    for key, expected_tensor in expected_state.items():
+        tensor = state[key]
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError("Checkpoint state_dict values must be tensors.")
+        if tensor.dtype != expected_tensor.dtype:
+            raise ValueError(f"Checkpoint state_dict dtype mismatch for {key}.")
+        if tuple(tensor.shape) != tuple(expected_tensor.shape):
+            raise ValueError(f"Checkpoint state_dict shape mismatch for {key}.")
+    if token_weight.dtype != head_weight.dtype or tuple(token_weight.shape) != tuple(head_weight.shape):
+        raise ValueError("Tied checkpoint duplicate weights must have identical dtype and shape.")
+    if not torch.equal(token_weight.cpu(), head_weight.cpu()):
+        raise ValueError("Tied checkpoint duplicate weights must be byte-equal before loading.")
