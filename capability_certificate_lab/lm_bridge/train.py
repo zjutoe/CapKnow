@@ -302,6 +302,11 @@ def validate_tied_checkpoint_payload(checkpoint: object) -> TransformerConfig:
     return config
 
 
+def contiguous_uint8_bytes(tensor: torch.Tensor) -> bytes:
+    byte_view = tensor.detach().cpu().contiguous().view(torch.uint8)
+    return bytes(byte_view.reshape(-1).tolist())
+
+
 def validate_tied_state_dict(state: object, expected_model: ToyCausalTransformer) -> None:
     if not isinstance(state, dict):
         raise ValueError("Checkpoint model_state_dict must be a mapping.")
@@ -320,7 +325,13 @@ def validate_tied_state_dict(state: object, expected_model: ToyCausalTransformer
             raise ValueError(f"Checkpoint state_dict dtype mismatch for {key}.")
         if tuple(tensor.shape) != tuple(expected_tensor.shape):
             raise ValueError(f"Checkpoint state_dict shape mismatch for {key}.")
-    if token_weight.dtype != head_weight.dtype or tuple(token_weight.shape) != tuple(head_weight.shape):
-        raise ValueError("Tied checkpoint duplicate weights must have identical dtype and shape.")
-    if not torch.equal(token_weight.cpu(), head_weight.cpu()):
+        if tensor.layout != expected_tensor.layout:
+            raise ValueError(f"Checkpoint state_dict layout mismatch for {key}.")
+    if token_weight.dtype != head_weight.dtype:
+        raise ValueError("Tied checkpoint duplicate weights must have identical dtype.")
+    if tuple(token_weight.shape) != tuple(head_weight.shape):
+        raise ValueError("Tied checkpoint duplicate weights must have identical shape.")
+    if token_weight.layout != head_weight.layout:
+        raise ValueError("Tied checkpoint duplicate weights must have identical layout.")
+    if contiguous_uint8_bytes(token_weight) != contiguous_uint8_bytes(head_weight):
         raise ValueError("Tied checkpoint duplicate weights must be byte-equal before loading.")

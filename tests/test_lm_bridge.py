@@ -33,6 +33,7 @@ from capability_certificate_lab.lm_bridge.model import (
 from capability_certificate_lab.lm_bridge.tokenizer import BOS_ID, EOS_ID, PAD_ID, SEP_ID, ByteTokenizer
 from capability_certificate_lab.lm_bridge.train import (
     TextRecord,
+    contiguous_uint8_bytes,
     encode_record_batch,
     load_model_from_checkpoint,
     make_optimizer,
@@ -642,6 +643,7 @@ def test_d2_tied_constructor_matches_historical_token_embedding_rng_and_optimize
             assert tied.lm_head.weight is tied.token_embedding.weight
             assert tied.parameter_count == sf.FROZEN_PARAMETER_COUNTS[model_size]
             torch.testing.assert_close(tied.token_embedding.weight, historical_token_embedding, atol=0.0, rtol=0.0)
+            assert contiguous_uint8_bytes(tied.token_embedding.weight) == contiguous_uint8_bytes(historical_token_embedding)
             assert repr(tied_rng[0]) == repr(historical_rng[0])
             torch.testing.assert_close(tied_rng[1], historical_rng[1], atol=0, rtol=0)
             if historical_rng[2] is None:
@@ -740,9 +742,8 @@ def test_d2_tied_checkpoint_schema_rejects_ambiguous_or_divergent_payloads(tmp_p
 
     assert validate_tied_checkpoint_payload(checkpoint).model_protocol_revision == TIED_MODEL_PROTOCOL_REVISION
     assert set(checkpoint["model_state_dict"]) == set(model.state_dict())
-    assert torch.equal(
-        checkpoint["model_state_dict"]["token_embedding.weight"],
-        checkpoint["model_state_dict"]["lm_head.weight"],
+    assert contiguous_uint8_bytes(checkpoint["model_state_dict"]["token_embedding.weight"]) == contiguous_uint8_bytes(
+        checkpoint["model_state_dict"]["lm_head.weight"]
     )
     loaded = load_model_from_checkpoint(str(path))
     assert loaded.lm_head.weight is loaded.token_embedding.weight
@@ -784,10 +785,44 @@ def test_d2_tied_checkpoint_schema_rejects_ambiguous_or_divergent_payloads(tmp_p
     reject(
         lambda payload: payload["model_state_dict"].__setitem__(
             "lm_head.weight",
+            payload["model_state_dict"]["lm_head.weight"].to_sparse(),
+        ),
+        "layout",
+    )
+    reject(
+        lambda payload: payload["model_state_dict"].__setitem__(
+            "lm_head.weight",
             payload["model_state_dict"]["lm_head.weight"].clone().add_(1.0),
         ),
         "byte-equal",
     )
+    reject(
+        lambda payload: (
+            payload["model_state_dict"].__setitem__(
+                "token_embedding.weight",
+                torch.zeros_like(payload["model_state_dict"]["token_embedding.weight"]),
+            ),
+            payload["model_state_dict"].__setitem__(
+                "lm_head.weight",
+                -torch.zeros_like(payload["model_state_dict"]["lm_head.weight"]),
+            ),
+        ),
+        "byte-equal",
+    )
+
+    nan_payload = {
+        "model_state_dict": dict(checkpoint["model_state_dict"]),
+        "config": dict(checkpoint["config"]),
+        "parameter_count": checkpoint["parameter_count"],
+        "metadata": dict(checkpoint["metadata"]),
+    }
+    nan_weight = nan_payload["model_state_dict"]["token_embedding.weight"].clone()
+    nan_weight[0, 0] = float("nan")
+    nan_payload["model_state_dict"]["token_embedding.weight"] = nan_weight
+    nan_payload["model_state_dict"]["lm_head.weight"] = nan_weight.clone()
+    nan_path = tmp_path / "matching_nan_payload.pt"
+    torch.save(nan_payload, nan_path)
+    assert validate_tied_checkpoint_payload(torch.load(nan_path, map_location="cpu", weights_only=True)).model_protocol_revision == TIED_MODEL_PROTOCOL_REVISION
     reject(lambda payload: payload.__setitem__("unexpected", True), "schema")
 
 
@@ -1127,7 +1162,7 @@ def test_d2_current_configuration_and_record_hashes_are_exact(monkeypatch: pytes
         "array_eval64": "8d504dd63ad2538aedc8195a4f3c0729ed38ec95a078b9c9895fbf93cf8c173a",
     }
     expected_configuration = {
-        "protocol_revision": "phase8_tied_io_v1",
+        "model_protocol_revision": "phase8_tied_io_v1",
         "embedding_weight_tying": True,
         "device": "cuda:0",
         "families": ["hex_copy", "named_value_json", "boolean_json", "array_json"],
@@ -1183,6 +1218,8 @@ def test_d2_current_manifest_summary_terminal_and_cell_schemas_are_exact(
     assert set(summary_data) == set(sf.CURRENT_SUMMARY_KEYS)
     assert set(terminal_data) == set(sf.CURRENT_TERMINAL_KEYS)
     assert all(set(cell) == set(sf.CURRENT_CELL_KEYS) for cell in manifest_data["cells"])
+    assert "protocol_revision" not in manifest_data["configuration"]
+    assert manifest_data["configuration"]["model_protocol_revision"] == TIED_MODEL_PROTOCOL_REVISION
 
     bad_cell = dict(_passing_feasibility_cells()[0])
     bad_cell.pop("embedding_weight_tying")
@@ -1197,6 +1234,19 @@ def test_d2_current_manifest_summary_terminal_and_cell_schemas_are_exact(
     sf.validate_cell_artifact_schema([historical_cell], require_pass=False, historical=True)
     with pytest.raises(ValueError, match="exact protocol schema"):
         sf.validate_cell_artifact_schema([{**historical_cell, "embedding_weight_tying": False}], require_pass=False, historical=True)
+
+    manifest_data = json.loads(manifest.read_text())
+    legacy_alias_configuration = dict(sf.frozen_configuration())
+    legacy_alias_configuration["protocol_revision"] = legacy_alias_configuration.pop("model_protocol_revision")
+    manifest_data["configuration"] = legacy_alias_configuration
+    sf.write_json(manifest, manifest_data)
+    _rewrite_terminal_manifest_sha(root, "DONE")
+    with pytest.raises(ValueError, match="configuration"):
+        sf.validate_feasibility_root_artifacts(root, require_passing=True)
+
+    manifest_data["configuration"] = sf.frozen_configuration()
+    sf.write_json(manifest, manifest_data)
+    _rewrite_terminal_manifest_sha(root, "DONE")
 
     manifest_data = json.loads(manifest.read_text())
     manifest_data["unexpected"] = True
@@ -1293,7 +1343,8 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
     root = Path("artifacts/phase8_toy_lm_bridge/feasibility_005")
     predecessors = tuple(Path(path) for path in sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS)
     diagnostic_root = Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT)
-    exact_env = dict(sf.FEASIBILITY_REQUIRED_ENV)
+    for key, value in sf.FEASIBILITY_REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
     monkeypatch.setattr(sf, "current_environment_dict", lambda: dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV))
     monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: sf.feasibility_exact_argv(root, predecessors, diagnostic_root))
 
@@ -1303,7 +1354,6 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
         predecessor_roots=predecessors,
         predecessor_selections=(),
         decision_diagnostic_root=diagnostic_root,
-        environ=exact_env,
     )
 
     for bad_device in ("cpu", "cuda"):
@@ -1314,7 +1364,6 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
                 predecessor_roots=predecessors,
                 predecessor_selections=(),
                 decision_diagnostic_root=diagnostic_root,
-                environ=exact_env,
             )
     with pytest.raises(ValueError, match="predecessor selections"):
         sf.validate_feasibility_cli_contract(
@@ -1323,7 +1372,6 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
             predecessor_roots=predecessors,
             predecessor_selections=(Path("artifacts/phase8_toy_lm_bridge/feasibility_selection_001.json"),),
             decision_diagnostic_root=diagnostic_root,
-            environ=exact_env,
         )
     with pytest.raises(ValueError, match="root"):
         sf.validate_feasibility_cli_contract(
@@ -1332,7 +1380,6 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
             predecessor_roots=predecessors,
             predecessor_selections=(),
             decision_diagnostic_root=diagnostic_root,
-            environ=exact_env,
         )
     with pytest.raises(ValueError, match="predecessor roots"):
         sf.validate_feasibility_cli_contract(
@@ -1341,7 +1388,6 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
             predecessor_roots=tuple(reversed(predecessors)),
             predecessor_selections=(),
             decision_diagnostic_root=diagnostic_root,
-            environ=exact_env,
         )
     with pytest.raises(ValueError, match="decision diagnostic"):
         sf.validate_feasibility_cli_contract(
@@ -1350,8 +1396,8 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
             predecessor_roots=predecessors,
             predecessor_selections=(),
             decision_diagnostic_root=Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_002"),
-            environ=exact_env,
         )
+    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
     with pytest.raises(ValueError, match="PYTHONPATH"):
         sf.validate_feasibility_cli_contract(
             device="cuda:0",
@@ -1359,8 +1405,8 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
             predecessor_roots=predecessors,
             predecessor_selections=(),
             decision_diagnostic_root=diagnostic_root,
-            environ={**exact_env, "PYTHONPATH": str(REPO_ROOT)},
         )
+    monkeypatch.setenv("PYTHONPATH", ".")
     monkeypatch.setattr(sf, "current_environment_dict", lambda: {**sf.FEASIBILITY_REQUIRED_RUNTIME_ENV, "gpu": "different"})
     with pytest.raises(ValueError, match="environment dictionary"):
         sf.validate_feasibility_cli_contract(
@@ -1369,7 +1415,6 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
             predecessor_roots=predecessors,
             predecessor_selections=(),
             decision_diagnostic_root=diagnostic_root,
-            environ=exact_env,
         )
 
     monkeypatch.setattr(sf, "current_environment_dict", lambda: dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV))
@@ -1381,7 +1426,6 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
             predecessor_roots=predecessors,
             predecessor_selections=(),
             decision_diagnostic_root=diagnostic_root,
-            environ=exact_env,
         )
     with pytest.raises(ValueError, match="main\\(argv"):
         sf.main([
@@ -1396,6 +1440,36 @@ def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run
         ])
 
 
+def test_d2_run_current_suite_direct_import_rejects_before_tmp_or_model_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    root = tmp_path / "feasibility_005"
+    predecessors = tuple(tmp_path / f"feasibility_{index:03d}" for index in range(1, 5))
+    diagnostic_root = tmp_path / "feasibility_diagnostic_001"
+
+    for name in (
+        "validate_current_run_root_contract",
+        "shallow_current_run_allowed_paths",
+        "capture_source_provenance",
+        "validate_feasibility_cli_contract",
+        "build_model",
+    ):
+        monkeypatch.setattr(sf, name, lambda *args, _name=name, **kwargs: (_ for _ in ()).throw(AssertionError(f"{_name} ran before real main gate")))
+
+    with pytest.raises(ValueError, match="real __main__"):
+        sf.run_current_suite(
+            root,
+            predecessors,
+            (),
+            device="cuda:0",
+            decision_diagnostic_root=diagnostic_root,
+        )
+    assert not root.exists()
+    assert not root.with_name(root.name + ".tmp").exists()
+
+
 def test_d2_record_hash_mismatch_stops_before_model_construction_and_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1406,6 +1480,8 @@ def test_d2_record_hash_mismatch_stops_before_model_construction_and_output(
     predecessors = tuple(tmp_path / f"feasibility_{index:03d}" for index in range(1, 5))
     diagnostic_root = tmp_path / "feasibility_diagnostic_001"
 
+    monkeypatch.setattr(sf, "require_feasibility_real_main_context", lambda: events.append("main_context"))
+    monkeypatch.setattr(sf, "validate_feasibility_cli_contract", lambda **kwargs: events.append("cli"))
     monkeypatch.setattr(sf, "validate_current_run_root_contract", lambda *args: events.append("root_contract"))
     monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: events.append("shallow") or set())
     monkeypatch.setattr(
@@ -1413,7 +1489,6 @@ def test_d2_record_hash_mismatch_stops_before_model_construction_and_output(
         "capture_source_provenance",
         lambda *args, **kwargs: events.append("clean") or sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
     )
-    monkeypatch.setattr(sf, "validate_feasibility_environment", lambda **kwargs: events.append("env"))
     monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: events.append("backend"))
 
     def hash_mismatch() -> dict[str, str]:
@@ -1429,10 +1504,8 @@ def test_d2_record_hash_mismatch_stops_before_model_construction_and_output(
             (),
             device="cuda:0",
             decision_diagnostic_root=diagnostic_root,
-            environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
-            environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
         )
-    assert events == ["root_contract", "shallow", "clean", "env", "backend", "record_hashes"]
+    assert events == ["main_context", "cli", "root_contract", "shallow", "clean", "backend", "record_hashes"]
     assert not root.exists()
     assert not root.with_name(root.name + ".tmp").exists()
 
@@ -1447,6 +1520,8 @@ def test_d2_shallow_inventory_then_source_cleanliness_precedes_deep_validation(
     diagnostic_root = Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT)
     events: list[str] = []
 
+    monkeypatch.setattr(sf, "require_feasibility_real_main_context", lambda: events.append("main_context"))
+    monkeypatch.setattr(sf, "validate_feasibility_cli_contract", lambda **kwargs: events.append("cli"))
     monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: events.append("shallow") or set())
 
     def dirty_source(*args: object, **kwargs: object) -> object:
@@ -1455,7 +1530,6 @@ def test_d2_shallow_inventory_then_source_cleanliness_precedes_deep_validation(
 
     monkeypatch.setattr(sf, "capture_source_provenance", dirty_source)
     for name in (
-        "validate_feasibility_environment",
         "configure_feasibility_deterministic_backend",
         "validate_feasibility_record_hashes",
         "validate_feasibility_root_artifacts",
@@ -1473,10 +1547,8 @@ def test_d2_shallow_inventory_then_source_cleanliness_precedes_deep_validation(
             (),
             device="cuda:0",
             decision_diagnostic_root=diagnostic_root,
-            environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
-            environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
         )
-    assert events == ["shallow", "clean"]
+    assert events == ["main_context", "cli", "shallow", "clean"]
     assert not (REPO_ROOT / root).exists()
     assert not (REPO_ROOT / root.with_name(root.name + ".tmp")).exists()
 
@@ -1486,7 +1558,6 @@ def test_d2_shallow_inventory_then_source_cleanliness_precedes_deep_validation(
         "capture_source_provenance",
         lambda *args, **kwargs: events.append("clean") or sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
     )
-    monkeypatch.setattr(sf, "validate_feasibility_environment", lambda **kwargs: events.append("env"))
     monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: events.append("backend"))
     monkeypatch.setattr(sf, "validate_feasibility_record_hashes", lambda: events.append("record_hashes") or dict(sf.FEASIBILITY_RECORD_HASHES))
     monkeypatch.setattr(sf, "validate_feasibility_root_artifacts", lambda predecessor_root, **kwargs: events.append(f"deep:{predecessor_root.name}"))
@@ -1503,13 +1574,12 @@ def test_d2_shallow_inventory_then_source_cleanliness_precedes_deep_validation(
             (),
             device="cuda:0",
             decision_diagnostic_root=diagnostic_root,
-            environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
-            environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
         )
     assert events == [
+        "main_context",
+        "cli",
         "shallow",
         "clean",
-        "env",
         "backend",
         "record_hashes",
         "deep:feasibility_001",
@@ -1558,6 +1628,10 @@ def test_d2_run_current_suite_uses_cpu_initialized_tied_models_and_all_24_fake_c
         executed: list[tuple[str, str, int]] = []
         models: list[FakeModel] = []
         original_build_manifest = sf.build_manifest
+        for key, value in sf.FEASIBILITY_REQUIRED_ENV.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr(sf, "require_feasibility_real_main_context", lambda: None)
+        monkeypatch.setattr(sf, "validate_feasibility_cli_contract", lambda **kwargs: None)
         monkeypatch.setattr(sf, "validate_current_run_root_contract", lambda *args: None)
         monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: set())
         monkeypatch.setattr(
@@ -1565,7 +1639,6 @@ def test_d2_run_current_suite_uses_cpu_initialized_tied_models_and_all_24_fake_c
             "capture_source_provenance",
             lambda *args, **kwargs: sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
         )
-        monkeypatch.setattr(sf, "validate_feasibility_environment", lambda **kwargs: None)
         monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: None)
         monkeypatch.setattr(sf, "validate_feasibility_record_hashes", lambda: dict(sf.FEASIBILITY_RECORD_HASHES))
         monkeypatch.setattr(sf, "validate_feasibility_root_artifacts", lambda *args, **kwargs: None)
@@ -1630,8 +1703,6 @@ def test_d2_run_current_suite_uses_cpu_initialized_tied_models_and_all_24_fake_c
         (),
         device="cuda:0",
         decision_diagnostic_root=diagnostic_root,
-        environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
-        environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
     )
     assert len(executed) == len(sf.FAMILIES) * len(sf.MODEL_SIZES) * len(sf.SEEDS) == 24
     assert all(model.transfers == ["cuda:0"] for model in models)
@@ -1646,8 +1717,6 @@ def test_d2_run_current_suite_uses_cpu_initialized_tied_models_and_all_24_fake_c
         (),
         device="cuda:0",
         decision_diagnostic_root=diagnostic_root,
-        environ=dict(sf.FEASIBILITY_REQUIRED_ENV),
-        environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
     )
     assert len(executed) == 24
     assert (root / "FAILED.json").exists()

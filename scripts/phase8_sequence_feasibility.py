@@ -1259,7 +1259,7 @@ def frozen_diagnostic_configuration() -> dict[str, object]:
 
 def frozen_configuration() -> dict[str, object]:
     return {
-        "protocol_revision": TIED_MODEL_PROTOCOL_REVISION,
+        "model_protocol_revision": TIED_MODEL_PROTOCOL_REVISION,
         "embedding_weight_tying": True,
         "device": FEASIBILITY_REQUIRED_DEVICE,
         "families": list(FAMILIES),
@@ -2068,12 +2068,11 @@ def current_environment_dict() -> dict[str, object]:
     }
 
 
-def current_deterministic_flags(environ: dict[str, str] | None = None) -> dict[str, object]:
-    actual_env = os.environ if environ is None else environ
+def current_deterministic_flags() -> dict[str, object]:
     return {
-        "PYTHONDONTWRITEBYTECODE": actual_env.get("PYTHONDONTWRITEBYTECODE"),
-        "CUBLAS_WORKSPACE_CONFIG": actual_env.get("CUBLAS_WORKSPACE_CONFIG"),
-        "PYTHONPATH": actual_env.get("PYTHONPATH"),
+        "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
+        "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
+        "PYTHONPATH": os.environ.get("PYTHONPATH"),
         "torch_deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
         "cudnn_deterministic": torch.backends.cudnn.deterministic,
         "cudnn_benchmark": torch.backends.cudnn.benchmark,
@@ -2091,13 +2090,11 @@ def configure_feasibility_deterministic_backend() -> None:
     validate_current_deterministic_flags(current_deterministic_flags())
 
 
-def validate_feasibility_environment(environ: dict[str, str] | None = None, environment: dict[str, object] | None = None) -> None:
-    actual_env = os.environ if environ is None else environ
+def validate_feasibility_environment() -> None:
     for key, expected in FEASIBILITY_REQUIRED_ENV.items():
-        if actual_env.get(key) != expected:
+        if os.environ.get(key) != expected:
             raise ValueError(f"run environment {key} must exactly equal {expected!r}.")
-    actual_environment = current_environment_dict() if environment is None else environment
-    if actual_environment != FEASIBILITY_REQUIRED_RUNTIME_ENV:
+    if current_environment_dict() != FEASIBILITY_REQUIRED_RUNTIME_ENV:
         raise ValueError("run environment dictionary does not match the frozen cuda:0 A800 environment.")
 
 
@@ -3570,6 +3567,11 @@ def require_diagnostic_real_main_context() -> None:
         raise ValueError("diagnose-failure must execute from this file's real __main__ process context.")
 
 
+def require_feasibility_real_main_context() -> None:
+    if __name__ != "__main__":
+        raise ValueError("run must execute from this file's real __main__ process context.")
+
+
 def diagnostic_exact_command(
     output_root: Path,
     predecessor_diagnostic_roots: Sequence[Path],
@@ -3644,7 +3646,6 @@ def validate_feasibility_cli_contract(
     predecessor_roots: Sequence[Path],
     predecessor_selections: Sequence[Path],
     decision_diagnostic_root: Path,
-    environ: dict[str, str] | None = None,
 ) -> None:
     if device != FEASIBILITY_REQUIRED_DEVICE:
         raise ValueError("run only supports device string cuda:0.")
@@ -3660,7 +3661,7 @@ def validate_feasibility_cli_contract(
         diagnostic_kernel_argv(),
         feasibility_exact_argv(root, predecessor_roots, decision_diagnostic_root),
     )
-    validate_feasibility_environment(environ=environ)
+    validate_feasibility_environment()
 
 
 def reused_feasibility_cell_binding(input_root: Path, family: str, model_size: str, seed: int) -> dict[str, object]:
@@ -4971,13 +4972,18 @@ def run_current_suite(
     *,
     device: str,
     decision_diagnostic_root: Path,
-    environ: dict[str, str] | None = None,
-    environment: dict[str, object] | None = None,
 ) -> None:
+    require_feasibility_real_main_context()
+    validate_feasibility_cli_contract(
+        device=device,
+        root=root,
+        predecessor_roots=predecessor_roots,
+        predecessor_selections=predecessor_selections,
+        decision_diagnostic_root=decision_diagnostic_root,
+    )
     validate_current_run_root_contract(root, predecessor_roots, predecessor_selections, decision_diagnostic_root)
     shallow_allowed_paths = shallow_current_run_allowed_paths(predecessor_roots, decision_diagnostic_root)
     source_snapshot = capture_source_provenance(root, predecessor_roots, predecessor_selections, allowed_paths=shallow_allowed_paths)
-    validate_feasibility_environment(environ=environ, environment=environment)
     configure_feasibility_deterministic_backend()
     record_hashes = validate_feasibility_record_hashes()
     for predecessor_root in predecessor_roots:
@@ -5068,7 +5074,7 @@ def run_current_suite(
                 source_snapshot=source_snapshot,
                 decision_diagnostic=decision_diagnostic_binding,
                 exact_command=feasibility_exact_command(root, predecessor_roots, decision_diagnostic_root),
-                deterministic_flags=current_deterministic_flags(environ),
+                deterministic_flags=current_deterministic_flags(),
                 record_hashes=record_hashes,
             )
             publish_current_feasibility_root_or_leave_incomplete(
@@ -5104,7 +5110,7 @@ def run_current_suite(
                 source_snapshot=source_snapshot,
                 decision_diagnostic=decision_diagnostic_binding,
                 exact_command=feasibility_exact_command(root, predecessor_roots, decision_diagnostic_root),
-                deterministic_flags=current_deterministic_flags(environ),
+                deterministic_flags=current_deterministic_flags(),
                 record_hashes=record_hashes,
             )
             publish_current_feasibility_root_or_leave_incomplete(
@@ -6811,7 +6817,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             predecessor_roots=predecessor_roots,
             predecessor_selections=predecessor_selections,
             decision_diagnostic_root=decision_diagnostic_root,
-            environ=os.environ,
         )
         run_current_suite(
             root,
@@ -6819,7 +6824,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             predecessor_selections,
             device=args.device,
             decision_diagnostic_root=decision_diagnostic_root,
-            environ=os.environ,
         )
         return 0
     if args.command == "validate-selection":

@@ -481,6 +481,10 @@ The language-model head remains bias-free, but `lm_head.weight` is the same
 bias-free `lm_head` in that order, then assigns `lm_head.weight =
 token_embedding.weight`. The initialized token embedding is the retained tensor; the
 independent head initialization is consumed only to preserve the frozen RNG stream.
+Tied checkpoint validation must reject any serialized duplicate
+`token_embedding.weight`/`lm_head.weight` pair whose dtype, shape, or layout differs,
+then require exact contiguous `uint8` byte equality; numeric equality alone is not a
+valid tie proof.
 
 The small configuration is:
 
@@ -672,11 +676,13 @@ PYTHONDONTWRITEBYTECODE=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python sc
 ```
 
 Before creating `feasibility_005.tmp`, constructing a model, or generating a training
-schedule, the runner must enforce exact real argv, exact `--device cuda:0`, no
-predecessor selections, the required environment variables, deterministic backend
-flags, and the frozen A800 CUDA environment dictionary recorded by
+schedule, the runner must execute from the real `__main__` process context and
+enforce exact real argv, exact `--device cuda:0`, no predecessor selections, the
+required environment variables, deterministic backend flags, and the frozen A800
+CUDA environment dictionary recorded by
 `feasibility_004` and the accepted D1 diagnostic. CPU fallback, implicit `cuda`, and
-any alternate device index are forbidden.
+any alternate device index are forbidden; import-time invocation cannot create a
+normative `feasibility_005` root.
 
 For source cleanliness, no tracked or staged change is allowed. A later numbered run
 may exclude from untracked-file checks only exact earlier finalized Phase 8 evidence

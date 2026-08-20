@@ -47,7 +47,12 @@ Do not modify corpus semantics or any other file.
   dropout zero, input/output weight tying, explicit
   `embedding_weight_tying=true` and
   `model_protocol_revision="phase8_tied_io_v1"` fields, and parameter-count
-  recording. The exact tied counts are `133120` for small and `859392` for medium.
+  recording. The feasibility manifest `configuration` uses exactly the
+  `model_protocol_revision` key; the legacy `protocol_revision` alias is invalid.
+  The exact tied counts are `133120` for small and `859392` for medium.
+- Validate tied checkpoints fail-closed: serialized `token_embedding.weight` and
+  `lm_head.weight` entries must first match dtype, shape, and layout, then match as
+  contiguous `uint8` bytes. Numeric equality is not sufficient.
 - Implement causal response-only shifted labels, exact AdamW settings, gradient
   clipping, deterministic RNG/backend setup, and greedy decoding bounded by the
   master protocol.
@@ -58,7 +63,10 @@ Do not modify corpus semantics or any other file.
   0–2, 1500 steps, and the independent `52/64` pass requirement for every cell.
 - Make the feasibility launcher refuse overwrite, reject Phase 8 scientific markers,
   retain per-record generations/checkpoints, publish atomic terminal status, and build
-  a checksum-bound manifest at the immutable numbered root supplied by `main`.
+  a checksum-bound manifest at the immutable numbered root supplied by `main`. The
+  formal `run_current_suite` path must execute only from the real `__main__` process
+  with the exact kernel argv, `os.environ`, and runtime environment; import-time test
+  seams cannot create a normative `feasibility_005` root.
 - Preserve failed roots and require the next numbered root for every retry or repair.
   Provide pure validation for a separate immutable selection record binding a passing
   root/manifest, exact source/configuration, per-cell counts, review verdict, and the
