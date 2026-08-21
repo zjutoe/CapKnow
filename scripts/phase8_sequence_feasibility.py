@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import contextmanager
 import ctypes
 from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
@@ -20,7 +21,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Iterator, Sequence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -31,6 +32,8 @@ import torch
 from capability_certificate_lab.lm_bridge import corpus_generator as cg
 from capability_certificate_lab.lm_bridge.model import (
     TIED_MODEL_PROTOCOL_REVISION,
+    ToyCausalTransformer,
+    TransformerConfig,
     build_historical_model,
     build_model,
     legacy_serialized_config,
@@ -50,6 +53,7 @@ from capability_certificate_lab.lm_bridge.train import (
     MODEL_RNG_OFFSET,
     TextRecord,
     WEIGHT_DECAY,
+    contiguous_uint8_bytes,
     deterministic_batch_indices,
     encode_record_batch,
     make_optimizer,
@@ -284,6 +288,196 @@ CURRENT_TERMINAL_KEYS = frozenset({
     "deterministic_flags",
     "record_hashes",
     "cells",
+})
+POSTMORTEM_ROOT_RE = re.compile(r"^feasibility_postmortem_(\d{3})$")
+POSTMORTEM_TEMP_ROOT_RE = re.compile(r"^feasibility_postmortem_(\d{3})\.tmp$")
+POSTMORTEM_SCHEMA_VERSION = "phase8_feasibility_postmortem_v1"
+POSTMORTEM_ARTIFACT_CLASS = "non_evidence_feasibility_postmortem"
+POSTMORTEM_REQUIRED_INPUT_ROOT = FEASIBILITY_REQUIRED_ROOT
+POSTMORTEM_REQUIRED_OUTPUT_ROOT = "artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001"
+POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT = "336afdc7cb079086998a0db527f544f16b68950c"
+POSTMORTEM_PROPOSAL_PATH = "phase8/Task_010C_D3_Feasibility_005_Postmortem_Proposal.md"
+POSTMORTEM_PROPOSAL_BLOB = "1c52056e6579262045d81315224132f8897bb9a3"
+POSTMORTEM_INPUT_SOURCE_COMMIT = "2dc8c50fab9ece27a07eb0dc04021b78de52895c"
+POSTMORTEM_INPUT_CHECKSUMS = {
+    "manifest.json": "51b43e3f3eba98b31c3574a9720c0df3f8e2a72c94d22730d70eb8682e8f516b",
+    "summary.json": "bfea56b52dfd1ffe094feb0774ce7895f4dd703770451aeda4d899aafdfef785",
+    "FAILED.json": "6ac97f081586ca7fb8d7d8297dae4e0c7a3d0314a0567bbc493fce1b5dcc4c08",
+}
+POSTMORTEM_ROW_COUNTS = {
+    "teacher_forced_rows": 13824,
+    "cell_metrics": 24,
+    "error_taxonomy": 1536,
+}
+POSTMORTEM_TEACHER_ROW_KEYS = frozenset({
+    "schema_version",
+    "family",
+    "model_size",
+    "seed",
+    "split",
+    "record_index",
+    "template_id",
+    "operand_id",
+    "batch_index",
+    "row_within_batch",
+    "selected_token_count",
+    "correct_token_count",
+    "sequence_exact",
+    "nll_numerator_hex",
+    "checkpoint_path",
+    "checkpoint_sha256",
+})
+POSTMORTEM_TEACHER_AGGREGATE_KEYS = frozenset({
+    "record_count",
+    "sequence_exact_numerator",
+    "selected_token_count",
+    "correct_token_count",
+    "nll_numerator_hex",
+    "nll_per_token_hex",
+})
+POSTMORTEM_CELL_KEYS = frozenset({
+    "schema_version",
+    "family",
+    "model_size",
+    "seed",
+    "checkpoint_path",
+    "checkpoint_sha256",
+    "generation_path",
+    "generation_sha256",
+    "checkpoint_metadata",
+    "train_teacher_forced",
+    "eval_teacher_forced",
+    "retained_greedy_exact",
+    "paired_eval_exact",
+})
+POSTMORTEM_CHECKPOINT_METADATA_KEYS = frozenset({
+    "family",
+    "model_size",
+    "seed",
+    "training_steps",
+    "training_loss",
+    "training_accuracy",
+})
+POSTMORTEM_TAXONOMY_KEYS = frozenset({
+    "schema_version",
+    "family",
+    "model_size",
+    "seed",
+    "record_index",
+    "generation_path",
+    "generation_sha256",
+    "common",
+    "named",
+    "array",
+})
+POSTMORTEM_COMMON_KEYS = frozenset({
+    "prompt",
+    "expected_response",
+    "generated_response",
+    "raw_token_ids",
+    "generation_error",
+    "greedy_exact",
+    "decode_valid",
+    "has_eos",
+    "hits_generation_cap",
+    "hits_context_cap",
+    "generation_token_count",
+    "generation_utf8_bytes",
+    "target_utf8_bytes",
+    "length_matches",
+    "hamming_distance",
+    "edit_distance",
+    "first_error",
+})
+POSTMORTEM_NAMED_KEYS = frozenset({
+    "surface_source",
+    "operand_source",
+    "valid_json_string",
+    "valid_named_grammar",
+    "target_prefix",
+    "occurs_in_prompt",
+    "exact_target_value",
+    "exact_distractor_value",
+    "suffix_positional_correct",
+    "suffix_positional_total",
+    "suffix_hamming_distance",
+    "suffix_edit_distance",
+    "suffix_first_error",
+})
+POSTMORTEM_ARRAY_KEYS = frozenset({
+    "comparison_source",
+    "training_steps",
+    "target_item_count",
+    "valid_json_syntax",
+    "valid_array_schema",
+    "correct_item_count",
+    "positional_exact_count",
+    "positional_denominator",
+    "missing_items",
+    "extra_items",
+    "all_items_copied",
+    "all_items_exact",
+    "first_wrong_item_position",
+})
+POSTMORTEM_SUMMARY_KEYS = frozenset({
+    "schema_version",
+    "artifact_class",
+    "input_binding",
+    "proposal_binding",
+    "implementation_binding",
+    "configuration",
+    "row_counts",
+    "cells",
+    "named_aggregates",
+    "array_aggregates",
+    "interpretation_limits",
+    "terminal_status",
+})
+POSTMORTEM_MANIFEST_KEYS = frozenset({
+    "schema_version",
+    "artifact_class",
+    "input_binding",
+    "proposal_binding",
+    "implementation_binding",
+    "runner_path",
+    "exact_command",
+    "environment",
+    "deterministic_flags",
+    "rng_state_contract",
+    "configuration",
+    "row_counts",
+    "file_inventory",
+    "terminal_status",
+})
+POSTMORTEM_DONE_KEYS = frozenset({
+    "schema_version",
+    "status",
+    "manifest_path",
+    "manifest_sha256",
+    "input_manifest_sha256",
+    "row_counts",
+})
+POSTMORTEM_INPUT_BINDING_KEYS = frozenset({
+    "root",
+    "source_commit",
+    "manifest_path",
+    "manifest_sha256",
+    "summary_path",
+    "summary_sha256",
+    "terminal_path",
+    "terminal_sha256",
+    "configuration",
+    "record_hashes",
+    "file_inventory",
+    "cells",
+})
+POSTMORTEM_PROPOSAL_BINDING_KEYS = frozenset({"commit", "path", "blob"})
+POSTMORTEM_IMPLEMENTATION_BINDING_KEYS = frozenset({"commit", "runner_path", "runner_blob"})
+POSTMORTEM_RNG_CONTRACT_KEYS = frozenset({
+    "record_reconstruction_global_state_unchanged",
+    "constructor_scope_restored",
+    "post_load_state_unchanged",
+    "post_inference_state_unchanged",
 })
 DIAGNOSTIC_RECORD_HASHES = {
     "named_train512": "9b55084d281a9420e12a1b6a35c3eb199abd74f4b766a14a833e6241c59564b8",
@@ -6796,6 +6990,1954 @@ def validate_source_provenance(value: object, source_commit: str, allowed_paths:
             raise ValueError(f"source_provenance.ignored_inputs[{index}].bytes must be a non-negative integer.")
 
 
+def require_exact_mapping(value: object, expected_keys: frozenset[str], field_name: str) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != set(expected_keys):
+        raise ValueError(f"{field_name} must use the exact closed schema.")
+    return value
+
+
+def require_finite_json_number(value: object, field_name: str) -> int | float:
+    if type(value) not in {int, float} or not math.isfinite(float(value)):
+        raise ValueError(f"{field_name} must be a finite JSON number.")
+    return value
+
+
+def require_decimal_histogram(value: object, field_name: str) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object histogram.")
+    result: dict[str, int] = {}
+    for key, count in value.items():
+        if not isinstance(key, str) or re.fullmatch(r"(0|[1-9][0-9]*)", key) is None:
+            raise ValueError(f"{field_name} keys must be canonical non-negative decimal integers.")
+        if type(count) is not int or count <= 0:
+            raise ValueError(f"{field_name} values must be positive JSON integers.")
+        result[key] = count
+    return result
+
+
+def sparse_decimal_histogram(values: Iterable[object]) -> dict[str, int]:
+    observed: list[int] = []
+    for value in values:
+        if value is None:
+            continue
+        if type(value) is not int or value < 0:
+            raise ValueError("Postmortem sparse histogram values must be non-negative JSON integers or null.")
+        observed.append(value)
+    return {str(key): count for key, count in sorted(Counter(observed).items()) if count > 0}
+
+
+def require_postmortem_root_path_string(value: object, field_name: str, *, temp: bool = False) -> str:
+    raw = require_exact_str(value, field_name)
+    if not raw:
+        raise ValueError(f"{field_name} must be a non-empty canonical path string.")
+    if "\\" in raw or "//" in raw:
+        raise ValueError(f"{field_name} must use canonical path spelling.")
+    normalized = PurePosixPath(raw).as_posix()
+    if raw != normalized or any(part in {".", ".."} for part in PurePosixPath(raw).parts):
+        raise ValueError(f"{field_name} must use canonical path spelling.")
+    pattern = POSTMORTEM_TEMP_ROOT_RE if temp else POSTMORTEM_ROOT_RE
+    match = pattern.match(Path(raw).name)
+    if match is None:
+        raise ValueError("Postmortem root basename must be immutable numbered form feasibility_postmortem_NNN.")
+    if int(match.group(1)) != 1:
+        raise ValueError("D3 postmortem forbids retry or alternate roots; only feasibility_postmortem_001 is authorized.")
+    return raw
+
+
+def require_postmortem_artifact_location(path: Path, field_name: str, *, temp: bool = False) -> None:
+    require_postmortem_root_path_string(str(path), field_name, temp=temp)
+    parent_path = ARTIFACT_PARENT if ARTIFACT_PARENT.is_absolute() else REPO_ROOT / ARTIFACT_PARENT
+    artifact_path = path if path.is_absolute() else REPO_ROOT / path
+    reject_existing_symlink_component(parent_path, f"{field_name} artifact parent")
+    reject_existing_symlink_component(artifact_path, field_name)
+    parent = parent_path.resolve(strict=False)
+    resolved = artifact_path.resolve(strict=False)
+    if resolved.parent != parent:
+        raise ValueError(f"{field_name} must be located directly under {ARTIFACT_PARENT.as_posix()}.")
+
+
+def postmortem_expected_predecessor_bindings() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for relative_path in FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS:
+        expected = HISTORICAL_FEASIBILITY_ROOTS[Path(relative_path).name]
+        rows.append(
+            {
+                "path": relative_path,
+                "terminal_state": expected["terminal"].removesuffix(".json"),
+                "terminal_sha256": expected["terminal_sha256"],
+                "manifest_sha256": expected["manifest_sha256"],
+            }
+        )
+    return rows
+
+
+def validate_postmortem_current_cells_shallow(cells: object) -> tuple[dict[str, object], ...]:
+    if not isinstance(cells, list):
+        raise ValueError("Postmortem input cells must be a JSON list.")
+    expected_sequence = current_feasibility_cell_identities()
+    if len(cells) != len(expected_sequence):
+        raise ValueError("Postmortem input must bind exactly 24 feasibility_005 cells.")
+    parsed: list[dict[str, object]] = []
+    for index, (cell, expected_identity) in enumerate(zip(cells, expected_sequence, strict=True)):
+        if not isinstance(cell, dict) or set(cell) != CURRENT_CELL_KEYS:
+            raise ValueError("Postmortem input cells must use the exact tied feasibility schema.")
+        family = require_exact_str(cell.get("family"), f"cells[{index}].family")
+        model_size = require_exact_str(cell.get("model_size"), f"cells[{index}].model_size")
+        seed = require_exact_int(cell.get("seed"), f"cells[{index}].seed")
+        if (family, model_size, seed) != expected_identity:
+            raise ValueError("Postmortem input cells must retain the frozen 24-cell order.")
+        eval_count = require_exact_int(cell.get("eval_count"), f"cells[{index}].eval_count")
+        exact_matches = require_exact_int(cell.get("exact_matches"), f"cells[{index}].exact_matches")
+        passed = require_exact_bool(cell.get("passed"), f"cells[{index}].passed")
+        if eval_count != EVAL_RECORDS_PER_FAMILY:
+            raise ValueError("Postmortem input cells must each bind exactly 64 eval rows.")
+        if not 0 <= exact_matches <= EVAL_RECORDS_PER_FAMILY:
+            raise ValueError("Postmortem input cell exact_matches out of range.")
+        if passed is not (exact_matches >= PASS_THRESHOLD):
+            raise ValueError("Postmortem input cell pass flag does not match the fixed 52/64 threshold.")
+        if cell.get("embedding_weight_tying") is not True:
+            raise ValueError("Postmortem input cells must bind embedding_weight_tying=true.")
+        if cell.get("model_protocol_revision") != TIED_MODEL_PROTOCOL_REVISION:
+            raise ValueError("Postmortem input cells must bind phase8_tied_io_v1.")
+        parameter_count = require_exact_int(cell.get("parameter_count"), f"cells[{index}].parameter_count")
+        if parameter_count != FROZEN_PARAMETER_COUNTS[model_size]:
+            raise ValueError("Postmortem input cell parameter_count mismatch.")
+        generations_path = require_canonical_relative_path(cell.get("generations_path"), f"cells[{index}].generations_path")
+        checkpoint_path = require_canonical_relative_path(cell.get("checkpoint_path"), f"cells[{index}].checkpoint_path")
+        expected_prefix = f"{family}__{model_size}__seed{seed}"
+        if generations_path != f"{expected_prefix}/generations.jsonl":
+            raise ValueError("Postmortem input generation path does not match the frozen cell identity.")
+        if checkpoint_path != f"{expected_prefix}/checkpoint_step1500.pt":
+            raise ValueError("Postmortem input checkpoint path does not match the frozen cell identity.")
+        parsed.append(cell)
+    return tuple(parsed)
+
+
+def postmortem_exact_argv(
+    input_root: Path,
+    output_root: Path,
+    accepted_proposal_commit: str,
+) -> list[str]:
+    return [
+        "python",
+        "scripts/phase8_sequence_feasibility.py",
+        "postmortem-failure",
+        "--device",
+        FEASIBILITY_REQUIRED_DEVICE,
+        "--input-root",
+        str(input_root),
+        "--output-root",
+        str(output_root),
+        "--accepted-proposal-commit",
+        accepted_proposal_commit,
+    ]
+
+
+def postmortem_exact_command(
+    input_root: Path,
+    output_root: Path,
+    accepted_proposal_commit: str,
+) -> list[str]:
+    return [
+        "PYTHONDONTWRITEBYTECODE=1",
+        "CUBLAS_WORKSPACE_CONFIG=:4096:8",
+        "PYTHONPATH=.",
+        *postmortem_exact_argv(input_root, output_root, accepted_proposal_commit),
+    ]
+
+
+def postmortem_kernel_argv() -> list[str]:
+    cmdline = Path("/proc/self/cmdline")
+    try:
+        raw = cmdline.read_bytes()
+    except OSError as exc:
+        raise ValueError("postmortem-failure cannot authorize without Linux /proc/self/cmdline.") from exc
+    if not raw or not raw.endswith(b"\0"):
+        raise ValueError("postmortem-failure kernel argv is unavailable or malformed.")
+    parts = raw[:-1].split(b"\0")
+    if not parts or any(part == b"" for part in parts):
+        raise ValueError("postmortem-failure kernel argv is malformed.")
+    try:
+        return [os.fsdecode(part) for part in parts]
+    except UnicodeDecodeError as exc:
+        raise ValueError("postmortem-failure kernel argv is not decodable.") from exc
+
+
+def validate_postmortem_process_argv(raw_argv: Sequence[str], expected_argv: Sequence[str]) -> None:
+    if list(raw_argv) != list(expected_argv):
+        raise ValueError(f"postmortem-failure process argv must exactly match the authorized kernel command: {list(expected_argv)!r}.")
+    if any(arg in {"-O", "-OO", "-B"} or arg.startswith("-X") for arg in raw_argv):
+        raise ValueError("postmortem-failure forbids Python optimization, bytecode, or implementation flags.")
+
+
+def require_postmortem_real_main_context() -> None:
+    if __name__ != "__main__":
+        raise ValueError("postmortem-failure must execute from this file's real __main__ process context.")
+
+
+def validate_postmortem_argument_contract(
+    *,
+    device: str,
+    input_root: Path,
+    output_root: Path,
+    accepted_proposal_commit: str,
+) -> None:
+    if device != FEASIBILITY_REQUIRED_DEVICE:
+        raise ValueError("postmortem-failure only supports device string cuda:0.")
+    require_canonical_path_string(str(input_root), "input_root", ROOT_RE)
+    require_artifact_location(input_root, "input_root", ROOT_RE)
+    require_postmortem_artifact_location(output_root, "output_root")
+    if str(input_root) != POSTMORTEM_REQUIRED_INPUT_ROOT:
+        raise ValueError("postmortem-failure input root must be exactly artifacts/phase8_toy_lm_bridge/feasibility_005.")
+    if not matches_repo_artifact_path(input_root, POSTMORTEM_REQUIRED_INPUT_ROOT):
+        raise ValueError("postmortem-failure rejects copied input roots.")
+    if str(output_root) != POSTMORTEM_REQUIRED_OUTPUT_ROOT:
+        raise ValueError("postmortem-failure output root must be exactly artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001.")
+    if any(path.is_absolute() for path in (input_root, output_root)):
+        raise ValueError("postmortem-failure authorized command requires canonical repository-relative artifact paths.")
+    if accepted_proposal_commit != POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT:
+        raise ValueError("postmortem-failure accepted proposal commit mismatch.")
+
+
+def validate_new_postmortem_root(output_root: Path) -> None:
+    require_postmortem_artifact_location(output_root, "output_root")
+    if output_root.exists() or output_root.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite existing postmortem root: {output_root}")
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    require_postmortem_artifact_location(temp_root, "temporary_output_root", temp=True)
+    if temp_root.exists() or temp_root.is_symlink():
+        raise FileExistsError(f"Temporary postmortem root already exists: {temp_root}")
+
+
+def validate_postmortem_cli_contract(
+    *,
+    device: str,
+    input_root: Path,
+    output_root: Path,
+    accepted_proposal_commit: str,
+    environ: dict[str, str] | None = None,
+) -> None:
+    validate_postmortem_argument_contract(
+        device=device,
+        input_root=input_root,
+        output_root=output_root,
+        accepted_proposal_commit=accepted_proposal_commit,
+    )
+    validate_postmortem_process_argv(
+        postmortem_kernel_argv(),
+        postmortem_exact_argv(input_root, output_root, accepted_proposal_commit),
+    )
+    actual_env = os.environ if environ is None else environ
+    for key, expected_value in FEASIBILITY_REQUIRED_ENV.items():
+        if actual_env.get(key) != expected_value:
+            raise ValueError(f"postmortem-failure environment {key} must exactly equal {expected_value!r}.")
+    validate_new_postmortem_root(output_root)
+
+
+def postmortem_proposal_binding(accepted_proposal_commit: str) -> dict[str, object]:
+    if accepted_proposal_commit != POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT:
+        raise ValueError("Postmortem proposal binding commit mismatch.")
+    validate_git_commit_exists(accepted_proposal_commit)
+    actual_blob = git_output(["git", "rev-parse", f"{accepted_proposal_commit}:{POSTMORTEM_PROPOSAL_PATH}"])
+    if actual_blob != POSTMORTEM_PROPOSAL_BLOB:
+        raise ValueError("Postmortem accepted proposal blob mismatch.")
+    return {
+        "commit": accepted_proposal_commit,
+        "path": POSTMORTEM_PROPOSAL_PATH,
+        "blob": POSTMORTEM_PROPOSAL_BLOB,
+    }
+
+
+def postmortem_implementation_binding(source_snapshot: SourceSnapshot) -> dict[str, object]:
+    commit = validate_git_sha(source_snapshot.commit, "postmortem.implementation.commit")
+    validate_git_commit_exists(commit)
+    runner_path = "scripts/phase8_sequence_feasibility.py"
+    runner_blob = git_output(["git", "rev-parse", f"{commit}:{runner_path}"])
+    if not runner_blob:
+        raise ValueError("Postmortem implementation runner blob is unavailable.")
+    return {
+        "commit": commit,
+        "runner_path": runner_path,
+        "runner_blob": runner_blob,
+    }
+
+
+def rng_states_equal(
+    left: tuple[object, torch.Tensor, tuple[torch.Tensor, ...] | None],
+    right: tuple[object, torch.Tensor, tuple[torch.Tensor, ...] | None],
+) -> bool:
+    if left[0] != right[0]:
+        return False
+    if not torch.equal(left[1], right[1]):
+        return False
+    left_cuda = left[2]
+    right_cuda = right[2]
+    if left_cuda is None or right_cuda is None:
+        return left_cuda is None and right_cuda is None
+    if len(left_cuda) != len(right_cuda):
+        return False
+    return all(torch.equal(a, b) for a, b in zip(left_cuda, right_cuda, strict=True))
+
+
+def restore_torch_rng_states(states: tuple[object, torch.Tensor, tuple[torch.Tensor, ...] | None]) -> None:
+    _python_state, torch_state, cuda_states = states
+    torch.random.set_rng_state(torch_state)
+    if cuda_states is not None:
+        torch.cuda.set_rng_state_all(list(cuda_states))
+
+
+def require_rng_states_equal(
+    left: tuple[object, torch.Tensor, tuple[torch.Tensor, ...] | None],
+    right: tuple[object, torch.Tensor, tuple[torch.Tensor, ...] | None],
+    message: str,
+) -> None:
+    if not rng_states_equal(left, right):
+        raise ValueError(message)
+
+
+def configure_postmortem_deterministic_backend() -> None:
+    before = snapshot_rng_states()
+    torch.set_num_threads(1)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.mkldnn.enabled = False
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    require_rng_states_equal(before, snapshot_rng_states(), "Postmortem deterministic backend configuration changed RNG state.")
+
+
+def validate_postmortem_runtime_against_input(input_manifest: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
+    environment = current_environment_dict()
+    if environment != FEASIBILITY_REQUIRED_RUNTIME_ENV or environment != input_manifest.get("environment"):
+        raise ValueError("Postmortem runtime environment must exactly match the frozen feasibility_005 A800 environment.")
+    deterministic_flags = current_deterministic_flags()
+    validate_current_deterministic_flags(deterministic_flags)
+    if deterministic_flags != input_manifest.get("deterministic_flags"):
+        raise ValueError("Postmortem deterministic flags must exactly match the frozen feasibility_005 manifest.")
+    return environment, deterministic_flags
+
+
+def expected_tied_state_schema_without_construction(model_size: str) -> dict[str, dict[str, object]]:
+    config = transformer_config(model_size)  # type: ignore[arg-type]
+    schema: dict[str, dict[str, object]] = {
+        "token_embedding.weight": {"dtype": "torch.float32", "shape": [config.vocab_size, config.d_model], "layout": "torch.strided"},
+        "position_embedding.weight": {"dtype": "torch.float32", "shape": [config.max_seq_len, config.d_model], "layout": "torch.strided"},
+        "final_norm.weight": {"dtype": "torch.float32", "shape": [config.d_model], "layout": "torch.strided"},
+        "final_norm.bias": {"dtype": "torch.float32", "shape": [config.d_model], "layout": "torch.strided"},
+        "lm_head.weight": {"dtype": "torch.float32", "shape": [config.vocab_size, config.d_model], "layout": "torch.strided"},
+    }
+    for layer_index in range(config.n_layers):
+        prefix = f"blocks.{layer_index}"
+        schema.update(
+            {
+                f"{prefix}.ln_1.weight": {"dtype": "torch.float32", "shape": [config.d_model], "layout": "torch.strided"},
+                f"{prefix}.ln_1.bias": {"dtype": "torch.float32", "shape": [config.d_model], "layout": "torch.strided"},
+                f"{prefix}.attn.in_proj_weight": {"dtype": "torch.float32", "shape": [3 * config.d_model, config.d_model], "layout": "torch.strided"},
+                f"{prefix}.attn.in_proj_bias": {"dtype": "torch.float32", "shape": [3 * config.d_model], "layout": "torch.strided"},
+                f"{prefix}.attn.out_proj.weight": {"dtype": "torch.float32", "shape": [config.d_model, config.d_model], "layout": "torch.strided"},
+                f"{prefix}.attn.out_proj.bias": {"dtype": "torch.float32", "shape": [config.d_model], "layout": "torch.strided"},
+                f"{prefix}.ln_2.weight": {"dtype": "torch.float32", "shape": [config.d_model], "layout": "torch.strided"},
+                f"{prefix}.ln_2.bias": {"dtype": "torch.float32", "shape": [config.d_model], "layout": "torch.strided"},
+                f"{prefix}.mlp.0.weight": {"dtype": "torch.float32", "shape": [config.d_ff, config.d_model], "layout": "torch.strided"},
+                f"{prefix}.mlp.0.bias": {"dtype": "torch.float32", "shape": [config.d_ff], "layout": "torch.strided"},
+                f"{prefix}.mlp.2.weight": {"dtype": "torch.float32", "shape": [config.d_model, config.d_ff], "layout": "torch.strided"},
+                f"{prefix}.mlp.2.bias": {"dtype": "torch.float32", "shape": [config.d_model], "layout": "torch.strided"},
+            }
+        )
+    return dict(sorted(schema.items()))
+
+
+def validate_postmortem_checkpoint_payload(path: Path, cell: dict[str, object]) -> dict[str, object]:
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("Postmortem checkpoint path must be a regular inventory-bound file.")
+    family = require_exact_str(cell.get("family"), "checkpoint.family")
+    model_size = require_exact_str(cell.get("model_size"), "checkpoint.model_size")
+    seed = require_exact_int(cell.get("seed"), "checkpoint.seed")
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise ValueError(f"Postmortem checkpoint is not a loadable PyTorch checkpoint: {exc}") from exc
+    if not isinstance(checkpoint, dict) or set(checkpoint) != {"model_state_dict", "config", "parameter_count", "metadata"}:
+        raise ValueError("Postmortem checkpoint must use the exact tied checkpoint schema.")
+    config = checkpoint.get("config")
+    if not isinstance(config, dict) or set(config) != set(TransformerConfig.__dataclass_fields__):
+        raise ValueError("Postmortem checkpoint config must use the exact TransformerConfig schema.")
+    if config != transformer_config(model_size).__dict__:  # type: ignore[arg-type]
+        raise ValueError("Postmortem checkpoint config does not match the frozen cell model_size.")
+    if checkpoint.get("parameter_count") != FROZEN_PARAMETER_COUNTS[model_size]:
+        raise ValueError("Postmortem checkpoint parameter_count mismatch.")
+    metadata = require_exact_mapping(checkpoint.get("metadata"), POSTMORTEM_CHECKPOINT_METADATA_KEYS, "checkpoint.metadata")
+    expected_metadata = {
+        "family": family,
+        "model_size": model_size,
+        "seed": seed,
+        "training_steps": TRAINING_STEPS,
+    }
+    for key, value in expected_metadata.items():
+        if metadata.get(key) != value:
+            raise ValueError(f"Postmortem checkpoint metadata {key} mismatch.")
+    require_finite_json_number(metadata.get("training_loss"), "checkpoint.metadata.training_loss")
+    training_accuracy_value = require_finite_json_number(metadata.get("training_accuracy"), "checkpoint.metadata.training_accuracy")
+    if not 0.0 <= float(training_accuracy_value) <= 1.0:
+        raise ValueError("Postmortem checkpoint training_accuracy must lie in [0, 1].")
+    state = checkpoint.get("model_state_dict")
+    if not isinstance(state, dict):
+        raise ValueError("Postmortem checkpoint model_state_dict must be a mapping.")
+    expected_schema = expected_tied_state_schema_without_construction(model_size)
+    if set(state) != set(expected_schema):
+        raise ValueError("Postmortem checkpoint state_dict keys do not match the frozen tied model.")
+    for key in sorted(expected_schema):
+        tensor = state[key]
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError("Postmortem checkpoint state_dict values must be tensors.")
+        expected = expected_schema[key]
+        if str(tensor.dtype) != expected["dtype"]:
+            raise ValueError(f"Postmortem checkpoint state_dict dtype mismatch for {key}.")
+        if list(tensor.shape) != expected["shape"]:
+            raise ValueError(f"Postmortem checkpoint state_dict shape mismatch for {key}.")
+        if str(tensor.layout) != expected["layout"]:
+            raise ValueError(f"Postmortem checkpoint state_dict layout mismatch for {key}.")
+    token_weight = state["token_embedding.weight"]
+    head_weight = state["lm_head.weight"]
+    if token_weight.dtype != head_weight.dtype or tuple(token_weight.shape) != tuple(head_weight.shape) or token_weight.layout != head_weight.layout:
+        raise ValueError("Postmortem tied checkpoint duplicate weights have mismatched schema.")
+    if contiguous_uint8_bytes(token_weight) != contiguous_uint8_bytes(head_weight):
+        raise ValueError("Postmortem tied checkpoint duplicate weights are not byte-equal.")
+    return checkpoint
+
+
+def validate_postmortem_input_shallow(input_root: Path) -> dict[str, object]:
+    require_canonical_path_string(str(input_root), "input_root", ROOT_RE)
+    require_artifact_location(input_root, "input_root", ROOT_RE)
+    if str(input_root) != POSTMORTEM_REQUIRED_INPUT_ROOT or not matches_repo_artifact_path(input_root, POSTMORTEM_REQUIRED_INPUT_ROOT):
+        raise ValueError("Postmortem input must be the exact canonical feasibility_005 root, not a copy.")
+    if not input_root.is_dir() or input_root.is_symlink():
+        raise ValueError("Postmortem input root must be a real directory.")
+    for relative_path, expected_sha in POSTMORTEM_INPUT_CHECKSUMS.items():
+        path = input_root / relative_path
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"Postmortem input root lacks canonical {relative_path}.")
+        if file_sha256(path) != expected_sha:
+            raise ValueError(f"Postmortem input {relative_path} checksum mismatch.")
+    terminal, terminal_data, manifest_path, manifest_sha = load_terminal_binding(input_root)
+    if terminal.name != "FAILED.json":
+        raise ValueError("Postmortem input must retain the accepted FAILED terminal.")
+    if manifest_sha != POSTMORTEM_INPUT_CHECKSUMS["manifest.json"]:
+        raise ValueError("Postmortem input manifest checksum mismatch.")
+    manifest_data = json.loads(manifest_path.read_text())
+    summary_data = json.loads((input_root / "summary.json").read_text())
+    if set(manifest_data) != CURRENT_MANIFEST_KEYS:
+        raise ValueError("Postmortem input manifest must use the exact tied feasibility schema.")
+    if set(summary_data) != CURRENT_SUMMARY_KEYS:
+        raise ValueError("Postmortem input summary must use the exact tied feasibility schema.")
+    expected_terminal_keys = set(CURRENT_TERMINAL_KEYS)
+    expected_terminal_keys.add("error")
+    if set(terminal_data) != expected_terminal_keys:
+        raise ValueError("Postmortem input terminal must use the exact failed tied feasibility schema.")
+    if manifest_data.get("source_commit") != POSTMORTEM_INPUT_SOURCE_COMMIT:
+        raise ValueError("Postmortem input source_commit mismatch.")
+    if manifest_data.get("terminal_status") != "FAILED" or summary_data.get("terminal_status") != "FAILED":
+        raise ValueError("Postmortem input must be the accepted FAILED root.")
+    if manifest_data.get("configuration") != frozen_configuration() or summary_data.get("configuration") != frozen_configuration():
+        raise ValueError("Postmortem input configuration mismatch.")
+    if manifest_data.get("record_hashes") != FEASIBILITY_RECORD_HASHES:
+        raise ValueError("Postmortem input record_hashes mismatch.")
+    validate_current_deterministic_flags(manifest_data.get("deterministic_flags"))
+    if manifest_data.get("deterministic_flags") != summary_data.get("deterministic_flags") or manifest_data.get("deterministic_flags") != terminal_data.get("deterministic_flags"):
+        raise ValueError("Postmortem input deterministic flag bindings disagree.")
+    if manifest_data.get("environment") != FEASIBILITY_REQUIRED_RUNTIME_ENV:
+        raise ValueError("Postmortem input environment mismatch.")
+    expected_command = feasibility_exact_command(
+        input_root,
+        tuple(Path(path) for path in FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS),
+        Path(FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT),
+    )
+    if manifest_data.get("exact_command") != expected_command or summary_data.get("exact_command") != expected_command or terminal_data.get("exact_command") != expected_command:
+        raise ValueError("Postmortem input exact feasibility_005 command mismatch.")
+    if manifest_data.get("decision_diagnostic") != DECISION_DIAGNOSTIC_ROOT_BINDING:
+        raise ValueError("Postmortem input decision diagnostic binding mismatch.")
+    if manifest_data.get("predecessor_selections") != []:
+        raise ValueError("Postmortem input must not bind predecessor selections.")
+    if manifest_data.get("predecessor_roots") != postmortem_expected_predecessor_bindings():
+        raise ValueError("Postmortem input predecessor root bindings mismatch.")
+    cells = validate_postmortem_current_cells_shallow(manifest_data.get("cells"))
+    if summary_data.get("cells") != list(cells) or terminal_data.get("cells") != list(cells):
+        raise ValueError("Postmortem input cell bindings disagree across manifest/summary/terminal.")
+    validate_summary_aggregates(summary_data, list(cells), "FAILED", manifest_data.get("failure"))
+    if terminal_data.get("error") != manifest_data.get("failure"):
+        raise ValueError("Postmortem input failed terminal error does not match manifest failure.")
+    inventory_rows = manifest_data.get("file_inventory")
+    inventory_allowed = shallow_inventory_bound_paths_from_rows(input_root, inventory_rows, schema_mode="historical")
+    if not isinstance(inventory_rows, list) or len(inventory_rows) != 49:
+        raise ValueError("Postmortem input manifest must bind exactly 49 inventory entries.")
+    inventory_paths = {require_canonical_relative_path(row.get("path"), "postmortem.input_inventory.path") for row in inventory_rows if isinstance(row, dict)}
+    if "summary.json" not in inventory_paths:
+        raise ValueError("Postmortem input inventory must bind summary.json.")
+    for cell in cells:
+        if cell["generations_path"] not in inventory_paths or cell["checkpoint_path"] not in inventory_paths:
+            raise ValueError("Postmortem input inventory must bind every cell checkpoint and generation artifact.")
+    allowed_paths: set[Path] = {manifest_path.resolve(), terminal.resolve(), (input_root / "summary.json").resolve(), *inventory_allowed}
+    for predecessor_binding in manifest_data["predecessor_roots"]:
+        predecessor = Path(require_canonical_path_string(predecessor_binding.get("path"), "postmortem.predecessor.path", ROOT_RE))
+        expected = HISTORICAL_FEASIBILITY_ROOTS[predecessor.name]
+        if predecessor_binding.get("terminal_state") != expected["terminal"].removesuffix(".json"):
+            raise ValueError("Postmortem predecessor terminal state mismatch.")
+        if predecessor_binding.get("terminal_sha256") != expected["terminal_sha256"] or predecessor_binding.get("manifest_sha256") != expected["manifest_sha256"]:
+            raise ValueError("Postmortem predecessor checksum binding mismatch.")
+        allowed_paths.update(shallow_inventory_bound_root_paths(predecessor))
+    allowed_paths.update(shallow_decision_diagnostic_paths(Path(FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT)))
+    validate_source_provenance(manifest_data.get("source_provenance"), POSTMORTEM_INPUT_SOURCE_COMMIT, allowed_paths)
+    input_binding = {
+        "root": POSTMORTEM_REQUIRED_INPUT_ROOT,
+        "source_commit": POSTMORTEM_INPUT_SOURCE_COMMIT,
+        "manifest_path": "manifest.json",
+        "manifest_sha256": POSTMORTEM_INPUT_CHECKSUMS["manifest.json"],
+        "summary_path": "summary.json",
+        "summary_sha256": POSTMORTEM_INPUT_CHECKSUMS["summary.json"],
+        "terminal_path": "FAILED.json",
+        "terminal_sha256": POSTMORTEM_INPUT_CHECKSUMS["FAILED.json"],
+        "configuration": manifest_data["configuration"],
+        "record_hashes": manifest_data["record_hashes"],
+        "file_inventory": manifest_data["file_inventory"],
+        "cells": manifest_data["cells"],
+    }
+    return {
+        "input_binding": input_binding,
+        "manifest_data": manifest_data,
+        "allowed_source_paths": allowed_paths,
+    }
+
+
+def validate_postmortem_input_deep(
+    input_root: Path,
+    shallow_binding: dict[str, object],
+) -> dict[str, object]:
+    current = validate_postmortem_input_shallow(input_root)
+    if current["input_binding"] != shallow_binding.get("input_binding"):
+        raise ValueError("Postmortem input binding changed after shallow validation.")
+    manifest_data = current["manifest_data"]
+    if not isinstance(manifest_data, dict):
+        raise ValueError("Postmortem manifest data is unavailable.")
+    context = FeasibilityValidationContext()
+    validate_root_manifest_lineage(input_root, manifest_data, context=context)
+    cells = validate_postmortem_current_cells_shallow(manifest_data.get("cells"))
+    generation_rows: dict[tuple[str, str, int], list[dict[str, object]]] = {}
+    checkpoint_payloads: dict[tuple[str, str, int], dict[str, object]] = {}
+    for cell in cells:
+        key = (
+            require_exact_str(cell["family"], "cell.family"),
+            require_exact_str(cell["model_size"], "cell.model_size"),
+            require_exact_int(cell["seed"], "cell.seed"),
+        )
+        generations_path = input_root / require_canonical_relative_path(cell["generations_path"], "cell.generations_path")
+        checkpoint_path = input_root / require_canonical_relative_path(cell["checkpoint_path"], "cell.checkpoint_path")
+        generation_rows[key] = validate_generation_artifact(generations_path, cell)
+        checkpoint_payloads[key] = validate_postmortem_checkpoint_payload(checkpoint_path, cell)
+    return {
+        "input_binding": current["input_binding"],
+        "manifest_data": manifest_data,
+        "generation_rows": generation_rows,
+        "checkpoint_payloads": checkpoint_payloads,
+        "cells": list(cells),
+    }
+
+
+def capture_postmortem_source_provenance(
+    input_root: Path,
+    output_root: Path,
+    *,
+    allowed_paths: set[Path],
+) -> SourceSnapshot:
+    require_canonical_path_string(str(input_root), "input_root", ROOT_RE)
+    require_postmortem_artifact_location(output_root, "output_root")
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        cwd=REPO_ROOT,
+    ).stdout.splitlines()
+    for line in status:
+        code = line[:2]
+        rel = line[3:]
+        candidate = (Path(rel) if Path(rel).is_absolute() else REPO_ROOT / rel).resolve()
+        if code != "??":
+            raise RuntimeError(f"Tracked or staged source change blocks postmortem run: {line}")
+        if candidate not in allowed_paths:
+            raise RuntimeError(f"Untracked file is not an exact supplied feasibility/postmortem binding: {line}")
+    ignored_inputs = ignored_source_inputs()
+    if ignored_inputs:
+        raise RuntimeError("Ignored executable source input blocks postmortem run.")
+    return SourceSnapshot(commit=current_source_commit(), status_lines=tuple(status), ignored_inputs=())
+
+
+def verify_postmortem_preflight_bindings(bindings: dict[str, object], input_root: Path) -> None:
+    if validate_postmortem_input_shallow(input_root)["input_binding"] != bindings.get("input_binding"):
+        raise ValueError("Postmortem input binding changed after preflight.")
+
+
+class PostmortemForbiddenOperationGuard:
+    def __init__(self) -> None:
+        self._restore_callbacks: list[Callable[[], None]] = []
+        self._allow_rng_restore = 0
+
+    def _patch(self, owner: object, name: str, replacement: object) -> None:
+        original = getattr(owner, name)
+        setattr(owner, name, replacement)
+        self._restore_callbacks.append(lambda owner=owner, name=name, original=original: setattr(owner, name, original))
+
+    def __enter__(self) -> "PostmortemForbiddenOperationGuard":
+        def forbidden(*_args: object, **_kwargs: object) -> object:
+            raise ValueError("Postmortem read-only guard rejected a forbidden training/generation/mutation/RNG operation.")
+
+        def guarded_set_grad_enabled(mode: object) -> object:
+            if mode is True:
+                raise ValueError("Postmortem read-only guard rejected grad enablement.")
+            return original_set_grad_enabled(mode)  # type: ignore[misc]
+
+        def guarded_rng_restore(original: Callable[..., object]) -> Callable[..., object]:
+            def inner(*args: object, **kwargs: object) -> object:
+                if self._allow_rng_restore <= 0:
+                    raise ValueError("Postmortem read-only guard rejected RNG-state mutation outside the constructor restore scope.")
+                return original(*args, **kwargs)
+            return inner
+
+        original_set_grad_enabled = torch.set_grad_enabled
+        try:
+            self._patch(random, "seed", forbidden)
+            self._patch(random, "setstate", forbidden)
+            self._patch(torch, "manual_seed", forbidden)
+            self._patch(torch.random, "set_rng_state", guarded_rng_restore(torch.random.set_rng_state))
+            self._patch(torch.optim, "AdamW", forbidden)
+            self._patch(torch, "save", forbidden)
+            self._patch(torch.Tensor, "backward", forbidden)
+            self._patch(torch.autograd, "backward", forbidden)
+            self._patch(torch, "enable_grad", forbidden)
+            self._patch(torch, "set_grad_enabled", guarded_set_grad_enabled)
+            if hasattr(torch.cuda, "manual_seed_all"):
+                self._patch(torch.cuda, "manual_seed_all", forbidden)
+            if hasattr(torch.cuda, "manual_seed"):
+                self._patch(torch.cuda, "manual_seed", forbidden)
+            if hasattr(torch.cuda, "set_rng_state"):
+                self._patch(torch.cuda, "set_rng_state", guarded_rng_restore(torch.cuda.set_rng_state))
+            if hasattr(torch.cuda, "set_rng_state_all"):
+                self._patch(torch.cuda, "set_rng_state_all", guarded_rng_restore(torch.cuda.set_rng_state_all))
+            self._patch(sys.modules[__name__], "make_optimizer", forbidden)
+            self._patch(sys.modules[__name__], "train_text_records", forbidden)
+            self._patch(sys.modules[__name__], "save_checkpoint", forbidden)
+            self._patch(sys.modules[__name__], "evaluate_model", forbidden)
+            self._patch(sys.modules[__name__], "generate_named_diagnostic_rows", forbidden)
+            self._patch(sys.modules[__name__], "generate_array_rows", forbidden)
+            self._patch(ToyCausalTransformer, "greedy_decode", forbidden)
+            return self
+        except Exception:
+            self.__exit__(None, None, None)
+            raise
+
+    @contextmanager
+    def constructor_rng_restore_scope(self) -> Iterator[None]:
+        self._allow_rng_restore += 1
+        try:
+            yield
+        finally:
+            self._allow_rng_restore -= 1
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        while self._restore_callbacks:
+            self._restore_callbacks.pop()()
+
+
+def construct_postmortem_model_from_checkpoint(
+    checkpoint: dict[str, object],
+    *,
+    model_size: str,
+    device: torch.device,
+    guard: PostmortemForbiddenOperationGuard,
+) -> torch.nn.Module:
+    before = snapshot_rng_states()
+    before_python = before[0]
+    with guard.constructor_rng_restore_scope():
+        model = build_model(model_size)  # type: ignore[arg-type]
+        restore_torch_rng_states(before)
+    if random.getstate() != before_python:
+        raise ValueError("Postmortem CPU model constructor changed Python RNG state.")
+    require_rng_states_equal(before, snapshot_rng_states(), "Postmortem CPU model constructor restore did not exactly restore Torch RNG state.")
+    state = checkpoint.get("model_state_dict")
+    if not isinstance(state, dict):
+        raise ValueError("Postmortem checkpoint state_dict missing before load.")
+    model.load_state_dict(state)
+    if model.lm_head.weight is not model.token_embedding.weight:
+        raise ValueError("Postmortem loaded tied checkpoint did not preserve parameter identity.")
+    model.to(device)
+    model.eval()
+    require_rng_states_equal(before, snapshot_rng_states(), "Postmortem checkpoint load or device transfer changed RNG state.")
+    return model
+
+
+def postmortem_model_snapshot(model: torch.nn.Module) -> dict[str, tuple[str, tuple[int, ...], str, bytes]]:
+    snapshot: dict[str, tuple[str, tuple[int, ...], str, bytes]] = {}
+    for key, tensor in sorted(model.state_dict().items()):
+        if not isinstance(tensor, torch.Tensor):
+            raise ValueError("Postmortem model snapshot can contain only tensors.")
+        snapshot[key] = (str(tensor.dtype), tuple(int(dim) for dim in tensor.shape), str(tensor.layout), tensor_bytes(tensor))
+    return snapshot
+
+
+def require_postmortem_model_unchanged(
+    model: torch.nn.Module,
+    snapshot: dict[str, tuple[str, tuple[int, ...], str, bytes]],
+    stage: str,
+) -> None:
+    if postmortem_model_snapshot(model) != snapshot:
+        raise ValueError(f"Postmortem model parameters or buffers changed after {stage}.")
+
+
+def postmortem_record_sets_rng_neutral() -> tuple[dict[str, dict[str, tuple[FeasibilityRecord, ...]]], dict[str, bool]]:
+    before = snapshot_rng_states()
+    records = grouped_records()
+    actual_hashes = {name: canonical_record_set_sha256(rows) for name, rows in feasibility_record_sets().items()}
+    if actual_hashes != FEASIBILITY_RECORD_HASHES:
+        raise ValueError("Postmortem reconstructed record hashes do not match feasibility_005.")
+    after = snapshot_rng_states()
+    require_rng_states_equal(before, after, "Postmortem record reconstruction changed global Python/Torch RNG state.")
+    return records, {"record_reconstruction_global_state_unchanged": True}
+
+
+def autocast_is_enabled() -> bool:
+    enabled = torch.is_autocast_enabled()
+    try:
+        enabled = enabled or torch.is_autocast_enabled("cuda")
+    except TypeError:
+        pass
+    return enabled
+
+
+def postmortem_teacher_aggregate(rows: Sequence[dict[str, object]]) -> dict[str, object]:
+    for row in rows:
+        require_exact_mapping(row, POSTMORTEM_TEACHER_ROW_KEYS, "postmortem.teacher_forced_row")
+    selected_total = sum(require_exact_int(row["selected_token_count"], "teacher.selected_token_count") for row in rows)
+    correct_total = sum(require_exact_int(row["correct_token_count"], "teacher.correct_token_count") for row in rows)
+    nll_total = math.fsum(float.fromhex(require_exact_str(row["nll_numerator_hex"], "teacher.nll_numerator_hex")) for row in rows)
+    return {
+        "record_count": len(rows),
+        "sequence_exact_numerator": sum(1 for row in rows if row["sequence_exact"] is True),
+        "selected_token_count": selected_total,
+        "correct_token_count": correct_total,
+        "nll_numerator_hex": nll_total.hex(),
+        "nll_per_token_hex": (nll_total / selected_total).hex() if selected_total else float("nan").hex(),
+    }
+
+
+def postmortem_teacher_forced_rows(
+    model: torch.nn.Module,
+    records: Sequence[FeasibilityRecord],
+    tokenizer: ByteTokenizer,
+    device: torch.device,
+    *,
+    split: str,
+    family: str,
+    model_size: str,
+    seed: int,
+    checkpoint_path: str,
+    checkpoint_sha256: str,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    expected_count = TRAIN_RECORDS_PER_FAMILY if split == "train" else EVAL_RECORDS_PER_FAMILY
+    if split not in {"train", "eval"} or len(records) != expected_count or len(records) % BATCH_SIZE != 0:
+        raise ValueError("Postmortem teacher-forced rows must use exact train/eval cardinalities and full 64-row batches.")
+    if model.training:
+        raise ValueError("Postmortem teacher-forced evaluation requires model.eval().")
+    if any(parameter.dtype != torch.float32 for parameter in model.parameters()):
+        raise ValueError("Postmortem teacher-forced evaluation requires float32 model parameters.")
+    if autocast_is_enabled():
+        raise ValueError("Postmortem teacher-forced evaluation forbids autocast.")
+    rows: list[dict[str, object]] = []
+    with torch.inference_mode():
+        for batch_start in range(0, len(records), BATCH_SIZE):
+            batch_records = records[batch_start : batch_start + BATCH_SIZE]
+            input_ids = encode_record_batch(
+                tuple(TextRecord(record.prompt, record.answer) for record in batch_records),
+                tokenizer,
+                max_length=ByteTokenizer.max_sequence_length,
+            )
+            if tuple(input_ids.shape) != (BATCH_SIZE, ByteTokenizer.max_sequence_length) or input_ids.dtype != torch.int64:
+                raise ValueError("Postmortem teacher-forced inputs must have int64 shape [64,256].")
+            input_ids = input_ids.to(device)
+            labels = response_only_labels(input_ids)
+            if tuple(labels.shape) != (BATCH_SIZE, ByteTokenizer.max_sequence_length) or labels.dtype != torch.int64:
+                raise ValueError("Postmortem teacher-forced labels must have int64 shape [64,256].")
+            logits = model(input_ids)
+            if tuple(logits.shape) != (BATCH_SIZE, ByteTokenizer.max_sequence_length, ByteTokenizer.vocab_size):
+                raise ValueError("Postmortem teacher-forced logits must have shape [64,256,259].")
+            if logits.dtype != torch.float32:
+                raise ValueError("Postmortem teacher-forced logits must be float32.")
+            losses = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.shape[-1]),
+                labels.reshape(-1),
+                ignore_index=-100,
+                reduction="none",
+            ).reshape(BATCH_SIZE, ByteTokenizer.max_sequence_length)
+            if tuple(losses.shape) != (BATCH_SIZE, ByteTokenizer.max_sequence_length) or losses.dtype != torch.float32:
+                raise ValueError("Postmortem teacher-forced unreduced CE must be float32 with shape [64,256].")
+            predictions = logits.argmax(dim=-1)
+            batch_index = batch_start // BATCH_SIZE
+            for row_within_batch, record in enumerate(batch_records):
+                selected_positions = [position for position, label in enumerate(labels[row_within_batch].detach().cpu().tolist()) if label != -100]
+                selected_count = len(selected_positions)
+                if selected_count <= 0:
+                    raise ValueError("Postmortem teacher-forced rows require at least one response token including EOS.")
+                correct_count = sum(
+                    int(predictions[row_within_batch, position].detach().cpu().item())
+                    == int(labels[row_within_batch, position].detach().cpu().item())
+                    for position in selected_positions
+                )
+                nll_values = [float(losses[row_within_batch, position].detach().cpu()) for position in selected_positions]
+                rows.append(
+                    {
+                        "schema_version": POSTMORTEM_SCHEMA_VERSION,
+                        "family": family,
+                        "model_size": model_size,
+                        "seed": seed,
+                        "split": split,
+                        "record_index": record.index,
+                        "template_id": record.template_id,
+                        "operand_id": record.operand_id,
+                        "batch_index": batch_index,
+                        "row_within_batch": row_within_batch,
+                        "selected_token_count": selected_count,
+                        "correct_token_count": correct_count,
+                        "sequence_exact": correct_count == selected_count,
+                        "nll_numerator_hex": math.fsum(nll_values).hex(),
+                        "checkpoint_path": checkpoint_path,
+                        "checkpoint_sha256": checkpoint_sha256,
+                    }
+                )
+    aggregate = postmortem_teacher_aggregate(rows)
+    return rows, aggregate
+
+
+def postmortem_generation_common(record: FeasibilityRecord, retained_row: dict[str, object]) -> dict[str, object]:
+    tokenizer = ByteTokenizer()
+    raw_token_ids = retained_row.get("raw_token_ids")
+    if not isinstance(raw_token_ids, list) or not all(type(token) is int for token in raw_token_ids):
+        raise ValueError("Postmortem retained generation raw_token_ids must be JSON integers.")
+    prefix = list(tokenizer.encode_evaluation_prefix(record.prompt))
+    if raw_token_ids[: len(prefix)] != prefix:
+        raise ValueError("Postmortem retained generation row does not encode the frozen prompt prefix.")
+    generation_slice = raw_token_ids[len(prefix) :]
+    decoded_error = None
+    try:
+        decoded = tokenizer.decode_generated_response(raw_token_ids)
+    except (UnicodeDecodeError, ValueError) as exc:
+        decoded = None
+        decoded_error = f"{type(exc).__name__}: {exc}"
+    if retained_row.get("generation_error") != decoded_error:
+        raise ValueError("Postmortem retained generation_error does not match raw token decoding.")
+    if retained_row.get("generated") != decoded:
+        raise ValueError("Postmortem retained generated response does not match raw token decoding.")
+    greedy_exact = require_exact_bool(retained_row.get("exact_match"), "postmortem.retained.exact_match")
+    if greedy_exact is not (decoded == record.answer):
+        raise ValueError("Postmortem retained exact_match does not match decoded response.")
+    has_eos = decoded_error is None and generation_slice.count(EOS_ID) == 1 and generation_slice[-1:] == [EOS_ID]
+    hits_generation_cap = not has_eos and len(generation_slice) == ByteTokenizer.max_generated_tokens
+    hits_context_cap = not has_eos and len(raw_token_ids) >= ByteTokenizer.max_sequence_length
+    generated_bytes = None if decoded is None else len(decoded.encode("utf-8"))
+    target_bytes = len(record.answer.encode("utf-8"))
+    return {
+        "prompt": record.prompt,
+        "expected_response": record.answer,
+        "generated_response": decoded,
+        "raw_token_ids": list(raw_token_ids),
+        "generation_error": decoded_error,
+        "greedy_exact": greedy_exact,
+        "decode_valid": decoded_error is None,
+        "has_eos": has_eos,
+        "hits_generation_cap": hits_generation_cap,
+        "hits_context_cap": hits_context_cap,
+        "generation_token_count": len(generation_slice),
+        "generation_utf8_bytes": generated_bytes,
+        "target_utf8_bytes": target_bytes,
+        "length_matches": generated_bytes == target_bytes if generated_bytes is not None else False,
+        "hamming_distance": None if decoded is None else byte_hamming_distance(decoded, record.answer),
+        "edit_distance": None if decoded is None else byte_edit_distance(decoded, record.answer),
+        "first_error": None if decoded is None else byte_first_error(decoded, record.answer),
+    }
+
+
+def postmortem_named_taxonomy(record: FeasibilityRecord, common: dict[str, object]) -> dict[str, object]:
+    generated = common["generated_response"]
+    parsed: object = None
+    valid_json_string = False
+    valid_named_grammar = False
+    if isinstance(generated, str):
+        try:
+            parsed = json.loads(generated)
+            valid_json_string = isinstance(parsed, str)
+            valid_named_grammar = valid_json_string and NAMED_VALUE_RE.fullmatch(parsed) is not None
+        except json.JSONDecodeError:
+            parsed = None
+    target_key = named_value_target_key(record)
+    expected_value = json.loads(record.answer)
+    roster_values = {value for _key, value in named_roster(record)}
+    target_prefix = isinstance(parsed, str) and parsed.startswith(f"{target_key}-")
+    suffix_positional_correct = None
+    suffix_positional_total = None
+    suffix_hamming_distance = None
+    suffix_edit_distance = None
+    suffix_first_error = None
+    if target_prefix:
+        suffix = parsed[len(target_key) + 1 :]
+        expected_suffix = expected_value[len(target_key) + 1 :]
+        suffix_bytes = suffix.encode("utf-8")
+        expected_bytes = expected_suffix.encode("utf-8")
+        suffix_positional_correct = sum(
+            index < len(suffix_bytes) and suffix_bytes[index] == expected_bytes[index]
+            for index in range(4)
+        )
+        suffix_positional_total = 4
+        suffix_hamming_distance = byte_hamming_distance(suffix, expected_suffix) if len(suffix_bytes) == 4 else None
+        suffix_edit_distance = byte_edit_distance(suffix, expected_suffix)
+        suffix_first_error = byte_first_error(suffix, expected_suffix)
+    return {
+        "surface_source": "held_surface",
+        "operand_source": "held_operand",
+        "valid_json_string": valid_json_string,
+        "valid_named_grammar": valid_named_grammar,
+        "target_prefix": target_prefix,
+        "occurs_in_prompt": isinstance(parsed, str) and parsed in record.prompt,
+        "exact_target_value": parsed == expected_value,
+        "exact_distractor_value": isinstance(parsed, str) and parsed in (roster_values - {expected_value}),
+        "suffix_positional_correct": suffix_positional_correct,
+        "suffix_positional_total": suffix_positional_total,
+        "suffix_hamming_distance": suffix_hamming_distance,
+        "suffix_edit_distance": suffix_edit_distance,
+        "suffix_first_error": suffix_first_error,
+    }
+
+
+def first_wrong_item_position(generated_items: Sequence[str], expected_items: Sequence[str]) -> int | None:
+    if list(generated_items) == list(expected_items):
+        return None
+    for index, (got, expected) in enumerate(zip(generated_items, expected_items)):
+        if got != expected:
+            return index
+    return min(len(generated_items), len(expected_items))
+
+
+def postmortem_array_taxonomy(record: FeasibilityRecord, common: dict[str, object]) -> dict[str, object]:
+    generated = common["generated_response"]
+    expected_items = json.loads(record.answer)
+    if not isinstance(expected_items, list) or not all(isinstance(item, str) for item in expected_items):
+        raise ValueError("Postmortem array expected response must be a JSON string array.")
+    target_count = array_item_count(record)
+    if len(expected_items) != target_count or target_count not in {1, 2, 3, 4}:
+        raise ValueError("Postmortem array target item count mismatch.")
+    valid_json_syntax = False
+    valid_array_schema = False
+    correct_item_count = False
+    positional_exact_count = None
+    positional_denominator = None
+    missing_items = None
+    extra_items = None
+    all_items_copied = False
+    all_items_exact = False
+    first_wrong = None
+    if isinstance(generated, str):
+        try:
+            parsed = json.loads(generated)
+            valid_json_syntax = True
+        except json.JSONDecodeError:
+            parsed = None
+        valid_array_schema = isinstance(parsed, list) and all(isinstance(item, str) for item in parsed)
+        if valid_array_schema:
+            generated_items = list(parsed)  # type: ignore[arg-type]
+            correct_item_count = len(generated_items) == target_count
+            positional_exact_count = sum(1 for got, expected in zip(generated_items, expected_items) if got == expected)
+            positional_denominator = target_count
+            missing_items = sorted((Counter(expected_items) - Counter(generated_items)).elements())
+            extra_items = sorted((Counter(generated_items) - Counter(expected_items)).elements())
+            prompt_item_multiset = Counter(ARRAY_ITEM_RE.findall(record.prompt))
+            all_items_copied = not bool(Counter(generated_items) - prompt_item_multiset)
+            all_items_exact = correct_item_count and positional_exact_count == target_count
+            first_wrong = first_wrong_item_position(generated_items, expected_items)
+    return {
+        "comparison_source": "feasibility_005_retained_eval",
+        "training_steps": TRAINING_STEPS,
+        "target_item_count": target_count,
+        "valid_json_syntax": valid_json_syntax,
+        "valid_array_schema": valid_array_schema,
+        "correct_item_count": correct_item_count,
+        "positional_exact_count": positional_exact_count,
+        "positional_denominator": positional_denominator,
+        "missing_items": missing_items,
+        "extra_items": extra_items,
+        "all_items_copied": all_items_copied,
+        "all_items_exact": all_items_exact,
+        "first_wrong_item_position": first_wrong,
+    }
+
+
+def postmortem_taxonomy_row(
+    record: FeasibilityRecord,
+    retained_row: dict[str, object],
+    *,
+    family: str,
+    model_size: str,
+    seed: int,
+    generation_path: str,
+    generation_sha256: str,
+) -> dict[str, object]:
+    common = postmortem_generation_common(record, retained_row)
+    named = postmortem_named_taxonomy(record, common) if family == "named_value_json" else None
+    array = postmortem_array_taxonomy(record, common) if family == "array_json" else None
+    row = {
+        "schema_version": POSTMORTEM_SCHEMA_VERSION,
+        "family": family,
+        "model_size": model_size,
+        "seed": seed,
+        "record_index": record.index,
+        "generation_path": generation_path,
+        "generation_sha256": generation_sha256,
+        "common": common,
+        "named": named,
+        "array": array,
+    }
+    validate_postmortem_taxonomy_row(row)
+    return row
+
+
+def validate_postmortem_common(common: object) -> dict[str, object]:
+    data = require_exact_mapping(common, POSTMORTEM_COMMON_KEYS, "postmortem.common")
+    require_exact_str(data["prompt"], "postmortem.common.prompt")
+    require_exact_str(data["expected_response"], "postmortem.common.expected_response")
+    if data["generated_response"] is not None:
+        require_exact_str(data["generated_response"], "postmortem.common.generated_response")
+    if data["generation_error"] is not None:
+        require_exact_str(data["generation_error"], "postmortem.common.generation_error")
+    raw = data["raw_token_ids"]
+    if not isinstance(raw, list) or not all(type(token) is int for token in raw):
+        raise ValueError("Postmortem common raw_token_ids must be a JSON integer list.")
+    for key in ("greedy_exact", "decode_valid", "has_eos", "hits_generation_cap", "hits_context_cap", "length_matches"):
+        require_exact_bool(data[key], f"postmortem.common.{key}")
+    for key in ("generation_token_count", "target_utf8_bytes"):
+        value = require_exact_int(data[key], f"postmortem.common.{key}")
+        if value < 0:
+            raise ValueError(f"postmortem.common.{key} must be non-negative.")
+    for key in ("generation_utf8_bytes", "hamming_distance", "edit_distance", "first_error"):
+        value = data[key]
+        if value is not None and (type(value) is not int or value < 0):
+            raise ValueError(f"postmortem.common.{key} must be null or a non-negative integer.")
+    return data
+
+
+def validate_postmortem_named(named: object) -> dict[str, object]:
+    data = require_exact_mapping(named, POSTMORTEM_NAMED_KEYS, "postmortem.named")
+    if data["surface_source"] != "held_surface" or data["operand_source"] != "held_operand":
+        raise ValueError("Postmortem Named source labels must be held_surface/held_operand.")
+    for key in (
+        "valid_json_string",
+        "valid_named_grammar",
+        "target_prefix",
+        "occurs_in_prompt",
+        "exact_target_value",
+        "exact_distractor_value",
+    ):
+        require_exact_bool(data[key], f"postmortem.named.{key}")
+    target_prefix = data["target_prefix"] is True
+    suffix_keys = (
+        "suffix_positional_correct",
+        "suffix_positional_total",
+        "suffix_hamming_distance",
+        "suffix_edit_distance",
+        "suffix_first_error",
+    )
+    if not target_prefix and any(data[key] is not None for key in suffix_keys):
+        raise ValueError("Postmortem Named suffix fields must be null without a target-prefix parse.")
+    if target_prefix:
+        total = require_exact_int(data["suffix_positional_total"], "postmortem.named.suffix_positional_total")
+        correct = require_exact_int(data["suffix_positional_correct"], "postmortem.named.suffix_positional_correct")
+        if total != 4 or not 0 <= correct <= 4:
+            raise ValueError("Postmortem Named suffix positional counts are invalid.")
+        for key in ("suffix_hamming_distance", "suffix_edit_distance", "suffix_first_error"):
+            value = data[key]
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError(f"postmortem.named.{key} must be null or a non-negative integer.")
+    return data
+
+
+def validate_postmortem_array(array: object) -> dict[str, object]:
+    data = require_exact_mapping(array, POSTMORTEM_ARRAY_KEYS, "postmortem.array")
+    if data["comparison_source"] != "feasibility_005_retained_eval" or data["training_steps"] != TRAINING_STEPS:
+        raise ValueError("Postmortem Array comparison source/training_steps mismatch.")
+    target_count = require_exact_int(data["target_item_count"], "postmortem.array.target_item_count")
+    if target_count not in {1, 2, 3, 4}:
+        raise ValueError("Postmortem Array target_item_count must be 1..4.")
+    for key in (
+        "valid_json_syntax",
+        "valid_array_schema",
+        "correct_item_count",
+        "all_items_copied",
+        "all_items_exact",
+    ):
+        require_exact_bool(data[key], f"postmortem.array.{key}")
+    valid_schema = data["valid_array_schema"] is True
+    nullable_keys = ("positional_exact_count", "positional_denominator", "missing_items", "extra_items", "first_wrong_item_position")
+    if not valid_schema and any(data[key] is not None for key in nullable_keys):
+        raise ValueError("Invalid Postmortem Array schema rows must use null item-detail fields.")
+    if valid_schema:
+        denominator = require_exact_int(data["positional_denominator"], "postmortem.array.positional_denominator")
+        exact_count = require_exact_int(data["positional_exact_count"], "postmortem.array.positional_exact_count")
+        if denominator != target_count or not 0 <= exact_count <= denominator:
+            raise ValueError("Postmortem Array positional counts are invalid.")
+        for key in ("missing_items", "extra_items"):
+            value = data[key]
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value) or value != sorted(value):
+                raise ValueError(f"postmortem.array.{key} must be a lexicographically sorted string list.")
+        first_wrong = data["first_wrong_item_position"]
+        if first_wrong is not None and (type(first_wrong) is not int or first_wrong < 0):
+            raise ValueError("postmortem.array.first_wrong_item_position must be null or a non-negative integer.")
+    return data
+
+
+def validate_postmortem_taxonomy_row(row: object) -> dict[str, object]:
+    data = require_exact_mapping(row, POSTMORTEM_TAXONOMY_KEYS, "postmortem.error_taxonomy_row")
+    if data["schema_version"] != POSTMORTEM_SCHEMA_VERSION:
+        raise ValueError("Postmortem taxonomy schema_version mismatch.")
+    family = require_exact_str(data["family"], "postmortem.taxonomy.family")
+    if family not in FAMILIES:
+        raise ValueError("Postmortem taxonomy family mismatch.")
+    require_exact_str(data["model_size"], "postmortem.taxonomy.model_size")
+    require_exact_int(data["seed"], "postmortem.taxonomy.seed")
+    require_exact_int(data["record_index"], "postmortem.taxonomy.record_index")
+    require_canonical_relative_path(data["generation_path"], "postmortem.taxonomy.generation_path")
+    require_sha256_hex(data["generation_sha256"], "postmortem.taxonomy.generation_sha256")
+    validate_postmortem_common(data["common"])
+    if family == "named_value_json":
+        validate_postmortem_named(data["named"])
+        if data["array"] is not None:
+            raise ValueError("Postmortem Named taxonomy rows must have array=null.")
+    elif family == "array_json":
+        validate_postmortem_array(data["array"])
+        if data["named"] is not None:
+            raise ValueError("Postmortem Array taxonomy rows must have named=null.")
+    else:
+        if data["named"] is not None or data["array"] is not None:
+            raise ValueError("Postmortem non-Named/non-Array taxonomy rows must have named=array=null.")
+    return data
+
+
+def postmortem_named_aggregates(taxonomy_rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for model_size in MODEL_SIZES:
+        for seed in SEEDS:
+            group = [
+                row
+                for row in taxonomy_rows
+                if row["family"] == "named_value_json" and row["model_size"] == model_size and row["seed"] == seed
+            ]
+            if len(group) != EVAL_RECORDS_PER_FAMILY:
+                raise ValueError("Postmortem Named aggregates require exactly 64 rows per model_size/seed.")
+            named_rows = [validate_postmortem_named(row["named"]) for row in group]
+            common_rows = [validate_postmortem_common(row["common"]) for row in group]
+            target_prefix_count = sum(1 for row in named_rows if row["target_prefix"] is True)
+            rows.append(
+                {
+                    "model_size": model_size,
+                    "seed": seed,
+                    "denominator": EVAL_RECORDS_PER_FAMILY,
+                    "valid_json_string_count": sum(1 for row in named_rows if row["valid_json_string"] is True),
+                    "valid_named_grammar_count": sum(1 for row in named_rows if row["valid_named_grammar"] is True),
+                    "target_prefix_count": target_prefix_count,
+                    "occurs_in_prompt_count": sum(1 for row in named_rows if row["occurs_in_prompt"] is True),
+                    "exact_target_value_count": sum(1 for row in named_rows if row["exact_target_value"] is True),
+                    "exact_distractor_value_count": sum(1 for row in named_rows if row["exact_distractor_value"] is True),
+                    "suffix_positional_correct": sum(int(row["suffix_positional_correct"]) for row in named_rows if row["suffix_positional_correct"] is not None),
+                    "suffix_positional_denominator": 4 * target_prefix_count,
+                    "suffix_first_error_histogram": sparse_decimal_histogram(row["suffix_first_error"] for row in named_rows),
+                    "suffix_first_error_observation_count": sum(1 for row in named_rows if row["suffix_first_error"] is not None),
+                    "eos_present_count": sum(1 for row in common_rows if row["has_eos"] is True),
+                    "generation_cap_count": sum(1 for row in common_rows if row["hits_generation_cap"] is True),
+                    "target_length_match_count": sum(1 for row in common_rows if row["length_matches"] is True),
+                    "first_error_histogram": sparse_decimal_histogram(row["first_error"] for row in common_rows),
+                    "first_error_observation_count": sum(1 for row in common_rows if row["first_error"] is not None),
+                    "generation_token_count_histogram": sparse_decimal_histogram(row["generation_token_count"] for row in common_rows),
+                    "generation_utf8_bytes_histogram": sparse_decimal_histogram(row["generation_utf8_bytes"] for row in common_rows),
+                }
+            )
+    return rows
+
+
+def postmortem_array_aggregates(taxonomy_rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for model_size in MODEL_SIZES:
+        for seed in SEEDS:
+            for item_count in (1, 2, 3, 4):
+                group = [
+                    row
+                    for row in taxonomy_rows
+                    if row["family"] == "array_json"
+                    and row["model_size"] == model_size
+                    and row["seed"] == seed
+                    and row["array"]["target_item_count"] == item_count
+                ]
+                if len(group) != EVAL_RECORDS_PER_FAMILY // 4:
+                    raise ValueError("Postmortem Array aggregates require exactly 16 rows per item-count stratum.")
+                array_rows = [validate_postmortem_array(row["array"]) for row in group]
+                common_rows = [validate_postmortem_common(row["common"]) for row in group]
+                rows.append(
+                    {
+                        "model_size": model_size,
+                        "seed": seed,
+                        "target_item_count": item_count,
+                        "denominator": EVAL_RECORDS_PER_FAMILY // 4,
+                        "valid_json_syntax_count": sum(1 for row in array_rows if row["valid_json_syntax"] is True),
+                        "valid_array_schema_count": sum(1 for row in array_rows if row["valid_array_schema"] is True),
+                        "correct_item_count_count": sum(1 for row in array_rows if row["correct_item_count"] is True),
+                        "positional_exact_count": sum(int(row["positional_exact_count"]) for row in array_rows if row["positional_exact_count"] is not None),
+                        "positional_denominator": sum(int(row["positional_denominator"]) for row in array_rows if row["positional_denominator"] is not None),
+                        "all_items_copied_count": sum(1 for row in array_rows if row["all_items_copied"] is True),
+                        "all_items_exact_count": sum(1 for row in array_rows if row["all_items_exact"] is True),
+                        "missing_item_count": sum(len(row["missing_items"]) for row in array_rows if row["missing_items"] is not None),
+                        "extra_item_count": sum(len(row["extra_items"]) for row in array_rows if row["extra_items"] is not None),
+                        "first_wrong_histogram": sparse_decimal_histogram(row["first_wrong_item_position"] for row in array_rows),
+                        "first_wrong_observation_count": sum(1 for row in array_rows if row["first_wrong_item_position"] is not None),
+                        "greedy_exact_count": sum(1 for row in common_rows if row["greedy_exact"] is True),
+                        "eos_present_count": sum(1 for row in common_rows if row["has_eos"] is True),
+                        "generation_cap_count": sum(1 for row in common_rows if row["hits_generation_cap"] is True),
+                        "target_length_match_count": sum(1 for row in common_rows if row["length_matches"] is True),
+                        "first_error_histogram": sparse_decimal_histogram(row["first_error"] for row in common_rows),
+                        "first_error_observation_count": sum(1 for row in common_rows if row["first_error"] is not None),
+                        "generation_token_count_histogram": sparse_decimal_histogram(row["generation_token_count"] for row in common_rows),
+                        "generation_utf8_bytes_histogram": sparse_decimal_histogram(row["generation_utf8_bytes"] for row in common_rows),
+                    }
+                )
+    return rows
+
+
+def postmortem_file_sha_from_input_binding(input_binding: dict[str, object], relative_path: str) -> str:
+    inventory_rows = input_binding.get("file_inventory")
+    if not isinstance(inventory_rows, list):
+        raise ValueError("Postmortem input binding file_inventory must be a list.")
+    matches = [row for row in inventory_rows if isinstance(row, dict) and row.get("path") == relative_path]
+    if len(matches) != 1:
+        raise ValueError(f"Postmortem input binding does not contain exactly one inventory row for {relative_path!r}.")
+    return require_sha256_hex(matches[0].get("sha256"), "postmortem.input_inventory.sha256")
+
+
+def postmortem_checkpoint_metadata(checkpoint: dict[str, object]) -> dict[str, object]:
+    metadata = require_exact_mapping(checkpoint.get("metadata"), POSTMORTEM_CHECKPOINT_METADATA_KEYS, "postmortem.checkpoint_metadata")
+    return dict(metadata)
+
+
+def postmortem_paired_eval_exact(
+    eval_teacher_rows: Sequence[dict[str, object]],
+    generation_rows: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    if len(eval_teacher_rows) != EVAL_RECORDS_PER_FAMILY or len(generation_rows) != EVAL_RECORDS_PER_FAMILY:
+        raise ValueError("Postmortem paired eval exact table requires 64 teacher and 64 retained greedy rows.")
+    both_exact = tf_only = greedy_only = neither_exact = 0
+    for teacher_row, generation_row in zip(eval_teacher_rows, generation_rows, strict=True):
+        tf_exact = require_exact_bool(teacher_row.get("sequence_exact"), "paired.teacher.sequence_exact")
+        greedy_exact = require_exact_bool(generation_row.get("exact_match"), "paired.greedy.exact_match")
+        if tf_exact and greedy_exact:
+            both_exact += 1
+        elif tf_exact and not greedy_exact:
+            tf_only += 1
+        elif not tf_exact and greedy_exact:
+            greedy_only += 1
+        else:
+            neither_exact += 1
+    denominator = both_exact + tf_only + greedy_only + neither_exact
+    return {
+        "both_exact": both_exact,
+        "tf_only": tf_only,
+        "greedy_only": greedy_only,
+        "neither_exact": neither_exact,
+        "denominator": denominator,
+        "count_difference": tf_only - greedy_only,
+    }
+
+
+def postmortem_cell_metrics_row(
+    *,
+    cell: dict[str, object],
+    input_binding: dict[str, object],
+    checkpoint: dict[str, object],
+    train_teacher_rows: Sequence[dict[str, object]],
+    eval_teacher_rows: Sequence[dict[str, object]],
+    generation_rows: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    family = require_exact_str(cell["family"], "postmortem.cell.family")
+    model_size = require_exact_str(cell["model_size"], "postmortem.cell.model_size")
+    seed = require_exact_int(cell["seed"], "postmortem.cell.seed")
+    checkpoint_path = require_canonical_relative_path(cell["checkpoint_path"], "postmortem.cell.checkpoint_path")
+    generation_path = require_canonical_relative_path(cell["generations_path"], "postmortem.cell.generations_path")
+    retained_exact = sum(1 for row in generation_rows if row.get("exact_match") is True)
+    row = {
+        "schema_version": POSTMORTEM_SCHEMA_VERSION,
+        "family": family,
+        "model_size": model_size,
+        "seed": seed,
+        "checkpoint_path": checkpoint_path,
+        "checkpoint_sha256": postmortem_file_sha_from_input_binding(input_binding, checkpoint_path),
+        "generation_path": generation_path,
+        "generation_sha256": postmortem_file_sha_from_input_binding(input_binding, generation_path),
+        "checkpoint_metadata": postmortem_checkpoint_metadata(checkpoint),
+        "train_teacher_forced": postmortem_teacher_aggregate(train_teacher_rows),
+        "eval_teacher_forced": postmortem_teacher_aggregate(eval_teacher_rows),
+        "retained_greedy_exact": {"numerator": retained_exact, "denominator": EVAL_RECORDS_PER_FAMILY},
+        "paired_eval_exact": postmortem_paired_eval_exact(eval_teacher_rows, generation_rows),
+    }
+    validate_postmortem_cell_metrics_row(row)
+    return row
+
+
+def validate_postmortem_teacher_aggregate(value: object, field_name: str) -> dict[str, object]:
+    data = require_exact_mapping(value, POSTMORTEM_TEACHER_AGGREGATE_KEYS, field_name)
+    record_count = require_exact_int(data["record_count"], f"{field_name}.record_count")
+    sequence_exact_numerator = require_exact_int(data["sequence_exact_numerator"], f"{field_name}.sequence_exact_numerator")
+    selected = require_exact_int(data["selected_token_count"], f"{field_name}.selected_token_count")
+    correct = require_exact_int(data["correct_token_count"], f"{field_name}.correct_token_count")
+    if record_count <= 0 or not 0 <= sequence_exact_numerator <= record_count or selected <= 0 or not 0 <= correct <= selected:
+        raise ValueError(f"{field_name} integer counts are inconsistent.")
+    for key in ("nll_numerator_hex", "nll_per_token_hex"):
+        text = require_exact_str(data[key], f"{field_name}.{key}")
+        value_float = float.fromhex(text)
+        if not math.isfinite(value_float) or value_float < 0:
+            raise ValueError(f"{field_name}.{key} must be a finite non-negative float.hex string.")
+    return data
+
+
+def validate_postmortem_cell_metrics_row(row: object) -> dict[str, object]:
+    data = require_exact_mapping(row, POSTMORTEM_CELL_KEYS, "postmortem.cell_metrics_row")
+    if data["schema_version"] != POSTMORTEM_SCHEMA_VERSION:
+        raise ValueError("Postmortem cell_metrics schema_version mismatch.")
+    family = require_exact_str(data["family"], "postmortem.cell.family")
+    model_size = require_exact_str(data["model_size"], "postmortem.cell.model_size")
+    seed = require_exact_int(data["seed"], "postmortem.cell.seed")
+    if family not in FAMILIES or model_size not in MODEL_SIZES or seed not in SEEDS:
+        raise ValueError("Postmortem cell identity outside frozen grid.")
+    require_canonical_relative_path(data["checkpoint_path"], "postmortem.cell.checkpoint_path")
+    require_canonical_relative_path(data["generation_path"], "postmortem.cell.generation_path")
+    require_sha256_hex(data["checkpoint_sha256"], "postmortem.cell.checkpoint_sha256")
+    require_sha256_hex(data["generation_sha256"], "postmortem.cell.generation_sha256")
+    metadata = require_exact_mapping(data["checkpoint_metadata"], POSTMORTEM_CHECKPOINT_METADATA_KEYS, "postmortem.cell.checkpoint_metadata")
+    if metadata.get("family") != family or metadata.get("model_size") != model_size or metadata.get("seed") != seed or metadata.get("training_steps") != TRAINING_STEPS:
+        raise ValueError("Postmortem checkpoint_metadata does not match its cell identity.")
+    require_finite_json_number(metadata.get("training_loss"), "postmortem.cell.training_loss")
+    accuracy = require_finite_json_number(metadata.get("training_accuracy"), "postmortem.cell.training_accuracy")
+    if not 0.0 <= float(accuracy) <= 1.0:
+        raise ValueError("Postmortem checkpoint_metadata training_accuracy out of range.")
+    validate_postmortem_teacher_aggregate(data["train_teacher_forced"], "postmortem.cell.train_teacher_forced")
+    validate_postmortem_teacher_aggregate(data["eval_teacher_forced"], "postmortem.cell.eval_teacher_forced")
+    greedy = require_exact_mapping(data["retained_greedy_exact"], frozenset({"numerator", "denominator"}), "postmortem.cell.retained_greedy_exact")
+    numerator = require_exact_int(greedy["numerator"], "postmortem.cell.retained_greedy_exact.numerator")
+    denominator = require_exact_int(greedy["denominator"], "postmortem.cell.retained_greedy_exact.denominator")
+    if denominator != EVAL_RECORDS_PER_FAMILY or not 0 <= numerator <= denominator:
+        raise ValueError("Postmortem retained_greedy_exact counts are invalid.")
+    paired = require_exact_mapping(
+        data["paired_eval_exact"],
+        frozenset({"both_exact", "tf_only", "greedy_only", "neither_exact", "denominator", "count_difference"}),
+        "postmortem.cell.paired_eval_exact",
+    )
+    paired_counts = {key: require_exact_int(paired[key], f"postmortem.cell.paired_eval_exact.{key}") for key in ("both_exact", "tf_only", "greedy_only", "neither_exact")}
+    if any(value < 0 for value in paired_counts.values()):
+        raise ValueError("Postmortem paired eval counts must be non-negative.")
+    paired_denominator = require_exact_int(paired["denominator"], "postmortem.cell.paired_eval_exact.denominator")
+    if paired_denominator != sum(paired_counts.values()) or paired_denominator != EVAL_RECORDS_PER_FAMILY:
+        raise ValueError("Postmortem paired eval denominator mismatch.")
+    if paired["count_difference"] != paired_counts["tf_only"] - paired_counts["greedy_only"]:
+        raise ValueError("Postmortem paired eval count_difference mismatch.")
+    return data
+
+
+def validate_postmortem_teacher_rows(
+    rows: Sequence[dict[str, object]],
+    *,
+    input_binding: dict[str, object],
+    records: dict[str, dict[str, tuple[FeasibilityRecord, ...]]],
+) -> None:
+    if len(rows) != POSTMORTEM_ROW_COUNTS["teacher_forced_rows"]:
+        raise ValueError("Postmortem teacher_forced_rows cardinality mismatch.")
+    index = 0
+    for cell in validate_postmortem_current_cells_shallow(input_binding.get("cells")):
+        family = require_exact_str(cell["family"], "teacher.cell.family")
+        model_size = require_exact_str(cell["model_size"], "teacher.cell.model_size")
+        seed = require_exact_int(cell["seed"], "teacher.cell.seed")
+        checkpoint_path = require_canonical_relative_path(cell["checkpoint_path"], "teacher.cell.checkpoint_path")
+        checkpoint_sha = postmortem_file_sha_from_input_binding(input_binding, checkpoint_path)
+        for split in ("train", "eval"):
+            split_records = records[family][split]
+            for record_index, record in enumerate(split_records):
+                row = rows[index]
+                require_exact_mapping(row, POSTMORTEM_TEACHER_ROW_KEYS, "postmortem.teacher_forced_row")
+                if row["schema_version"] != POSTMORTEM_SCHEMA_VERSION:
+                    raise ValueError("Postmortem teacher row schema_version mismatch.")
+                expected_identity = {
+                    "family": family,
+                    "model_size": model_size,
+                    "seed": seed,
+                    "split": split,
+                    "record_index": record.index,
+                    "template_id": record.template_id,
+                    "operand_id": record.operand_id,
+                    "batch_index": record_index // BATCH_SIZE,
+                    "row_within_batch": record_index % BATCH_SIZE,
+                    "checkpoint_path": checkpoint_path,
+                    "checkpoint_sha256": checkpoint_sha,
+                }
+                for key, expected in expected_identity.items():
+                    if row.get(key) != expected:
+                        raise ValueError(f"Postmortem teacher row {key} mismatch.")
+                selected = require_exact_int(row["selected_token_count"], "teacher.selected_token_count")
+                correct = require_exact_int(row["correct_token_count"], "teacher.correct_token_count")
+                if selected <= 0 or not 0 <= correct <= selected:
+                    raise ValueError("Postmortem teacher selected/correct counts mismatch.")
+                if require_exact_bool(row["sequence_exact"], "teacher.sequence_exact") is not (correct == selected):
+                    raise ValueError("Postmortem teacher sequence_exact mismatch.")
+                nll = float.fromhex(require_exact_str(row["nll_numerator_hex"], "teacher.nll_numerator_hex"))
+                if not math.isfinite(nll) or nll < 0:
+                    raise ValueError("Postmortem teacher nll_numerator_hex must be finite and non-negative.")
+                index += 1
+
+
+def validate_postmortem_taxonomy_rows(
+    rows: Sequence[dict[str, object]],
+    *,
+    input_binding: dict[str, object],
+    records: dict[str, dict[str, tuple[FeasibilityRecord, ...]]],
+) -> None:
+    if len(rows) != POSTMORTEM_ROW_COUNTS["error_taxonomy"]:
+        raise ValueError("Postmortem error_taxonomy cardinality mismatch.")
+    index = 0
+    input_root = Path(require_exact_str(input_binding.get("root"), "postmortem.input_binding.root"))
+    for cell in validate_postmortem_current_cells_shallow(input_binding.get("cells")):
+        family = require_exact_str(cell["family"], "taxonomy.cell.family")
+        model_size = require_exact_str(cell["model_size"], "taxonomy.cell.model_size")
+        seed = require_exact_int(cell["seed"], "taxonomy.cell.seed")
+        generation_path = require_canonical_relative_path(cell["generations_path"], "taxonomy.cell.generation_path")
+        generation_sha = postmortem_file_sha_from_input_binding(input_binding, generation_path)
+        retained_rows = validate_generation_artifact(input_root / generation_path, cell)
+        for record, retained_row in zip(records[family]["eval"], retained_rows, strict=True):
+            expected = postmortem_taxonomy_row(
+                record,
+                retained_row,
+                family=family,
+                model_size=model_size,
+                seed=seed,
+                generation_path=generation_path,
+                generation_sha256=generation_sha,
+            )
+            if rows[index] != expected:
+                raise ValueError("Postmortem taxonomy row does not rebuild from retained generation evidence.")
+            index += 1
+
+
+def postmortem_cell_rows_from_outputs(
+    cell_rows: Sequence[dict[str, object]],
+    teacher_rows: Sequence[dict[str, object]],
+    taxonomy_rows: Sequence[dict[str, object]],
+    *,
+    input_binding: dict[str, object],
+) -> list[dict[str, object]]:
+    expected: list[dict[str, object]] = []
+    teacher_by_key_split: dict[tuple[str, str, int, str], list[dict[str, object]]] = {}
+    for row in teacher_rows:
+        key = (
+            require_exact_str(row["family"], "teacher.family"),
+            require_exact_str(row["model_size"], "teacher.model_size"),
+            require_exact_int(row["seed"], "teacher.seed"),
+            require_exact_str(row["split"], "teacher.split"),
+        )
+        teacher_by_key_split.setdefault(key, []).append(row)
+    taxonomy_by_key: dict[tuple[str, str, int], list[dict[str, object]]] = {}
+    for row in taxonomy_rows:
+        key = (
+            require_exact_str(row["family"], "taxonomy.family"),
+            require_exact_str(row["model_size"], "taxonomy.model_size"),
+            require_exact_int(row["seed"], "taxonomy.seed"),
+        )
+        taxonomy_by_key.setdefault(key, []).append(row)
+    for observed, cell in zip(cell_rows, validate_postmortem_current_cells_shallow(input_binding.get("cells")), strict=True):
+        observed_row = validate_postmortem_cell_metrics_row(observed)
+        key = (
+            require_exact_str(cell["family"], "cell.family"),
+            require_exact_str(cell["model_size"], "cell.model_size"),
+            require_exact_int(cell["seed"], "cell.seed"),
+        )
+        generation_rows = taxonomy_by_key.get(key, [])
+        train_rows = teacher_by_key_split.get((*key, "train"), [])
+        eval_rows = teacher_by_key_split.get((*key, "eval"), [])
+        retained_exact = sum(1 for row in generation_rows if row["common"]["greedy_exact"] is True)
+        expected_row = {
+            **observed_row,
+            "train_teacher_forced": postmortem_teacher_aggregate(train_rows),
+            "eval_teacher_forced": postmortem_teacher_aggregate(eval_rows),
+            "retained_greedy_exact": {"numerator": retained_exact, "denominator": EVAL_RECORDS_PER_FAMILY},
+            "paired_eval_exact": postmortem_paired_eval_exact(eval_rows, [{"exact_match": row["common"]["greedy_exact"]} for row in generation_rows]),
+        }
+        if observed_row != expected_row:
+            raise ValueError("Postmortem cell_metrics row does not rebuild from retained teacher/taxonomy rows.")
+        expected.append(observed_row)
+    if len(cell_rows) != len(expected):
+        raise ValueError("Postmortem cell_metrics cardinality mismatch.")
+    return expected
+
+
+def postmortem_output_inventory(root: Path) -> list[dict[str, object]]:
+    rows = inventory(root)
+    expected_paths = {"cell_metrics.jsonl", "error_taxonomy.jsonl", "summary.json", "teacher_forced_rows.jsonl"}
+    observed_paths = {require_canonical_relative_path(row.get("path"), "postmortem.file_inventory.path") for row in rows}
+    if observed_paths != expected_paths:
+        raise ValueError("Postmortem manifest inventory must bind exactly the four non-manifest, non-terminal files.")
+    return rows
+
+
+def write_postmortem_json(path: Path, value: object) -> None:
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    os.replace(temp, path)
+
+
+def write_postmortem_jsonl(path: Path, rows: Iterable[dict[str, object]]) -> None:
+    temp = path.with_suffix(path.suffix + ".tmp")
+    with temp.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
+    os.replace(temp, path)
+
+
+def build_postmortem_summary(
+    *,
+    input_binding: dict[str, object],
+    proposal_binding: dict[str, object],
+    implementation_binding: dict[str, object],
+    cell_rows: Sequence[dict[str, object]],
+    taxonomy_rows: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "schema_version": POSTMORTEM_SCHEMA_VERSION,
+        "artifact_class": POSTMORTEM_ARTIFACT_CLASS,
+        "input_binding": input_binding,
+        "proposal_binding": proposal_binding,
+        "implementation_binding": implementation_binding,
+        "configuration": input_binding["configuration"],
+        "row_counts": dict(POSTMORTEM_ROW_COUNTS),
+        "cells": list(cell_rows),
+        "named_aggregates": postmortem_named_aggregates(taxonomy_rows),
+        "array_aggregates": postmortem_array_aggregates(taxonomy_rows),
+        "interpretation_limits": {
+            "non_evidence": True,
+            "no_causal_weight_tying_claim": True,
+            "no_verdict_change": True,
+            "no_010d_authority": True,
+        },
+        "terminal_status": "DONE",
+    }
+
+
+def build_postmortem_manifest(
+    root: Path,
+    *,
+    input_binding: dict[str, object],
+    proposal_binding: dict[str, object],
+    implementation_binding: dict[str, object],
+    exact_command: Sequence[str],
+    environment: dict[str, object],
+    deterministic_flags: dict[str, object],
+    rng_state_contract: dict[str, bool],
+) -> dict[str, object]:
+    return {
+        "schema_version": POSTMORTEM_SCHEMA_VERSION,
+        "artifact_class": POSTMORTEM_ARTIFACT_CLASS,
+        "input_binding": input_binding,
+        "proposal_binding": proposal_binding,
+        "implementation_binding": implementation_binding,
+        "runner_path": implementation_binding["runner_path"],
+        "exact_command": list(exact_command),
+        "environment": environment,
+        "deterministic_flags": deterministic_flags,
+        "rng_state_contract": rng_state_contract,
+        "configuration": input_binding["configuration"],
+        "row_counts": dict(POSTMORTEM_ROW_COUNTS),
+        "file_inventory": postmortem_output_inventory(root),
+        "terminal_status": "DONE",
+    }
+
+
+def write_postmortem_done(root: Path, *, input_binding: dict[str, object]) -> None:
+    manifest_path = root / "manifest.json"
+    write_postmortem_json(
+        root / "DONE.json",
+        {
+            "schema_version": POSTMORTEM_SCHEMA_VERSION,
+            "status": "DONE",
+            "manifest_path": "manifest.json",
+            "manifest_sha256": file_sha256(manifest_path),
+            "input_manifest_sha256": input_binding["manifest_sha256"],
+            "row_counts": dict(POSTMORTEM_ROW_COUNTS),
+        },
+    )
+
+
+def validate_postmortem_bindings(
+    *,
+    input_binding: object,
+    proposal_binding: object,
+    implementation_binding: object,
+) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    input_data = require_exact_mapping(input_binding, POSTMORTEM_INPUT_BINDING_KEYS, "postmortem.input_binding")
+    proposal_data = require_exact_mapping(proposal_binding, POSTMORTEM_PROPOSAL_BINDING_KEYS, "postmortem.proposal_binding")
+    implementation_data = require_exact_mapping(implementation_binding, POSTMORTEM_IMPLEMENTATION_BINDING_KEYS, "postmortem.implementation_binding")
+    if proposal_data != {
+        "commit": POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        "path": POSTMORTEM_PROPOSAL_PATH,
+        "blob": POSTMORTEM_PROPOSAL_BLOB,
+    }:
+        raise ValueError("Postmortem proposal_binding mismatch.")
+    validate_git_sha(implementation_data["commit"], "postmortem.implementation.commit")
+    if implementation_data["runner_path"] != "scripts/phase8_sequence_feasibility.py":
+        raise ValueError("Postmortem implementation runner_path mismatch.")
+    if not isinstance(implementation_data["runner_blob"], str) or not implementation_data["runner_blob"]:
+        raise ValueError("Postmortem implementation runner_blob must be a non-empty Git blob id.")
+    if input_data["root"] != POSTMORTEM_REQUIRED_INPUT_ROOT:
+        raise ValueError("Postmortem input_binding root mismatch.")
+    for key, expected in POSTMORTEM_INPUT_CHECKSUMS.items():
+        binding_key = {"manifest.json": "manifest_sha256", "summary.json": "summary_sha256", "FAILED.json": "terminal_sha256"}[key]
+        if input_data[binding_key] != expected:
+            raise ValueError("Postmortem input top-level checksum binding mismatch.")
+    if input_data["source_commit"] != POSTMORTEM_INPUT_SOURCE_COMMIT:
+        raise ValueError("Postmortem input source_commit binding mismatch.")
+    validate_postmortem_current_cells_shallow(input_data["cells"])
+    return input_data, proposal_data, implementation_data
+
+
+def validate_postmortem_terminal_root(
+    root: Path,
+    output_root: Path,
+    *,
+    expected_cell_rows: Sequence[dict[str, object]] | None = None,
+) -> None:
+    terminals = [path.name for path in (root / "DONE.json", root / "FAILED.json") if path.exists()]
+    if terminals != ["DONE.json"]:
+        raise ValueError("Postmortem root must contain DONE.json only; finalized FAILED roots are forbidden.")
+    manifest_path = root / "manifest.json"
+    summary_path = root / "summary.json"
+    if not manifest_path.is_file() or not summary_path.is_file():
+        raise ValueError("Postmortem root must contain manifest.json and summary.json before publication.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    done = json.loads((root / "DONE.json").read_text(encoding="utf-8"))
+    require_exact_mapping(manifest, POSTMORTEM_MANIFEST_KEYS, "postmortem.manifest")
+    require_exact_mapping(summary, POSTMORTEM_SUMMARY_KEYS, "postmortem.summary")
+    require_exact_mapping(done, POSTMORTEM_DONE_KEYS, "postmortem.done")
+    for record_name, record in (("manifest", manifest), ("summary", summary), ("done", done)):
+        if record.get("schema_version") != POSTMORTEM_SCHEMA_VERSION:
+            raise ValueError(f"Postmortem {record_name} schema_version mismatch.")
+    if manifest["artifact_class"] != POSTMORTEM_ARTIFACT_CLASS or summary["artifact_class"] != POSTMORTEM_ARTIFACT_CLASS:
+        raise ValueError("Postmortem artifact_class mismatch.")
+    if manifest["terminal_status"] != "DONE" or summary["terminal_status"] != "DONE" or done["status"] != "DONE":
+        raise ValueError("Postmortem terminal status mismatch.")
+    input_binding, proposal_binding, implementation_binding = validate_postmortem_bindings(
+        input_binding=manifest["input_binding"],
+        proposal_binding=manifest["proposal_binding"],
+        implementation_binding=manifest["implementation_binding"],
+    )
+    if summary["input_binding"] != input_binding or summary["proposal_binding"] != proposal_binding or summary["implementation_binding"] != implementation_binding:
+        raise ValueError("Postmortem summary/manifest binding mismatch.")
+    if manifest["runner_path"] != implementation_binding["runner_path"]:
+        raise ValueError("Postmortem runner_path must equal implementation_binding.runner_path.")
+    if manifest["configuration"] != input_binding["configuration"] or summary["configuration"] != input_binding["configuration"]:
+        raise ValueError("Postmortem configuration must be copied from input_binding.")
+    if manifest["row_counts"] != POSTMORTEM_ROW_COUNTS or summary["row_counts"] != POSTMORTEM_ROW_COUNTS or done["row_counts"] != POSTMORTEM_ROW_COUNTS:
+        raise ValueError("Postmortem row_counts mismatch.")
+    if manifest["environment"] != FEASIBILITY_REQUIRED_RUNTIME_ENV:
+        raise ValueError("Postmortem manifest environment mismatch.")
+    validate_current_deterministic_flags(manifest["deterministic_flags"])
+    rng_contract = require_exact_mapping(manifest["rng_state_contract"], POSTMORTEM_RNG_CONTRACT_KEYS, "postmortem.rng_state_contract")
+    if any(value is not True for value in rng_contract.values()):
+        raise ValueError("Postmortem RNG state contract must contain only true values.")
+    if summary["interpretation_limits"] != {
+        "non_evidence": True,
+        "no_causal_weight_tying_claim": True,
+        "no_verdict_change": True,
+        "no_010d_authority": True,
+    }:
+        raise ValueError("Postmortem interpretation_limits mismatch.")
+    if manifest["exact_command"] != postmortem_exact_command(Path(POSTMORTEM_REQUIRED_INPUT_ROOT), output_root, POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT):
+        raise ValueError("Postmortem exact_command mismatch.")
+    if done["manifest_path"] != "manifest.json" or done["manifest_sha256"] != file_sha256(manifest_path):
+        raise ValueError("Postmortem DONE manifest checksum mismatch.")
+    if done["input_manifest_sha256"] != input_binding["manifest_sha256"]:
+        raise ValueError("Postmortem DONE input manifest checksum mismatch.")
+    if manifest["file_inventory"] != postmortem_output_inventory(root):
+        raise ValueError("Postmortem manifest file_inventory mismatch.")
+    actual_files = {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
+    expected_files = {"teacher_forced_rows.jsonl", "cell_metrics.jsonl", "error_taxonomy.jsonl", "summary.json", "manifest.json", "DONE.json"}
+    if actual_files != expected_files:
+        raise ValueError("Postmortem root contains incomplete or extra files.")
+    teacher_rows = read_jsonl_rows(root / "teacher_forced_rows.jsonl")
+    cell_rows = read_jsonl_rows(root / "cell_metrics.jsonl")
+    taxonomy_rows = read_jsonl_rows(root / "error_taxonomy.jsonl")
+    records = grouped_records()
+    validate_postmortem_teacher_rows(teacher_rows, input_binding=input_binding, records=records)
+    validate_postmortem_taxonomy_rows(taxonomy_rows, input_binding=input_binding, records=records)
+    rebuilt_cells = postmortem_cell_rows_from_outputs(cell_rows, teacher_rows, taxonomy_rows, input_binding=input_binding)
+    if expected_cell_rows is not None and rebuilt_cells != list(expected_cell_rows):
+        raise ValueError("Postmortem cell metrics changed after construction.")
+    if summary["cells"] != rebuilt_cells:
+        raise ValueError("Postmortem summary cells do not match cell_metrics rows.")
+    if summary["named_aggregates"] != postmortem_named_aggregates(taxonomy_rows):
+        raise ValueError("Postmortem Named aggregates do not rebuild from taxonomy rows.")
+    if summary["array_aggregates"] != postmortem_array_aggregates(taxonomy_rows):
+        raise ValueError("Postmortem Array aggregates do not rebuild from taxonomy rows.")
+
+
+def validate_postmortem_terminal_inventory_snapshot(root: Path) -> None:
+    manifest_path = root / "manifest.json"
+    done_path = root / "DONE.json"
+    if not manifest_path.is_file() or not done_path.is_file():
+        raise ValueError("Postmortem root lacks terminal inventory files.")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    done = json.loads(done_path.read_text(encoding="utf-8"))
+    expected_inventory = postmortem_output_inventory(root)
+    if manifest.get("file_inventory") != expected_inventory:
+        raise ValueError("Postmortem final manifest inventory changed.")
+    if done.get("manifest_sha256") != file_sha256(manifest_path):
+        raise ValueError("Postmortem final DONE manifest checksum changed.")
+    for row in expected_inventory:
+        path = root / require_canonical_relative_path(row.get("path"), "postmortem.final_inventory.path")
+        if row.get("sha256") != file_sha256(path) or row.get("bytes") != path.stat().st_size:
+            raise ValueError("Postmortem final inventory checksum or byte count mismatch.")
+
+
+def publish_postmortem_root(
+    temp_root: Path,
+    output_root: Path,
+    *,
+    expected_cell_rows: Sequence[dict[str, object]],
+    final_callback: Callable[[], None] | None = None,
+) -> None:
+    if output_root.exists() or output_root.is_symlink():
+        raise FileExistsError(f"Refusing to overwrite existing postmortem root: {output_root}")
+    validate_postmortem_terminal_root(temp_root, output_root, expected_cell_rows=expected_cell_rows)
+    if final_callback is not None:
+        final_callback()
+    validate_postmortem_terminal_inventory_snapshot(temp_root)
+    if final_callback is not None:
+        final_callback()
+    atomic_rename_noreplace(temp_root, output_root)
+
+
+def publish_postmortem_root_or_leave_incomplete(
+    temp_root: Path,
+    output_root: Path,
+    *,
+    expected_cell_rows: Sequence[dict[str, object]],
+    final_callback: Callable[[], None] | None = None,
+) -> None:
+    try:
+        publish_postmortem_root(
+            temp_root,
+            output_root,
+            expected_cell_rows=expected_cell_rows,
+            final_callback=final_callback,
+        )
+    except Exception as exc:
+        remove_diagnostic_terminal_markers(temp_root)
+        raise FeasibilityPublicationError(
+            f"Postmortem publication failed without overwriting {output_root}; the temporary root is incomplete."
+        ) from exc
+
+
+def run_postmortem_failure(
+    *,
+    device: str,
+    input_root: Path,
+    output_root: Path,
+    accepted_proposal_commit: str,
+    environ: dict[str, str] | None = None,
+) -> None:
+    validate_postmortem_argument_contract(
+        device=device,
+        input_root=input_root,
+        output_root=output_root,
+        accepted_proposal_commit=accepted_proposal_commit,
+    )
+    require_postmortem_real_main_context()
+    validate_postmortem_cli_contract(
+        device=device,
+        input_root=input_root,
+        output_root=output_root,
+        accepted_proposal_commit=accepted_proposal_commit,
+        environ=environ,
+    )
+    shallow_binding = validate_postmortem_input_shallow(input_root)
+    allowed_paths = shallow_binding["allowed_source_paths"]
+    if not isinstance(allowed_paths, set):
+        raise ValueError("Postmortem shallow preflight did not return source-clean exclusions.")
+    source_snapshot = capture_postmortem_source_provenance(input_root, output_root, allowed_paths=allowed_paths)
+    configure_postmortem_deterministic_backend()
+    input_manifest = shallow_binding["manifest_data"]
+    if not isinstance(input_manifest, dict):
+        raise ValueError("Postmortem shallow preflight did not return the input manifest.")
+    environment, deterministic_flags = validate_postmortem_runtime_against_input(input_manifest)
+    proposal_binding = postmortem_proposal_binding(accepted_proposal_commit)
+    implementation_binding = postmortem_implementation_binding(source_snapshot)
+    deep_binding = validate_postmortem_input_deep(input_root, shallow_binding)
+    records, rng_contract = postmortem_record_sets_rng_neutral()
+    rng_baseline = snapshot_rng_states()
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    validate_new_postmortem_root(output_root)
+    temp_root.mkdir(parents=True)
+    teacher_rows: list[dict[str, object]] = []
+    cell_rows: list[dict[str, object]] = []
+    taxonomy_rows: list[dict[str, object]] = []
+
+    def final_publication_callback() -> None:
+        verify_postmortem_preflight_bindings(shallow_binding, input_root)
+        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
+        validate_postmortem_runtime_against_input(input_manifest)
+        require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem RNG state changed before publication.")
+
+    try:
+        target_device = torch.device(device)
+        tokenizer = ByteTokenizer()
+        generation_rows_by_key = deep_binding["generation_rows"]
+        checkpoint_payloads = deep_binding["checkpoint_payloads"]
+        if not isinstance(generation_rows_by_key, dict) or not isinstance(checkpoint_payloads, dict):
+            raise ValueError("Postmortem deep preflight did not return checkpoint/generation bindings.")
+        with PostmortemForbiddenOperationGuard() as guard:
+            for cell in validate_postmortem_current_cells_shallow(deep_binding["cells"]):
+                family = require_exact_str(cell["family"], "postmortem.cell.family")
+                model_size = require_exact_str(cell["model_size"], "postmortem.cell.model_size")
+                seed = require_exact_int(cell["seed"], "postmortem.cell.seed")
+                key = (family, model_size, seed)
+                checkpoint = checkpoint_payloads[key]
+                generation_rows = generation_rows_by_key[key]
+                checkpoint_path = require_canonical_relative_path(cell["checkpoint_path"], "postmortem.cell.checkpoint_path")
+                generation_path = require_canonical_relative_path(cell["generations_path"], "postmortem.cell.generation_path")
+                checkpoint_sha = postmortem_file_sha_from_input_binding(deep_binding["input_binding"], checkpoint_path)  # type: ignore[arg-type]
+                generation_sha = postmortem_file_sha_from_input_binding(deep_binding["input_binding"], generation_path)  # type: ignore[arg-type]
+                model = construct_postmortem_model_from_checkpoint(
+                    checkpoint,
+                    model_size=model_size,
+                    device=target_device,
+                    guard=guard,
+                )
+                require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem checkpoint load changed global RNG state.")
+                model_snapshot = postmortem_model_snapshot(model)
+                train_tf_rows, _train_tf_aggregate = postmortem_teacher_forced_rows(
+                    model,
+                    records[family]["train"],
+                    tokenizer,
+                    target_device,
+                    split="train",
+                    family=family,
+                    model_size=model_size,
+                    seed=seed,
+                    checkpoint_path=checkpoint_path,
+                    checkpoint_sha256=checkpoint_sha,
+                )
+                require_postmortem_model_unchanged(model, model_snapshot, "train teacher forcing")
+                require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem train teacher forcing changed global RNG state.")
+                eval_tf_rows, _eval_tf_aggregate = postmortem_teacher_forced_rows(
+                    model,
+                    records[family]["eval"],
+                    tokenizer,
+                    target_device,
+                    split="eval",
+                    family=family,
+                    model_size=model_size,
+                    seed=seed,
+                    checkpoint_path=checkpoint_path,
+                    checkpoint_sha256=checkpoint_sha,
+                )
+                require_postmortem_model_unchanged(model, model_snapshot, "eval teacher forcing")
+                require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem eval teacher forcing changed global RNG state.")
+                teacher_rows.extend(train_tf_rows)
+                teacher_rows.extend(eval_tf_rows)
+                for record, retained_row in zip(records[family]["eval"], generation_rows, strict=True):
+                    taxonomy_rows.append(
+                        postmortem_taxonomy_row(
+                            record,
+                            retained_row,
+                            family=family,
+                            model_size=model_size,
+                            seed=seed,
+                            generation_path=generation_path,
+                            generation_sha256=generation_sha,
+                        )
+                    )
+                cell_rows.append(
+                    postmortem_cell_metrics_row(
+                        cell=cell,
+                        input_binding=deep_binding["input_binding"],  # type: ignore[arg-type]
+                        checkpoint=checkpoint,
+                        train_teacher_rows=train_tf_rows,
+                        eval_teacher_rows=eval_tf_rows,
+                        generation_rows=generation_rows,
+                    )
+                )
+                require_postmortem_model_unchanged(model, model_snapshot, "cell completion")
+                require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem cell completion changed global RNG state.")
+        rng_contract.update(
+            {
+                "constructor_scope_restored": True,
+                "post_load_state_unchanged": True,
+                "post_inference_state_unchanged": True,
+            }
+        )
+        if rng_contract.keys() != POSTMORTEM_RNG_CONTRACT_KEYS:
+            raise ValueError("Postmortem RNG contract schema mismatch.")
+        if len(teacher_rows) != POSTMORTEM_ROW_COUNTS["teacher_forced_rows"]:
+            raise ValueError("Postmortem teacher row cardinality mismatch before publication.")
+        if len(cell_rows) != POSTMORTEM_ROW_COUNTS["cell_metrics"]:
+            raise ValueError("Postmortem cell row cardinality mismatch before publication.")
+        if len(taxonomy_rows) != POSTMORTEM_ROW_COUNTS["error_taxonomy"]:
+            raise ValueError("Postmortem taxonomy row cardinality mismatch before publication.")
+        verify_postmortem_preflight_bindings(shallow_binding, input_root)
+        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
+        validate_postmortem_runtime_against_input(input_manifest)
+        require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem RNG state changed before output write.")
+        write_postmortem_jsonl(temp_root / "teacher_forced_rows.jsonl", teacher_rows)
+        write_postmortem_jsonl(temp_root / "cell_metrics.jsonl", cell_rows)
+        write_postmortem_jsonl(temp_root / "error_taxonomy.jsonl", taxonomy_rows)
+        write_postmortem_json(
+            temp_root / "summary.json",
+            build_postmortem_summary(
+                input_binding=deep_binding["input_binding"],  # type: ignore[arg-type]
+                proposal_binding=proposal_binding,
+                implementation_binding=implementation_binding,
+                cell_rows=cell_rows,
+                taxonomy_rows=taxonomy_rows,
+            ),
+        )
+        write_postmortem_json(
+            temp_root / "manifest.json",
+            build_postmortem_manifest(
+                temp_root,
+                input_binding=deep_binding["input_binding"],  # type: ignore[arg-type]
+                proposal_binding=proposal_binding,
+                implementation_binding=implementation_binding,
+                exact_command=postmortem_exact_command(input_root, output_root, accepted_proposal_commit),
+                environment=environment,
+                deterministic_flags=deterministic_flags,
+                rng_state_contract=rng_contract,
+            ),
+        )
+        write_postmortem_done(temp_root, input_binding=deep_binding["input_binding"])  # type: ignore[arg-type]
+        publish_postmortem_root_or_leave_incomplete(
+            temp_root,
+            output_root,
+            expected_cell_rows=cell_rows,
+            final_callback=final_publication_callback,
+        )
+    except Exception:
+        remove_diagnostic_terminal_markers(temp_root)
+        raise
+
+
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Phase 8 non-scientific sequence-transduction feasibility runner.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -6814,6 +8956,11 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     diagnose.add_argument("--input-root", required=True)
     diagnose.add_argument("--output-root", required=True)
     diagnose.add_argument("--predecessor-diagnostic-root", action="append", default=[])
+    postmortem = subparsers.add_parser("postmortem-failure")
+    postmortem.add_argument("--device", required=True)
+    postmortem.add_argument("--input-root", required=True)
+    postmortem.add_argument("--output-root", required=True)
+    postmortem.add_argument("--accepted-proposal-commit", required=True)
     return parser.parse_args(argv)
 
 
@@ -6869,6 +9016,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             input_root=input_root,
             output_root=output_root,
             predecessor_diagnostic_roots=predecessor_diagnostic_roots,
+            environ=os.environ,
+        )
+        return 0
+    if args.command == "postmortem-failure":
+        if argv is not None:
+            raise ValueError("postmortem-failure must be launched as a real process command, not via main(argv=...).")
+        input_root = Path(require_canonical_path_string(args.input_root, "input_root", ROOT_RE))
+        output_root = Path(require_postmortem_root_path_string(args.output_root, "output_root"))
+        run_postmortem_failure(
+            device=args.device,
+            input_root=input_root,
+            output_root=output_root,
+            accepted_proposal_commit=args.accepted_proposal_commit,
             environ=os.environ,
         )
         return 0

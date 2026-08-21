@@ -20,6 +20,15 @@ formal paths. The retained `feasibility_001` through `feasibility_004` roots and
 accepted D1 diagnostic remain historical untied artifacts only under their exact
 allowlists.
 
+Post-010C-D3 boundary: the accepted read-only postmortem proposal at commit
+`336afdc7cb079086998a0db527f544f16b68950c` and its D3-I implementation handoff
+authorize only a bounded implementation package, not a run. The only future command
+surface is `postmortem-failure` against the exact failed
+`artifacts/phase8_toy_lm_bridge/feasibility_005` root and the single output root
+`artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001`; any output is
+`non_evidence_feasibility_postmortem`, DONE-only on success, and cannot change the
+005 verdict, create a selection, retry as `feasibility_006`, or authorize `010D`.
+
 ## Objective
 
 Implement the fixed byte tokenizer, small/medium causal Transformer, response-only

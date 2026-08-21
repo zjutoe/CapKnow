@@ -33,6 +33,7 @@ working tree are not valid bindings.
     -> 010C-D2 independently reviewed one-shot protocol-amendment proposal
     -> 010C-D2-I weight-tying implementation -> independent implementation review
     -> feasibility_005 FAIL -> 010C-D3 read-only postmortem proposal -> review
+    -> 010C-D3-I read-only postmortem implementation -> independent implementation review
 ```
 
 The post-010C feasibility decision is an early engineering gate. Because later tasks
@@ -81,6 +82,9 @@ condition and must be returned to `main`.
   add only fail-closed checkpoint-read-only analysis to the existing Phase 8 runner
   and tests. The handoff, implementation commit, and future command each require
   separate acceptance; D3-I itself cannot run the postmortem or authorize `010D`.
+  The implementation package records the future canonical `postmortem-failure`
+  command, validates exact 005/proposal/source/runtime bindings, and can publish
+  only a non-evidence `DONE` postmortem root after a separate launch decision.
 - `010D`: formal training/checkpoint primitives and isolated evaluator.
 - `010E`: behavioral response matrices and exact/adaptive certificate integration.
 - `010F`: frozen metrics, sensitivity matrices, aggregation, and report-ready

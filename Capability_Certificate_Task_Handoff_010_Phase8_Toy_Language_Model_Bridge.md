@@ -735,6 +735,19 @@ a selection, or authorize `010D`. The proposal, any later implementation handoff
 the implementation commit, and any future command each require their own explicit
 review/authorization boundary.
 
+The accepted 010C-D3 proposal and D3-I handoff define one future command surface only:
+
+```text
+PYTHONDONTWRITEBYTECODE=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_sequence_feasibility.py postmortem-failure --device cuda:0 --input-root artifacts/phase8_toy_lm_bridge/feasibility_005 --output-root artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001 --accepted-proposal-commit 336afdc7cb079086998a0db527f544f16b68950c
+```
+
+The D3-I implementation package may encode the command, exact proposal/005/source/
+runtime bindings, checkpoint-read-only teacher-forced metrics, retained-generation
+taxonomy, forbidden-operation sentinels, and DONE-only atomic publication. It does
+not authorize running the command, does not authorize a finalized FAILED postmortem
+root, does not create a selection, and does not change the permanent 005 stop before
+`010D`.
+
 ### 9.5 Non-scientific resource benchmark and authorization
 
 After the complete training/evaluation/shard implementation is accepted but before
