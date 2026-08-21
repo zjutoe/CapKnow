@@ -7002,6 +7002,33 @@ def require_finite_json_number(value: object, field_name: str) -> int | float:
     return value
 
 
+def reject_postmortem_negative_zero(value: object, field_name: str) -> None:
+    if isinstance(value, float):
+        if value == 0.0 and math.copysign(1.0, value) < 0:
+            raise ValueError(f"{field_name} must not contain negative zero.")
+        return
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            reject_postmortem_negative_zero(nested, f"{field_name}.{key}")
+        return
+    if isinstance(value, list):
+        for index, nested in enumerate(value):
+            reject_postmortem_negative_zero(nested, f"{field_name}[{index}]")
+
+
+def postmortem_json_bytes(value: object) -> bytes:
+    reject_postmortem_negative_zero(value, "postmortem.json")
+    return (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+
+
+def postmortem_jsonl_bytes(rows: Iterable[dict[str, object]]) -> bytes:
+    lines: list[str] = []
+    for index, row in enumerate(rows):
+        reject_postmortem_negative_zero(row, f"postmortem.jsonl[{index}]")
+        lines.append(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False))
+    return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
+
+
 def require_decimal_histogram(value: object, field_name: str) -> dict[str, int]:
     if not isinstance(value, dict):
         raise ValueError(f"{field_name} must be a JSON object histogram.")
@@ -7054,6 +7081,11 @@ def require_postmortem_artifact_location(path: Path, field_name: str, *, temp: b
     resolved = artifact_path.resolve(strict=False)
     if resolved.parent != parent:
         raise ValueError(f"{field_name} must be located directly under {ARTIFACT_PARENT.as_posix()}.")
+
+
+def require_postmortem_repo_cwd() -> None:
+    if Path.cwd().resolve(strict=False) != REPO_ROOT.resolve(strict=True):
+        raise ValueError("postmortem-failure must execute with cwd exactly equal to the CapKnow repository root.")
 
 
 def postmortem_expected_predecessor_bindings() -> list[dict[str, object]]:
@@ -7223,6 +7255,7 @@ def validate_postmortem_cli_contract(
         output_root=output_root,
         accepted_proposal_commit=accepted_proposal_commit,
     )
+    require_postmortem_repo_cwd()
     validate_postmortem_process_argv(
         postmortem_kernel_argv(),
         postmortem_exact_argv(input_root, output_root, accepted_proposal_commit),
@@ -7408,6 +7441,7 @@ def validate_postmortem_checkpoint_payload(path: Path, cell: dict[str, object]) 
 
 
 def validate_postmortem_input_shallow(input_root: Path) -> dict[str, object]:
+    require_postmortem_repo_cwd()
     require_canonical_path_string(str(input_root), "input_root", ROOT_RE)
     require_artifact_location(input_root, "input_root", ROOT_RE)
     if str(input_root) != POSTMORTEM_REQUIRED_INPUT_ROOT or not matches_repo_artifact_path(input_root, POSTMORTEM_REQUIRED_INPUT_ROOT):
@@ -7581,6 +7615,7 @@ class PostmortemForbiddenOperationGuard:
     def __init__(self) -> None:
         self._restore_callbacks: list[Callable[[], None]] = []
         self._allow_rng_restore = 0
+        self._allow_constructor_grad_restore = 0
 
     def _patch(self, owner: object, name: str, replacement: object) -> None:
         original = getattr(owner, name)
@@ -7592,7 +7627,7 @@ class PostmortemForbiddenOperationGuard:
             raise ValueError("Postmortem read-only guard rejected a forbidden training/generation/mutation/RNG operation.")
 
         def guarded_set_grad_enabled(mode: object) -> object:
-            if mode is True:
+            if mode is True and self._allow_constructor_grad_restore <= 0:
                 raise ValueError("Postmortem read-only guard rejected grad enablement.")
             return original_set_grad_enabled(mode)  # type: ignore[misc]
 
@@ -7638,10 +7673,20 @@ class PostmortemForbiddenOperationGuard:
     @contextmanager
     def constructor_rng_restore_scope(self) -> Iterator[None]:
         self._allow_rng_restore += 1
+        self._allow_constructor_grad_restore += 1
         try:
             yield
         finally:
             self._allow_rng_restore -= 1
+            self._allow_constructor_grad_restore -= 1
+
+    @contextmanager
+    def constructor_grad_restore_scope(self) -> Iterator[None]:
+        self._allow_constructor_grad_restore += 1
+        try:
+            yield
+        finally:
+            self._allow_constructor_grad_restore -= 1
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         while self._restore_callbacks:
@@ -7666,11 +7711,12 @@ def construct_postmortem_model_from_checkpoint(
     state = checkpoint.get("model_state_dict")
     if not isinstance(state, dict):
         raise ValueError("Postmortem checkpoint state_dict missing before load.")
-    model.load_state_dict(state)
-    if model.lm_head.weight is not model.token_embedding.weight:
-        raise ValueError("Postmortem loaded tied checkpoint did not preserve parameter identity.")
-    model.to(device)
-    model.eval()
+    with guard.constructor_grad_restore_scope():
+        model.load_state_dict(state)
+        if model.lm_head.weight is not model.token_embedding.weight:
+            raise ValueError("Postmortem loaded tied checkpoint did not preserve parameter identity.")
+        model.to(device)
+        model.eval()
     require_rng_states_equal(before, snapshot_rng_states(), "Postmortem checkpoint load or device transfer changed RNG state.")
     return model
 
@@ -8495,16 +8541,36 @@ def postmortem_output_inventory(root: Path) -> list[dict[str, object]]:
 
 def write_postmortem_json(path: Path, value: object) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8")
+    temp.write_bytes(postmortem_json_bytes(value))
     os.replace(temp, path)
 
 
 def write_postmortem_jsonl(path: Path, rows: Iterable[dict[str, object]]) -> None:
     temp = path.with_suffix(path.suffix + ".tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
+    temp.write_bytes(postmortem_jsonl_bytes(rows))
     os.replace(temp, path)
+
+
+def read_canonical_postmortem_json(path: Path, field_name: str) -> dict[str, object]:
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"{field_name} must be UTF-8 JSON.") from exc
+    value = json.loads(text)
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a JSON object.")
+    if raw != postmortem_json_bytes(value):
+        raise ValueError(f"{field_name} canonical JSON bytes mismatch.")
+    return value
+
+
+def read_canonical_postmortem_jsonl(path: Path, field_name: str) -> list[dict[str, object]]:
+    raw = path.read_bytes()
+    rows = read_jsonl_rows(path)
+    if raw != postmortem_jsonl_bytes(rows):
+        raise ValueError(f"{field_name} canonical JSONL bytes mismatch.")
+    return rows
 
 
 def build_postmortem_summary(
@@ -8595,11 +8661,14 @@ def validate_postmortem_bindings(
         "blob": POSTMORTEM_PROPOSAL_BLOB,
     }:
         raise ValueError("Postmortem proposal_binding mismatch.")
-    validate_git_sha(implementation_data["commit"], "postmortem.implementation.commit")
+    implementation_commit = validate_git_sha(implementation_data["commit"], "postmortem.implementation.commit")
+    validate_git_commit_exists(implementation_commit)
     if implementation_data["runner_path"] != "scripts/phase8_sequence_feasibility.py":
         raise ValueError("Postmortem implementation runner_path mismatch.")
-    if not isinstance(implementation_data["runner_blob"], str) or not implementation_data["runner_blob"]:
-        raise ValueError("Postmortem implementation runner_blob must be a non-empty Git blob id.")
+    runner_blob = require_exact_str(implementation_data["runner_blob"], "postmortem.implementation.runner_blob")
+    actual_runner_blob = git_output(["git", "rev-parse", f"{implementation_commit}:{implementation_data['runner_path']}"])
+    if runner_blob != actual_runner_blob:
+        raise ValueError("Postmortem implementation runner_blob mismatch.")
     if input_data["root"] != POSTMORTEM_REQUIRED_INPUT_ROOT:
         raise ValueError("Postmortem input_binding root mismatch.")
     for key, expected in POSTMORTEM_INPUT_CHECKSUMS.items():
@@ -8608,15 +8677,51 @@ def validate_postmortem_bindings(
             raise ValueError("Postmortem input top-level checksum binding mismatch.")
     if input_data["source_commit"] != POSTMORTEM_INPUT_SOURCE_COMMIT:
         raise ValueError("Postmortem input source_commit binding mismatch.")
+    if input_data["configuration"] != frozen_configuration():
+        raise ValueError("Postmortem input configuration binding mismatch.")
+    if input_data["record_hashes"] != FEASIBILITY_RECORD_HASHES:
+        raise ValueError("Postmortem input record_hashes binding mismatch.")
+    inventory_rows = input_data["file_inventory"]
+    if not isinstance(inventory_rows, list) or len(inventory_rows) != 49:
+        raise ValueError("Postmortem input file_inventory binding must retain exactly 49 entries.")
+    for index, row in enumerate(inventory_rows):
+        require_exact_mapping(row, frozenset({"path", "sha256", "bytes"}), f"postmortem.input.file_inventory[{index}]")
+        require_canonical_relative_path(row["path"], f"postmortem.input.file_inventory[{index}].path")
+        require_sha256_hex(row["sha256"], f"postmortem.input.file_inventory[{index}].sha256")
+        byte_count = require_exact_int(row["bytes"], f"postmortem.input.file_inventory[{index}].bytes")
+        if byte_count < 0:
+            raise ValueError("Postmortem input file_inventory byte counts must be non-negative.")
     validate_postmortem_current_cells_shallow(input_data["cells"])
     return input_data, proposal_data, implementation_data
+
+
+def expected_postmortem_input_binding_for_posthoc_validation() -> dict[str, object]:
+    binding = validate_postmortem_input_shallow(Path(POSTMORTEM_REQUIRED_INPUT_ROOT))["input_binding"]
+    return require_exact_mapping(binding, POSTMORTEM_INPUT_BINDING_KEYS, "postmortem.expected_input_binding")
+
+
+def postmortem_terminal_fingerprint(root: Path) -> tuple[tuple[str, str, int], ...]:
+    expected_files = ("DONE.json", "cell_metrics.jsonl", "error_taxonomy.jsonl", "manifest.json", "summary.json", "teacher_forced_rows.jsonl")
+    rows: list[tuple[str, str, int]] = []
+    for relative_path in expected_files:
+        path = root / relative_path
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("Postmortem terminal fingerprint requires the exact six output files.")
+        rows.append((relative_path, file_sha256(path), path.stat().st_size))
+    return tuple(rows)
 
 
 def validate_postmortem_terminal_root(
     root: Path,
     output_root: Path,
     *,
+    expected_input_binding: dict[str, object] | None = None,
+    expected_proposal_binding: dict[str, object] | None = None,
+    expected_implementation_binding: dict[str, object] | None = None,
+    expected_source_snapshot: SourceSnapshot | None = None,
+    expected_teacher_rows: Sequence[dict[str, object]] | None = None,
     expected_cell_rows: Sequence[dict[str, object]] | None = None,
+    expected_taxonomy_rows: Sequence[dict[str, object]] | None = None,
 ) -> None:
     terminals = [path.name for path in (root / "DONE.json", root / "FAILED.json") if path.exists()]
     if terminals != ["DONE.json"]:
@@ -8625,9 +8730,9 @@ def validate_postmortem_terminal_root(
     summary_path = root / "summary.json"
     if not manifest_path.is_file() or not summary_path.is_file():
         raise ValueError("Postmortem root must contain manifest.json and summary.json before publication.")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    done = json.loads((root / "DONE.json").read_text(encoding="utf-8"))
+    manifest = read_canonical_postmortem_json(manifest_path, "postmortem.manifest")
+    summary = read_canonical_postmortem_json(summary_path, "postmortem.summary")
+    done = read_canonical_postmortem_json(root / "DONE.json", "postmortem.done")
     require_exact_mapping(manifest, POSTMORTEM_MANIFEST_KEYS, "postmortem.manifest")
     require_exact_mapping(summary, POSTMORTEM_SUMMARY_KEYS, "postmortem.summary")
     require_exact_mapping(done, POSTMORTEM_DONE_KEYS, "postmortem.done")
@@ -8643,6 +8748,18 @@ def validate_postmortem_terminal_root(
         proposal_binding=manifest["proposal_binding"],
         implementation_binding=manifest["implementation_binding"],
     )
+    if expected_input_binding is not None and input_binding != expected_input_binding:
+        raise ValueError("Postmortem manifest input_binding does not match the frozen in-memory preflight binding.")
+    if expected_proposal_binding is not None and proposal_binding != expected_proposal_binding:
+        raise ValueError("Postmortem manifest proposal_binding does not match the frozen in-memory proposal binding.")
+    if expected_implementation_binding is not None and implementation_binding != expected_implementation_binding:
+        raise ValueError("Postmortem manifest implementation_binding does not match the frozen in-memory implementation binding.")
+    if expected_source_snapshot is not None and postmortem_implementation_binding(expected_source_snapshot) != implementation_binding:
+        raise ValueError("Postmortem implementation binding does not match the frozen source snapshot.")
+    if expected_input_binding is None:
+        expected_input_binding = expected_postmortem_input_binding_for_posthoc_validation()
+    if input_binding != expected_input_binding:
+        raise ValueError("Postmortem manifest input_binding does not match the canonical input binding.")
     if summary["input_binding"] != input_binding or summary["proposal_binding"] != proposal_binding or summary["implementation_binding"] != implementation_binding:
         raise ValueError("Postmortem summary/manifest binding mismatch.")
     if manifest["runner_path"] != implementation_binding["runner_path"]:
@@ -8676,15 +8793,19 @@ def validate_postmortem_terminal_root(
     expected_files = {"teacher_forced_rows.jsonl", "cell_metrics.jsonl", "error_taxonomy.jsonl", "summary.json", "manifest.json", "DONE.json"}
     if actual_files != expected_files:
         raise ValueError("Postmortem root contains incomplete or extra files.")
-    teacher_rows = read_jsonl_rows(root / "teacher_forced_rows.jsonl")
-    cell_rows = read_jsonl_rows(root / "cell_metrics.jsonl")
-    taxonomy_rows = read_jsonl_rows(root / "error_taxonomy.jsonl")
+    teacher_rows = read_canonical_postmortem_jsonl(root / "teacher_forced_rows.jsonl", "postmortem.teacher_forced_rows")
+    cell_rows = read_canonical_postmortem_jsonl(root / "cell_metrics.jsonl", "postmortem.cell_metrics")
+    taxonomy_rows = read_canonical_postmortem_jsonl(root / "error_taxonomy.jsonl", "postmortem.error_taxonomy")
     records = grouped_records()
     validate_postmortem_teacher_rows(teacher_rows, input_binding=input_binding, records=records)
     validate_postmortem_taxonomy_rows(taxonomy_rows, input_binding=input_binding, records=records)
     rebuilt_cells = postmortem_cell_rows_from_outputs(cell_rows, teacher_rows, taxonomy_rows, input_binding=input_binding)
+    if expected_teacher_rows is not None and teacher_rows != list(expected_teacher_rows):
+        raise ValueError("Postmortem teacher_forced_rows changed after construction.")
     if expected_cell_rows is not None and rebuilt_cells != list(expected_cell_rows):
         raise ValueError("Postmortem cell metrics changed after construction.")
+    if expected_taxonomy_rows is not None and taxonomy_rows != list(expected_taxonomy_rows):
+        raise ValueError("Postmortem error_taxonomy rows changed after construction.")
     if summary["cells"] != rebuilt_cells:
         raise ValueError("Postmortem summary cells do not match cell_metrics rows.")
     if summary["named_aggregates"] != postmortem_named_aggregates(taxonomy_rows):
@@ -8698,8 +8819,8 @@ def validate_postmortem_terminal_inventory_snapshot(root: Path) -> None:
     done_path = root / "DONE.json"
     if not manifest_path.is_file() or not done_path.is_file():
         raise ValueError("Postmortem root lacks terminal inventory files.")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    done = json.loads(done_path.read_text(encoding="utf-8"))
+    manifest = read_canonical_postmortem_json(manifest_path, "postmortem.final_manifest")
+    done = read_canonical_postmortem_json(done_path, "postmortem.final_done")
     expected_inventory = postmortem_output_inventory(root)
     if manifest.get("file_inventory") != expected_inventory:
         raise ValueError("Postmortem final manifest inventory changed.")
@@ -8715,17 +8836,60 @@ def publish_postmortem_root(
     temp_root: Path,
     output_root: Path,
     *,
+    expected_input_binding: dict[str, object],
+    expected_proposal_binding: dict[str, object],
+    expected_implementation_binding: dict[str, object],
+    expected_source_snapshot: SourceSnapshot,
+    expected_teacher_rows: Sequence[dict[str, object]],
     expected_cell_rows: Sequence[dict[str, object]],
+    expected_taxonomy_rows: Sequence[dict[str, object]],
     final_callback: Callable[[], None] | None = None,
 ) -> None:
     if output_root.exists() or output_root.is_symlink():
         raise FileExistsError(f"Refusing to overwrite existing postmortem root: {output_root}")
-    validate_postmortem_terminal_root(temp_root, output_root, expected_cell_rows=expected_cell_rows)
+    validate_postmortem_terminal_root(
+        temp_root,
+        output_root,
+        expected_input_binding=expected_input_binding,
+        expected_proposal_binding=expected_proposal_binding,
+        expected_implementation_binding=expected_implementation_binding,
+        expected_source_snapshot=expected_source_snapshot,
+        expected_teacher_rows=expected_teacher_rows,
+        expected_cell_rows=expected_cell_rows,
+        expected_taxonomy_rows=expected_taxonomy_rows,
+    )
+    fingerprint = postmortem_terminal_fingerprint(temp_root)
     if final_callback is not None:
         final_callback()
+    validate_postmortem_terminal_root(
+        temp_root,
+        output_root,
+        expected_input_binding=expected_input_binding,
+        expected_proposal_binding=expected_proposal_binding,
+        expected_implementation_binding=expected_implementation_binding,
+        expected_source_snapshot=expected_source_snapshot,
+        expected_teacher_rows=expected_teacher_rows,
+        expected_cell_rows=expected_cell_rows,
+        expected_taxonomy_rows=expected_taxonomy_rows,
+    )
+    if postmortem_terminal_fingerprint(temp_root) != fingerprint:
+        raise ValueError("Postmortem terminal files changed after validation.")
     validate_postmortem_terminal_inventory_snapshot(temp_root)
     if final_callback is not None:
         final_callback()
+    validate_postmortem_terminal_root(
+        temp_root,
+        output_root,
+        expected_input_binding=expected_input_binding,
+        expected_proposal_binding=expected_proposal_binding,
+        expected_implementation_binding=expected_implementation_binding,
+        expected_source_snapshot=expected_source_snapshot,
+        expected_teacher_rows=expected_teacher_rows,
+        expected_cell_rows=expected_cell_rows,
+        expected_taxonomy_rows=expected_taxonomy_rows,
+    )
+    if postmortem_terminal_fingerprint(temp_root) != fingerprint:
+        raise ValueError("Postmortem terminal files changed after final callback.")
     atomic_rename_noreplace(temp_root, output_root)
 
 
@@ -8733,14 +8897,26 @@ def publish_postmortem_root_or_leave_incomplete(
     temp_root: Path,
     output_root: Path,
     *,
+    expected_input_binding: dict[str, object],
+    expected_proposal_binding: dict[str, object],
+    expected_implementation_binding: dict[str, object],
+    expected_source_snapshot: SourceSnapshot,
+    expected_teacher_rows: Sequence[dict[str, object]],
     expected_cell_rows: Sequence[dict[str, object]],
+    expected_taxonomy_rows: Sequence[dict[str, object]],
     final_callback: Callable[[], None] | None = None,
 ) -> None:
     try:
         publish_postmortem_root(
             temp_root,
             output_root,
+            expected_input_binding=expected_input_binding,
+            expected_proposal_binding=expected_proposal_binding,
+            expected_implementation_binding=expected_implementation_binding,
+            expected_source_snapshot=expected_source_snapshot,
+            expected_teacher_rows=expected_teacher_rows,
             expected_cell_rows=expected_cell_rows,
+            expected_taxonomy_rows=expected_taxonomy_rows,
             final_callback=final_callback,
         )
     except Exception as exc:
@@ -8748,6 +8924,87 @@ def publish_postmortem_root_or_leave_incomplete(
         raise FeasibilityPublicationError(
             f"Postmortem publication failed without overwriting {output_root}; the temporary root is incomplete."
         ) from exc
+
+
+def finalize_postmortem_outputs_under_guard(
+    *,
+    input_root: Path,
+    output_root: Path,
+    temp_root: Path,
+    shallow_binding: dict[str, object],
+    input_binding: dict[str, object],
+    source_snapshot: SourceSnapshot,
+    input_manifest: dict[str, object],
+    proposal_binding: dict[str, object],
+    implementation_binding: dict[str, object],
+    environment: dict[str, object],
+    deterministic_flags: dict[str, object],
+    rng_contract: dict[str, bool],
+    rng_baseline: tuple[object, torch.Tensor, tuple[torch.Tensor, ...] | None],
+    teacher_rows: Sequence[dict[str, object]],
+    cell_rows: Sequence[dict[str, object]],
+    taxonomy_rows: Sequence[dict[str, object]],
+    accepted_proposal_commit: str,
+    final_callback: Callable[[], None],
+) -> None:
+    rng_contract.update(
+        {
+            "constructor_scope_restored": True,
+            "post_load_state_unchanged": True,
+            "post_inference_state_unchanged": True,
+        }
+    )
+    if rng_contract.keys() != POSTMORTEM_RNG_CONTRACT_KEYS:
+        raise ValueError("Postmortem RNG contract schema mismatch.")
+    if len(teacher_rows) != POSTMORTEM_ROW_COUNTS["teacher_forced_rows"]:
+        raise ValueError("Postmortem teacher row cardinality mismatch before publication.")
+    if len(cell_rows) != POSTMORTEM_ROW_COUNTS["cell_metrics"]:
+        raise ValueError("Postmortem cell row cardinality mismatch before publication.")
+    if len(taxonomy_rows) != POSTMORTEM_ROW_COUNTS["error_taxonomy"]:
+        raise ValueError("Postmortem taxonomy row cardinality mismatch before publication.")
+    verify_postmortem_preflight_bindings(shallow_binding, input_root)
+    verify_source_unchanged(source_snapshot, active_output_root=temp_root)
+    validate_postmortem_runtime_against_input(input_manifest)
+    require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem RNG state changed before output write.")
+    write_postmortem_jsonl(temp_root / "teacher_forced_rows.jsonl", teacher_rows)
+    write_postmortem_jsonl(temp_root / "cell_metrics.jsonl", cell_rows)
+    write_postmortem_jsonl(temp_root / "error_taxonomy.jsonl", taxonomy_rows)
+    write_postmortem_json(
+        temp_root / "summary.json",
+        build_postmortem_summary(
+            input_binding=input_binding,
+            proposal_binding=proposal_binding,
+            implementation_binding=implementation_binding,
+            cell_rows=cell_rows,
+            taxonomy_rows=taxonomy_rows,
+        ),
+    )
+    write_postmortem_json(
+        temp_root / "manifest.json",
+        build_postmortem_manifest(
+            temp_root,
+            input_binding=input_binding,
+            proposal_binding=proposal_binding,
+            implementation_binding=implementation_binding,
+            exact_command=postmortem_exact_command(input_root, output_root, accepted_proposal_commit),
+            environment=environment,
+            deterministic_flags=deterministic_flags,
+            rng_state_contract=rng_contract,
+        ),
+    )
+    write_postmortem_done(temp_root, input_binding=input_binding)
+    publish_postmortem_root_or_leave_incomplete(
+        temp_root,
+        output_root,
+        expected_input_binding=input_binding,
+        expected_proposal_binding=proposal_binding,
+        expected_implementation_binding=implementation_binding,
+        expected_source_snapshot=source_snapshot,
+        expected_teacher_rows=teacher_rows,
+        expected_cell_rows=cell_rows,
+        expected_taxonomy_rows=taxonomy_rows,
+        final_callback=final_callback,
+    )
 
 
 def run_postmortem_failure(
@@ -8765,6 +9022,7 @@ def run_postmortem_failure(
         accepted_proposal_commit=accepted_proposal_commit,
     )
     require_postmortem_real_main_context()
+    require_postmortem_repo_cwd()
     validate_postmortem_cli_contract(
         device=device,
         input_root=input_root,
@@ -8785,6 +9043,7 @@ def run_postmortem_failure(
     proposal_binding = postmortem_proposal_binding(accepted_proposal_commit)
     implementation_binding = postmortem_implementation_binding(source_snapshot)
     deep_binding = validate_postmortem_input_deep(input_root, shallow_binding)
+    input_binding = require_exact_mapping(deep_binding["input_binding"], POSTMORTEM_INPUT_BINDING_KEYS, "postmortem.deep.input_binding")
     records, rng_contract = postmortem_record_sets_rng_neutral()
     rng_baseline = snapshot_rng_states()
     temp_root = output_root.with_name(output_root.name + ".tmp")
@@ -8817,8 +9076,8 @@ def run_postmortem_failure(
                 generation_rows = generation_rows_by_key[key]
                 checkpoint_path = require_canonical_relative_path(cell["checkpoint_path"], "postmortem.cell.checkpoint_path")
                 generation_path = require_canonical_relative_path(cell["generations_path"], "postmortem.cell.generation_path")
-                checkpoint_sha = postmortem_file_sha_from_input_binding(deep_binding["input_binding"], checkpoint_path)  # type: ignore[arg-type]
-                generation_sha = postmortem_file_sha_from_input_binding(deep_binding["input_binding"], generation_path)  # type: ignore[arg-type]
+                checkpoint_sha = postmortem_file_sha_from_input_binding(input_binding, checkpoint_path)
+                generation_sha = postmortem_file_sha_from_input_binding(input_binding, generation_path)
                 model = construct_postmortem_model_from_checkpoint(
                     checkpoint,
                     model_size=model_size,
@@ -8872,7 +9131,7 @@ def run_postmortem_failure(
                 cell_rows.append(
                     postmortem_cell_metrics_row(
                         cell=cell,
-                        input_binding=deep_binding["input_binding"],  # type: ignore[arg-type]
+                        input_binding=input_binding,
                         checkpoint=checkpoint,
                         train_teacher_rows=train_tf_rows,
                         eval_teacher_rows=eval_tf_rows,
@@ -8881,58 +9140,26 @@ def run_postmortem_failure(
                 )
                 require_postmortem_model_unchanged(model, model_snapshot, "cell completion")
                 require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem cell completion changed global RNG state.")
-        rng_contract.update(
-            {
-                "constructor_scope_restored": True,
-                "post_load_state_unchanged": True,
-                "post_inference_state_unchanged": True,
-            }
-        )
-        if rng_contract.keys() != POSTMORTEM_RNG_CONTRACT_KEYS:
-            raise ValueError("Postmortem RNG contract schema mismatch.")
-        if len(teacher_rows) != POSTMORTEM_ROW_COUNTS["teacher_forced_rows"]:
-            raise ValueError("Postmortem teacher row cardinality mismatch before publication.")
-        if len(cell_rows) != POSTMORTEM_ROW_COUNTS["cell_metrics"]:
-            raise ValueError("Postmortem cell row cardinality mismatch before publication.")
-        if len(taxonomy_rows) != POSTMORTEM_ROW_COUNTS["error_taxonomy"]:
-            raise ValueError("Postmortem taxonomy row cardinality mismatch before publication.")
-        verify_postmortem_preflight_bindings(shallow_binding, input_root)
-        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
-        validate_postmortem_runtime_against_input(input_manifest)
-        require_rng_states_equal(rng_baseline, snapshot_rng_states(), "Postmortem RNG state changed before output write.")
-        write_postmortem_jsonl(temp_root / "teacher_forced_rows.jsonl", teacher_rows)
-        write_postmortem_jsonl(temp_root / "cell_metrics.jsonl", cell_rows)
-        write_postmortem_jsonl(temp_root / "error_taxonomy.jsonl", taxonomy_rows)
-        write_postmortem_json(
-            temp_root / "summary.json",
-            build_postmortem_summary(
-                input_binding=deep_binding["input_binding"],  # type: ignore[arg-type]
+            finalize_postmortem_outputs_under_guard(
+                input_root=input_root,
+                output_root=output_root,
+                temp_root=temp_root,
+                shallow_binding=shallow_binding,
+                input_binding=input_binding,
+                source_snapshot=source_snapshot,
+                input_manifest=input_manifest,
                 proposal_binding=proposal_binding,
                 implementation_binding=implementation_binding,
-                cell_rows=cell_rows,
-                taxonomy_rows=taxonomy_rows,
-            ),
-        )
-        write_postmortem_json(
-            temp_root / "manifest.json",
-            build_postmortem_manifest(
-                temp_root,
-                input_binding=deep_binding["input_binding"],  # type: ignore[arg-type]
-                proposal_binding=proposal_binding,
-                implementation_binding=implementation_binding,
-                exact_command=postmortem_exact_command(input_root, output_root, accepted_proposal_commit),
                 environment=environment,
                 deterministic_flags=deterministic_flags,
-                rng_state_contract=rng_contract,
-            ),
-        )
-        write_postmortem_done(temp_root, input_binding=deep_binding["input_binding"])  # type: ignore[arg-type]
-        publish_postmortem_root_or_leave_incomplete(
-            temp_root,
-            output_root,
-            expected_cell_rows=cell_rows,
-            final_callback=final_publication_callback,
-        )
+                rng_contract=rng_contract,
+                rng_baseline=rng_baseline,
+                teacher_rows=teacher_rows,
+                cell_rows=cell_rows,
+                taxonomy_rows=taxonomy_rows,
+                accepted_proposal_commit=accepted_proposal_commit,
+                final_callback=final_publication_callback,
+            )
     except Exception:
         remove_diagnostic_terminal_markers(temp_root)
         raise

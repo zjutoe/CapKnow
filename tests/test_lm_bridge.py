@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import random
 import re
+import shutil
 import subprocess
 import sys
 
@@ -5810,6 +5811,123 @@ def _d3_build_synthetic_postmortem_root(
     return sf, input_root, output_root
 
 
+def _d3_rebuild_postmortem_manifest_done(sf: object, output_root: Path) -> None:
+    summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
+    manifest_path = output_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_inventory"] = sf.postmortem_output_inventory(output_root)
+    sf.write_postmortem_json(manifest_path, manifest)
+    sf.write_postmortem_done(output_root, input_binding=summary["input_binding"])
+
+
+def _d3_expected_publication_context(sf: object, output_root: Path) -> dict[str, object]:
+    manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
+    return {
+        "expected_input_binding": manifest["input_binding"],
+        "expected_proposal_binding": manifest["proposal_binding"],
+        "expected_implementation_binding": manifest["implementation_binding"],
+        "expected_source_snapshot": sf.SourceSnapshot(commit=manifest["implementation_binding"]["commit"], status_lines=(), ignored_inputs=()),
+        "expected_teacher_rows": sf.read_canonical_postmortem_jsonl(output_root / "teacher_forced_rows.jsonl", "test.teacher"),
+        "expected_cell_rows": sf.read_canonical_postmortem_jsonl(output_root / "cell_metrics.jsonl", "test.cells"),
+        "expected_taxonomy_rows": sf.read_canonical_postmortem_jsonl(output_root / "error_taxonomy.jsonl", "test.taxonomy"),
+    }
+
+
+def _d3_build_faithful_input_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[object, Path, Path]:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
+    input_root = artifact_parent / "feasibility_005"
+    output_root = artifact_parent / "feasibility_postmortem_001"
+    input_root.mkdir(parents=True)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
+    monkeypatch.setattr(sf, "FEASIBILITY_REQUIRED_ROOT", str(input_root))
+    monkeypatch.setattr(sf, "POSTMORTEM_REQUIRED_INPUT_ROOT", str(input_root))
+    monkeypatch.setattr(sf, "POSTMORTEM_REQUIRED_OUTPUT_ROOT", str(output_root))
+    monkeypatch.setattr(sf, "FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS", ())
+    monkeypatch.setattr(sf, "shallow_decision_diagnostic_paths", lambda root: set())
+    monkeypatch.setattr(sf, "validate_root_manifest_lineage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "validate_feasibility_records", lambda records: None)
+    records = sf.grouped_records()
+    monkeypatch.setattr(sf, "grouped_records", lambda: records)
+    tokenizer = ByteTokenizer()
+    cells = _passing_feasibility_cells()
+    for cell in cells:
+        family = str(cell["family"])
+        model_size = str(cell["model_size"])
+        seed = int(cell["seed"])
+        cell_dir = input_root / f"{family}__{model_size}__seed{seed}"
+        cell_dir.mkdir(parents=True)
+        (cell_dir / "generations.jsonl").write_text(
+            "\n".join(
+                json.dumps(_generation_row(record, tokenizer, exact_match=index < int(cell["exact_matches"])), sort_keys=True)
+                for index, record in enumerate(records[family]["eval"])
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        save_checkpoint(
+            str(cell_dir / "checkpoint_step1500.pt"),
+            build_model(model_size),
+            metadata={
+                "family": family,
+                "model_size": model_size,
+                "seed": seed,
+                "training_steps": sf.TRAINING_STEPS,
+                "training_loss": 1.25,
+                "training_accuracy": 0.5,
+            },
+        )
+    exact_command = sf.feasibility_exact_command(input_root, (), Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT))
+    sf.write_terminal(
+        input_root,
+        "FAILED",
+        cells,
+        (),
+        (),
+        failure="synthetic accepted feasibility_005 failure",
+        source_snapshot=sf.SourceSnapshot(commit=sf.POSTMORTEM_INPUT_SOURCE_COMMIT, status_lines=(), ignored_inputs=()),
+        decision_diagnostic=sf.DECISION_DIAGNOSTIC_ROOT_BINDING,
+        exact_command=exact_command,
+        deterministic_flags=_current_deterministic_flags(),
+        record_hashes=dict(sf.FEASIBILITY_RECORD_HASHES),
+    )
+    manifest_path = input_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["environment"] = dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)
+    sf.write_json(manifest_path, manifest)
+    _rewrite_terminal_manifest_sha(input_root, "FAILED")
+    monkeypatch.setattr(
+        sf,
+        "POSTMORTEM_INPUT_CHECKSUMS",
+        {
+            "manifest.json": sf.file_sha256(input_root / "manifest.json"),
+            "summary.json": sf.file_sha256(input_root / "summary.json"),
+            "FAILED.json": sf.file_sha256(input_root / "FAILED.json"),
+        },
+    )
+    return sf, input_root, output_root
+
+
+def _d3_refresh_faithful_input_checksums(sf: object, input_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest_path = input_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_inventory"] = sf.inventory(input_root)
+    sf.write_json(manifest_path, manifest)
+    _rewrite_terminal_manifest_sha(input_root, "FAILED")
+    monkeypatch.setattr(
+        sf,
+        "POSTMORTEM_INPUT_CHECKSUMS",
+        {
+            "manifest.json": sf.file_sha256(input_root / "manifest.json"),
+            "summary.json": sf.file_sha256(input_root / "summary.json"),
+            "FAILED.json": sf.file_sha256(input_root / "FAILED.json"),
+        },
+    )
+
+
 def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     input_root = Path(sf.POSTMORTEM_REQUIRED_INPUT_ROOT)
@@ -5879,6 +5997,96 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
         )
 
 
+def test_d3_postmortem_permanent_no_selection_no_retry_no_006_no_010d_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    input_root = Path(sf.POSTMORTEM_REQUIRED_INPUT_ROOT)
+    output_root = Path(sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT)
+    with pytest.raises(ValueError, match="feasibility_005"):
+        sf.validate_postmortem_argument_contract(
+            device="cuda:0",
+            input_root=Path("artifacts/phase8_toy_lm_bridge/feasibility_006"),
+            output_root=output_root,
+            accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        )
+    with pytest.raises(ValueError, match="retry|alternate|001"):
+        sf.require_postmortem_root_path_string(
+            "artifacts/phase8_toy_lm_bridge/feasibility_postmortem_002",
+            "output_root",
+        )
+    with pytest.raises(SystemExit):
+        sf.parse_args(
+            [
+                "postmortem-failure",
+                "--device",
+                "cuda:0",
+                "--input-root",
+                str(input_root),
+                "--output-root",
+                str(output_root),
+                "--accepted-proposal-commit",
+                sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+                "--predecessor-selection",
+                "artifacts/phase8_toy_lm_bridge/feasibility_selection_001.json",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        sf.parse_args(
+            [
+                "postmortem-failure",
+                "--device",
+                "cuda:0",
+                "--input-root",
+                str(input_root),
+                "--output-root",
+                str(output_root),
+                "--accepted-proposal-commit",
+                sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+                "--predecessor-root",
+                "artifacts/phase8_toy_lm_bridge/feasibility_004",
+            ]
+        )
+
+    for field in ("no_verdict_change", "no_010d_authority"):
+        sf, _input_root, synthetic_output_root = _d3_build_synthetic_postmortem_root(tmp_path / field, monkeypatch)
+        context = _d3_expected_publication_context(sf, synthetic_output_root)
+        summary_path = synthetic_output_root / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["interpretation_limits"][field] = False
+        sf.write_postmortem_json(summary_path, summary)
+        _d3_rebuild_postmortem_manifest_done(sf, synthetic_output_root)
+        with pytest.raises(ValueError, match="interpretation_limits"):
+            sf.validate_postmortem_terminal_root(synthetic_output_root, synthetic_output_root, **context)
+
+
+def test_d3_postmortem_cli_rejects_non_repo_cwd_before_shallow_or_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    input_root = Path(sf.POSTMORTEM_REQUIRED_INPUT_ROOT)
+    output_root = Path(sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT)
+    copied_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
+    copied_parent.mkdir(parents=True)
+    (copied_parent / "feasibility_005").mkdir()
+    (copied_parent / "feasibility_004").symlink_to(copied_parent / "feasibility_005")
+    exact_argv = sf.postmortem_exact_argv(input_root, output_root, sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT)
+    monkeypatch.setattr(sf, "postmortem_kernel_argv", lambda: exact_argv)
+    monkeypatch.setattr(sf, "validate_new_postmortem_root", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("output preflight ran before cwd guard")))
+    monkeypatch.setattr(sf, "validate_postmortem_input_shallow", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("shallow validation ran before cwd guard")))
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="cwd exactly"):
+        sf.validate_postmortem_cli_contract(
+            device="cuda:0",
+            input_root=input_root,
+            output_root=output_root,
+            accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            environ=_d3_env(sf),
+        )
+
+
 def test_d3_postmortem_preflight_order_stops_before_source_clean_output_or_model(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5927,6 +6135,160 @@ def test_d3_postmortem_preflight_order_stops_before_source_clean_output_or_model
     assert not output_root.with_name(output_root.name + ".tmp").exists()
 
 
+def test_d3_postmortem_real_shallow_and_deep_input_validation_rejects_evidence_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, input_root, _output_root = _d3_build_faithful_input_root(tmp_path / "valid", monkeypatch)
+    shallow = sf.validate_postmortem_input_shallow(input_root)
+    deep = sf.validate_postmortem_input_deep(input_root, shallow)
+    assert len(deep["generation_rows"]) == 24
+    assert len(deep["checkpoint_payloads"]) == 24
+
+    sf, input_root, _output_root = _d3_build_faithful_input_root(tmp_path / "inventory_drift", monkeypatch)
+    generation_path = input_root / "hex_copy__small__seed0" / "generations.jsonl"
+    generation_path.write_text(generation_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="checksum|file_inventory"):
+        sf.validate_postmortem_input_shallow(input_root)
+
+    sf, input_root, _output_root = _d3_build_faithful_input_root(tmp_path / "inventory_binding_drift", monkeypatch)
+    manifest_path = input_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_inventory"][0]["sha256"] = "0" * 64
+    sf.write_json(manifest_path, manifest)
+    _rewrite_terminal_manifest_sha(input_root, "FAILED")
+    monkeypatch.setattr(
+        sf,
+        "POSTMORTEM_INPUT_CHECKSUMS",
+        {
+            "manifest.json": sf.file_sha256(input_root / "manifest.json"),
+            "summary.json": sf.file_sha256(input_root / "summary.json"),
+            "FAILED.json": sf.file_sha256(input_root / "FAILED.json"),
+        },
+    )
+    with pytest.raises(ValueError, match="file_inventory|checksum"):
+        sf.validate_postmortem_input_shallow(input_root)
+
+    sf, input_root, _output_root = _d3_build_faithful_input_root(tmp_path / "generation_drift", monkeypatch)
+    generation_path = input_root / "hex_copy__small__seed0" / "generations.jsonl"
+    generation_rows = [json.loads(line) for line in generation_path.read_text(encoding="utf-8").splitlines()]
+    generation_rows[0]["prompt"] = f"{generation_rows[0]['prompt']} forged"
+    generation_path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in generation_rows) + "\n", encoding="utf-8")
+    _d3_refresh_faithful_input_checksums(sf, input_root, monkeypatch)
+    shallow = sf.validate_postmortem_input_shallow(input_root)
+    with pytest.raises(ValueError, match="prompt|frozen evaluation record"):
+        sf.validate_postmortem_input_deep(input_root, shallow)
+
+    sf, input_root, _output_root = _d3_build_faithful_input_root(tmp_path / "checkpoint_drift", monkeypatch)
+    checkpoint_path = input_root / "hex_copy__small__seed0" / "checkpoint_step1500.pt"
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    checkpoint["model_state_dict"]["lm_head.weight"] = checkpoint["model_state_dict"]["lm_head.weight"].clone()
+    checkpoint["model_state_dict"]["lm_head.weight"][0, 0] += 1
+    torch.save(checkpoint, checkpoint_path)
+    _d3_refresh_faithful_input_checksums(sf, input_root, monkeypatch)
+    shallow = sf.validate_postmortem_input_shallow(input_root)
+    with pytest.raises(ValueError, match="byte-equal"):
+        sf.validate_postmortem_input_deep(input_root, shallow)
+
+
+def test_d3_postmortem_passing_path_call_order_reaches_publication_after_forward(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    events: list[str] = []
+    input_root = tmp_path / "feasibility_005"
+    output_root = tmp_path / "feasibility_postmortem_001"
+    cell = {
+        "family": "hex_copy",
+        "model_size": "small",
+        "seed": 0,
+        "checkpoint_path": "hex_copy__small__seed0/checkpoint_step1500.pt",
+        "generations_path": "hex_copy__small__seed0/generations.jsonl",
+    }
+    records = {
+        "hex_copy": {
+            "train": (sf.FeasibilityRecord("hex_copy", "train", 0, "t0", "o0", "p", "a"),),
+            "eval": (sf.FeasibilityRecord("hex_copy", "eval", 0, "e0", "eo0", "p", "a"),),
+        }
+    }
+    input_binding = {
+        "root": str(input_root),
+        "source_commit": sf.POSTMORTEM_INPUT_SOURCE_COMMIT,
+        "manifest_path": "manifest.json",
+        "manifest_sha256": "a" * 64,
+        "summary_path": "summary.json",
+        "summary_sha256": "b" * 64,
+        "terminal_path": "FAILED.json",
+        "terminal_sha256": "c" * 64,
+        "configuration": sf.frozen_configuration(),
+        "record_hashes": dict(sf.FEASIBILITY_RECORD_HASHES),
+        "file_inventory": [],
+        "cells": [cell],
+    }
+    monkeypatch.setattr(sf, "validate_postmortem_argument_contract", lambda **kwargs: events.append("args"))
+    monkeypatch.setattr(sf, "require_postmortem_real_main_context", lambda: events.append("real_main"))
+    monkeypatch.setattr(sf, "require_postmortem_repo_cwd", lambda: events.append("cwd"))
+    monkeypatch.setattr(sf, "validate_postmortem_cli_contract", lambda **kwargs: events.append("cli"))
+    monkeypatch.setattr(
+        sf,
+        "validate_postmortem_input_shallow",
+        lambda root: events.append("shallow") or {"input_binding": input_binding, "manifest_data": {"environment": "runtime"}, "allowed_source_paths": set()},
+    )
+    monkeypatch.setattr(sf, "capture_postmortem_source_provenance", lambda *args, **kwargs: events.append("source_clean") or sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()))
+    monkeypatch.setattr(sf, "configure_postmortem_deterministic_backend", lambda: events.append("backend"))
+    monkeypatch.setattr(sf, "validate_postmortem_runtime_against_input", lambda manifest: events.append("runtime") or ({"env": True}, {"flags": True}))
+    monkeypatch.setattr(sf, "postmortem_proposal_binding", lambda commit: events.append("proposal") or {"proposal": True})
+    monkeypatch.setattr(sf, "postmortem_implementation_binding", lambda snapshot: events.append("implementation") or {"implementation": True})
+    monkeypatch.setattr(sf, "validate_postmortem_input_deep", lambda root, shallow: events.append("deep") or {"input_binding": input_binding, "generation_rows": {("hex_copy", "small", 0): [{"exact_match": True}]}, "checkpoint_payloads": {("hex_copy", "small", 0): {"metadata": {}}}, "cells": [cell]})
+    monkeypatch.setattr(sf, "postmortem_record_sets_rng_neutral", lambda: events.append("records_rng") or (records, {"record_reconstruction_global_state_unchanged": True}))
+    monkeypatch.setattr(sf, "validate_new_postmortem_root", lambda output: events.append("tmp"))
+    monkeypatch.setattr(sf, "validate_postmortem_current_cells_shallow", lambda cells: [cell])
+    monkeypatch.setattr(sf, "postmortem_file_sha_from_input_binding", lambda binding, path: "d" * 64)
+    monkeypatch.setattr(sf, "construct_postmortem_model_from_checkpoint", lambda *args, **kwargs: events.append("model") or object())
+    monkeypatch.setattr(sf, "postmortem_model_snapshot", lambda model: {})
+    monkeypatch.setattr(sf, "require_postmortem_model_unchanged", lambda *args, **kwargs: events.append("model_same"))
+    monkeypatch.setattr(sf, "require_rng_states_equal", lambda *args, **kwargs: events.append("rng_same"))
+
+    def teacher_rows(_model: object, _records: object, _tokenizer: object, _device: object, *, split: str, **_kwargs: object) -> tuple[list[dict[str, object]], dict[str, object]]:
+        events.append(f"forward:{split}")
+        return ([{"split": split}], {})
+
+    monkeypatch.setattr(sf, "postmortem_teacher_forced_rows", teacher_rows)
+    monkeypatch.setattr(sf, "postmortem_taxonomy_row", lambda *args, **kwargs: events.append("taxonomy") or {"taxonomy": True})
+    monkeypatch.setattr(sf, "postmortem_cell_metrics_row", lambda *args, **kwargs: events.append("cell_metrics") or {"cell": True})
+    monkeypatch.setattr(sf, "finalize_postmortem_outputs_under_guard", lambda **kwargs: events.append("output_publication"))
+    sf.run_postmortem_failure(
+        device="cuda:0",
+        input_root=input_root,
+        output_root=output_root,
+        accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        environ=_d3_env(sf),
+    )
+    ordered = [event for event in events if event in {"args", "real_main", "cwd", "cli", "shallow", "source_clean", "backend", "runtime", "proposal", "implementation", "deep", "records_rng", "tmp", "model", "forward:train", "forward:eval", "taxonomy", "cell_metrics", "output_publication"}]
+    assert ordered == [
+        "args",
+        "real_main",
+        "cwd",
+        "cli",
+        "shallow",
+        "source_clean",
+        "backend",
+        "runtime",
+        "proposal",
+        "implementation",
+        "deep",
+        "records_rng",
+        "tmp",
+        "model",
+        "forward:train",
+        "forward:eval",
+        "taxonomy",
+        "cell_metrics",
+        "output_publication",
+    ]
+
+
 def test_d3_postmortem_checkpoint_validator_is_rng_safe_and_tie_strict(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -5967,6 +6329,80 @@ def test_d3_postmortem_checkpoint_validator_is_rng_safe_and_tie_strict(
         sf.validate_postmortem_checkpoint_payload(mutated_path, cell)
 
 
+def test_d3_postmortem_constructor_inference_callbacks_and_publication_preserve_all_rng_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    all_records = sf.grouped_records()
+    original_batch_size = sf.BATCH_SIZE
+    original_train_records_per_family = sf.TRAIN_RECORDS_PER_FAMILY
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "publication", monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    monkeypatch.setattr(sf, "BATCH_SIZE", 2)
+    monkeypatch.setattr(sf, "TRAIN_RECORDS_PER_FAMILY", 2)
+    checkpoint_path = tmp_path / "checkpoint_step1500.pt"
+    save_checkpoint(
+        str(checkpoint_path),
+        build_model("small"),
+        metadata={
+            "family": "hex_copy",
+            "model_size": "small",
+            "seed": 0,
+            "training_steps": sf.TRAINING_STEPS,
+            "training_loss": 0.25,
+            "training_accuracy": 0.75,
+        },
+    )
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    records = all_records["hex_copy"]["train"][:2]
+    tokenizer = ByteTokenizer()
+    with sf.PostmortemForbiddenOperationGuard() as guard:
+        baseline = sf.snapshot_rng_states()
+        model = sf.construct_postmortem_model_from_checkpoint(
+            checkpoint,
+            model_size="small",
+            device=torch.device("cpu"),
+            guard=guard,
+        )
+        assert sf.rng_states_equal(baseline, sf.snapshot_rng_states())
+        sf.postmortem_teacher_forced_rows(
+            model,
+            records,
+            tokenizer,
+            torch.device("cpu"),
+            split="train",
+            family="hex_copy",
+            model_size="small",
+            seed=0,
+            checkpoint_path="hex_copy__small__seed0/checkpoint_step1500.pt",
+            checkpoint_sha256="d" * 64,
+        )
+        assert sf.rng_states_equal(baseline, sf.snapshot_rng_states())
+
+        monkeypatch.setattr(sf, "BATCH_SIZE", original_batch_size)
+        monkeypatch.setattr(sf, "TRAIN_RECORDS_PER_FAMILY", original_train_records_per_family)
+        output_root.rename(temp_root)
+        callback_count = 0
+
+        def assert_rng_unchanged_callback() -> None:
+            nonlocal callback_count
+            callback_count += 1
+            assert sf.rng_states_equal(baseline, sf.snapshot_rng_states())
+
+        sf.publish_postmortem_root(
+            temp_root,
+            output_root,
+            **context,
+            final_callback=assert_rng_unchanged_callback,
+        )
+        assert callback_count >= 1
+        assert output_root.is_dir()
+        assert not temp_root.exists()
+        assert sf.rng_states_equal(baseline, sf.snapshot_rng_states())
+
+
 def test_d3_postmortem_forbidden_operation_guard_rejects_training_generation_rng_and_save(
     tmp_path: Path,
 ) -> None:
@@ -5977,9 +6413,27 @@ def test_d3_postmortem_forbidden_operation_guard_rejects_training_generation_rng
         with pytest.raises(ValueError, match="forbidden"):
             sf.make_optimizer(model)
         with pytest.raises(ValueError, match="forbidden"):
+            sf.train_text_records()
+        with pytest.raises(ValueError, match="forbidden"):
+            sf.evaluate_model()
+        with pytest.raises(ValueError, match="forbidden"):
+            sf.generate_named_diagnostic_rows()
+        with pytest.raises(ValueError, match="forbidden"):
+            sf.generate_array_rows()
+        with pytest.raises(ValueError, match="forbidden"):
+            sf.save_checkpoint()
+        with pytest.raises(ValueError, match="forbidden"):
             torch.optim.AdamW(model.parameters())
+        with pytest.raises(ValueError, match="grad enablement|forbidden"):
+            torch.enable_grad()
+        with pytest.raises(ValueError, match="grad enablement|forbidden"):
+            torch.set_grad_enabled(True)
+        with pytest.raises(ValueError, match="forbidden"):
+            torch.tensor(1.0, requires_grad=True).backward()
         with pytest.raises(ValueError, match="forbidden"):
             torch.manual_seed(123)
+        with pytest.raises(ValueError, match="RNG-state mutation"):
+            torch.random.set_rng_state(torch.random.get_rng_state())
         with pytest.raises(ValueError, match="forbidden"):
             torch.save({"x": 1}, tmp_path / "forbidden.pt")
         with pytest.raises(ValueError, match="forbidden"):
@@ -6002,14 +6456,25 @@ def test_d3_postmortem_teacher_forcing_uses_response_labels_hex_and_full_batches
         def __init__(self) -> None:
             super().__init__()
             self.weight = torch.nn.Parameter(torch.zeros(1, dtype=torch.float32))
+            self.forward_calls = 0
 
         def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
-            labels = response_only_labels(input_ids)
-            logits = torch.full((*input_ids.shape, ByteTokenizer.vocab_size), -20.0, dtype=torch.float32, device=input_ids.device)
+            self.forward_calls += 1
+            labels = torch.full_like(input_ids, -100)
+            for row_index, row in enumerate(input_ids.tolist()):
+                unpadded = list(row)
+                while unpadded and unpadded[-1] == PAD_ID:
+                    unpadded.pop()
+                sep_index = unpadded.index(SEP_ID)
+                eos_index = len(unpadded) - 1
+                assert unpadded[eos_index] == EOS_ID
+                for source_position in range(sep_index, eos_index):
+                    labels[row_index, source_position] = input_ids[row_index, source_position + 1]
+            logits = torch.full((*input_ids.shape, ByteTokenizer.vocab_size), -3.0, dtype=torch.float32, device=input_ids.device)
             for row_index in range(labels.shape[0]):
                 for position, label in enumerate(labels[row_index].tolist()):
                     if label != -100:
-                        logits[row_index, position, int(label)] = 20.0
+                        logits[row_index, position, int(label)] = 2.0
             return logits
 
     model = PerfectTeacher().eval()
@@ -6028,9 +6493,68 @@ def test_d3_postmortem_teacher_forcing_uses_response_labels_hex_and_full_batches
     assert len(rows) == 2
     assert rows[0]["batch_index"] == 0
     assert rows[1]["row_within_batch"] == 1
+    assert rows[0]["selected_token_count"] == len(tokenizer.encode_text(records[0].answer)) + 1
     assert all(row["sequence_exact"] is True for row in rows)
-    assert all(float.fromhex(str(row["nll_numerator_hex"])) >= 0 for row in rows)
-    assert aggregate == sf.postmortem_teacher_aggregate(rows)
+    assert model.forward_calls == 1
+
+    input_ids = encode_record_batch(
+        tuple(TextRecord(record.prompt, record.answer) for record in records),
+        tokenizer,
+        max_length=ByteTokenizer.max_sequence_length,
+    )
+    manual_labels = torch.full_like(input_ids, -100)
+    manual_selected_positions: list[list[int]] = []
+    for row_index, encoded_row in enumerate(input_ids.tolist()):
+        unpadded = list(encoded_row)
+        while unpadded and unpadded[-1] == PAD_ID:
+            unpadded.pop()
+        sep_index = unpadded.index(SEP_ID)
+        eos_index = len(unpadded) - 1
+        assert unpadded[eos_index] == EOS_ID
+        row_positions = list(range(sep_index, eos_index))
+        assert row_positions
+        assert input_ids[row_index, row_positions[-1] + 1].item() == EOS_ID
+        manual_selected_positions.append(row_positions)
+        for source_position in row_positions:
+            manual_labels[row_index, source_position] = input_ids[row_index, source_position + 1]
+    oracle_logits = torch.full((*input_ids.shape, ByteTokenizer.vocab_size), -3.0, dtype=torch.float32)
+    for row_index, row_positions in enumerate(manual_selected_positions):
+        for source_position in row_positions:
+            oracle_logits[row_index, source_position, int(manual_labels[row_index, source_position])] = 2.0
+    oracle_losses = torch.nn.functional.cross_entropy(
+        oracle_logits.reshape(-1, oracle_logits.shape[-1]),
+        manual_labels.reshape(-1),
+        ignore_index=-100,
+        reduction="none",
+    ).reshape(len(records), ByteTokenizer.max_sequence_length)
+    assert oracle_losses.dtype == torch.float32
+    manual_total_nll = 0.0
+    manual_correct_total = 0
+    manual_selected_total = 0
+    for row_index, row_positions in enumerate(manual_selected_positions):
+        expected_hex = math.fsum(float(oracle_losses[row_index, position]) for position in row_positions).hex()
+        assert rows[row_index]["nll_numerator_hex"] == expected_hex
+        predictions = oracle_logits.argmax(dim=-1)
+        expected_correct = sum(
+            int(predictions[row_index, position]) == int(manual_labels[row_index, position])
+            for position in row_positions
+        )
+        assert rows[row_index]["selected_token_count"] == len(row_positions)
+        assert rows[row_index]["correct_token_count"] == expected_correct
+        manual_total_nll = math.fsum((manual_total_nll, float.fromhex(str(rows[row_index]["nll_numerator_hex"]))))
+        manual_correct_total += expected_correct
+        manual_selected_total += len(row_positions)
+    expected_aggregate = {
+        "record_count": 2,
+        "sequence_exact_numerator": 2,
+        "selected_token_count": manual_selected_total,
+        "correct_token_count": manual_correct_total,
+        "nll_numerator_hex": manual_total_nll.hex(),
+        "nll_per_token_hex": (manual_total_nll / manual_selected_total).hex(),
+    }
+    assert aggregate == expected_aggregate
+    assert sf.postmortem_teacher_aggregate(rows) == expected_aggregate
+    assert model.forward_calls == 1
     with pytest.raises(ValueError, match="full 64-row batches|cardinalities"):
         sf.postmortem_teacher_forced_rows(
             model,
@@ -6093,7 +6617,8 @@ def test_d3_postmortem_done_publication_schema_aggregates_and_mutation_rejection
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
-    sf.validate_postmortem_terminal_root(output_root, output_root)
+    context = _d3_expected_publication_context(sf, output_root)
+    sf.validate_postmortem_terminal_root(output_root, output_root, **context)
     summary_path = output_root / "summary.json"
     summary = json.loads(summary_path.read_text())
     assert summary["interpretation_limits"] == {
@@ -6113,4 +6638,269 @@ def test_d3_postmortem_done_publication_schema_aggregates_and_mutation_rejection
     sf.write_postmortem_json(manifest_path, manifest)
     sf.write_postmortem_done(output_root, input_binding=summary["input_binding"])
     with pytest.raises(ValueError, match="Named aggregates"):
-        sf.validate_postmortem_terminal_root(output_root, output_root)
+        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+
+
+def test_d3_postmortem_terminal_rejects_forged_composite_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = (
+        ("input_binding", lambda binding: {**binding, "record_hashes": {**binding["record_hashes"], "array_eval64": "0" * 64}}, "record_hashes|frozen in-memory"),
+        ("proposal_binding", lambda binding: {**binding, "blob": "0" * 40}, "proposal_binding"),
+        ("implementation_binding", lambda binding: {**binding, "runner_blob": "0" * 40}, "runner_blob"),
+        ("implementation_binding", lambda binding: {**binding, "commit": "0" * 40}, "commit"),
+    )
+    for index, (binding_name, mutate, match) in enumerate(cases):
+        sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / f"case_{index}", monkeypatch)
+        context = _d3_expected_publication_context(sf, output_root)
+        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+        summary_path = output_root / "summary.json"
+        manifest_path = output_root / "manifest.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        replacement = mutate(json.loads(json.dumps(manifest[binding_name])))
+        summary[binding_name] = replacement
+        manifest[binding_name] = replacement
+        if binding_name == "input_binding":
+            summary["configuration"] = replacement["configuration"]
+            manifest["configuration"] = replacement["configuration"]
+        sf.write_postmortem_json(summary_path, summary)
+        sf.write_postmortem_json(manifest_path, manifest)
+        _d3_rebuild_postmortem_manifest_done(sf, output_root)
+        with pytest.raises(ValueError, match=match):
+            sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+
+
+def test_d3_postmortem_terminal_rejects_canonical_byte_and_teacher_row_bypass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "canonical_json", monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+    summary_path = output_root / "summary.json"
+    summary_path.write_bytes(summary_path.read_bytes().replace(b"\n", b" \n", 1))
+    with pytest.raises(ValueError, match="canonical JSON bytes"):
+        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "canonical_jsonl", monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    teacher_path = output_root / "teacher_forced_rows.jsonl"
+    first_line, rest = teacher_path.read_bytes().split(b"\n", 1)
+    teacher_path.write_bytes(first_line + b" \n" + rest)
+    _d3_rebuild_postmortem_manifest_done(sf, output_root)
+    with pytest.raises(ValueError, match="canonical JSONL bytes"):
+        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "negative_zero", monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    summary_path = output_root / "summary.json"
+    summary_path.write_bytes(summary_path.read_bytes().replace(b'"training_accuracy": 0.5', b'"training_accuracy": -0.0', 1))
+    with pytest.raises(ValueError, match="negative zero"):
+        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "teacher_expected", monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    bad_context = dict(context)
+    bad_teacher_rows = json.loads(json.dumps(context["expected_teacher_rows"]))
+    bad_teacher_rows[0]["operand_id"] = "synthetic-forged-operand"
+    bad_context["expected_teacher_rows"] = bad_teacher_rows
+    with pytest.raises(ValueError, match="teacher_forced_rows changed"):
+        sf.validate_postmortem_terminal_root(output_root, output_root, **bad_context)
+
+
+def test_d3_postmortem_terminal_rejects_schema_type_null_order_cardinality_runtime_and_terminal_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, base_output_root = _d3_build_synthetic_postmortem_root(tmp_path / "base", monkeypatch)
+    context = _d3_expected_publication_context(sf, base_output_root)
+    sf.validate_postmortem_terminal_root(base_output_root, base_output_root, **context)
+
+    def fresh_root(name: str) -> Path:
+        candidate = tmp_path / f"{name}_root"
+        shutil.copytree(base_output_root, candidate)
+        return candidate
+
+    def rewrite_rows(root: Path, relative_path: str, rows: list[dict[str, object]]) -> None:
+        sf.write_postmortem_jsonl(root / relative_path, rows)
+        _d3_rebuild_postmortem_manifest_done(sf, root)
+
+    root = fresh_root("teacher_closed_schema")
+    rows = sf.read_canonical_postmortem_jsonl(root / "teacher_forced_rows.jsonl", "teacher")
+    rows[0]["unexpected"] = True
+    rewrite_rows(root, "teacher_forced_rows.jsonl", rows)
+    with pytest.raises(ValueError, match="closed schema|teacher_forced_rows changed"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("teacher_order")
+    rows = sf.read_canonical_postmortem_jsonl(root / "teacher_forced_rows.jsonl", "teacher")
+    rows[0], rows[1] = rows[1], rows[0]
+    rewrite_rows(root, "teacher_forced_rows.jsonl", rows)
+    with pytest.raises(ValueError, match="record_index|teacher_forced_rows changed|mismatch"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("teacher_cardinality")
+    rows = sf.read_canonical_postmortem_jsonl(root / "teacher_forced_rows.jsonl", "teacher")
+    rewrite_rows(root, "teacher_forced_rows.jsonl", rows[:-1])
+    with pytest.raises(ValueError, match="cardinality|teacher_forced_rows changed"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("cell_type")
+    rows = sf.read_canonical_postmortem_jsonl(root / "cell_metrics.jsonl", "cell")
+    rows[0]["seed"] = "0"
+    rewrite_rows(root, "cell_metrics.jsonl", rows)
+    with pytest.raises(ValueError, match="seed.*integer|cell metrics changed|closed schema"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("taxonomy_null")
+    rows = sf.read_canonical_postmortem_jsonl(root / "error_taxonomy.jsonl", "taxonomy")
+    rows[0]["named"] = {}
+    rewrite_rows(root, "error_taxonomy.jsonl", rows)
+    with pytest.raises(ValueError, match="taxonomy row|error_taxonomy rows changed"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("summary_schema")
+    summary_path = root / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["unexpected"] = True
+    sf.write_postmortem_json(summary_path, summary)
+    _d3_rebuild_postmortem_manifest_done(sf, root)
+    with pytest.raises(ValueError, match="summary.*closed schema"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("summary_null_boundary")
+    summary_path = root / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["interpretation_limits"]["no_010d_authority"] = None
+    sf.write_postmortem_json(summary_path, summary)
+    _d3_rebuild_postmortem_manifest_done(sf, root)
+    with pytest.raises(ValueError, match="interpretation_limits"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("manifest_schema")
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["unexpected"] = True
+    manifest["file_inventory"] = sf.postmortem_output_inventory(root)
+    sf.write_postmortem_json(manifest_path, manifest)
+    sf.write_postmortem_done(root, input_binding=manifest["input_binding"])
+    with pytest.raises(ValueError, match="manifest.*closed schema"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("runtime_environment")
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["environment"] = {**manifest["environment"], "forged_runtime": "present"}
+    manifest["file_inventory"] = sf.postmortem_output_inventory(root)
+    sf.write_postmortem_json(manifest_path, manifest)
+    sf.write_postmortem_done(root, input_binding=manifest["input_binding"])
+    with pytest.raises(ValueError, match="environment mismatch"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("done_schema")
+    done_path = root / "DONE.json"
+    done = json.loads(done_path.read_text(encoding="utf-8"))
+    done["unexpected"] = True
+    sf.write_postmortem_json(done_path, done)
+    with pytest.raises(ValueError, match="done.*closed schema"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+    root = fresh_root("done_null_row_count")
+    done_path = root / "DONE.json"
+    done = json.loads(done_path.read_text(encoding="utf-8"))
+    done["row_counts"]["cell_metrics"] = None
+    sf.write_postmortem_json(done_path, done)
+    with pytest.raises(ValueError, match="row_counts mismatch"):
+        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+
+
+def test_d3_postmortem_publication_rejects_coherent_callback_output_rewrite_without_rename_or_terminal_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    output_root.rename(temp_root)
+    assert not output_root.exists()
+
+    def mutate_teacher_rows_after_validation() -> None:
+        teacher_path = temp_root / "teacher_forced_rows.jsonl"
+        rows = sf.read_canonical_postmortem_jsonl(teacher_path, "callback.teacher")
+        rows[0]["operand_id"] = "forged-with-aggregate-preserved"
+        sf.write_postmortem_jsonl(teacher_path, rows)
+        manifest_path = temp_root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["file_inventory"] = sf.postmortem_output_inventory(temp_root)
+        sf.write_postmortem_json(manifest_path, manifest)
+        sf.write_postmortem_done(temp_root, input_binding=manifest["input_binding"])
+
+    with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+        sf.publish_postmortem_root_or_leave_incomplete(
+            temp_root,
+            output_root,
+            **context,
+            final_callback=mutate_teacher_rows_after_validation,
+        )
+    assert not output_root.exists()
+    assert temp_root.exists()
+    assert not (temp_root / "DONE.json").exists()
+    assert not (temp_root / "FAILED.json").exists()
+
+
+def test_d3_postmortem_publication_guard_covers_callbacks_and_no_clobber(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    temp_root = tmp_path / "feasibility_postmortem_001.tmp"
+    output_root = tmp_path / "feasibility_postmortem_001"
+    temp_root.mkdir()
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_root", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_inventory_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "postmortem_terminal_fingerprint", lambda *args, **kwargs: ())
+    monkeypatch.setattr(sf, "atomic_rename_noreplace", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rename ran after forbidden callback")))
+    required_context = {
+        "expected_input_binding": {},
+        "expected_proposal_binding": {},
+        "expected_implementation_binding": {},
+        "expected_source_snapshot": sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
+        "expected_teacher_rows": [],
+        "expected_cell_rows": [],
+        "expected_taxonomy_rows": [],
+    }
+    with sf.PostmortemForbiddenOperationGuard():
+        with pytest.raises(ValueError, match="forbidden|RNG-state mutation"):
+            sf.publish_postmortem_root(
+                temp_root,
+                output_root,
+                **required_context,
+                final_callback=lambda: torch.manual_seed(123),
+            )
+    output_root.mkdir()
+    with pytest.raises(FileExistsError, match="overwrite"):
+        sf.publish_postmortem_root(temp_root, output_root, **required_context)
+
+
+def test_d3_postmortem_model_snapshot_rejects_parameter_and_buffer_mutation() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+
+    class BufferedModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.register_buffer("running", torch.zeros(1))
+
+    model = BufferedModel()
+    snapshot = sf.postmortem_model_snapshot(model)
+    with torch.no_grad():
+        model.weight.add_(1)
+    with pytest.raises(ValueError, match="changed"):
+        sf.require_postmortem_model_unchanged(model, snapshot, "parameter mutation")
+    model = BufferedModel()
+    snapshot = sf.postmortem_model_snapshot(model)
+    model.running.add_(1)
+    with pytest.raises(ValueError, match="changed"):
+        sf.require_postmortem_model_unchanged(model, snapshot, "buffer mutation")
