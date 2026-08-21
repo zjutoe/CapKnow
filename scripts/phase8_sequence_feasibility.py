@@ -18,6 +18,7 @@ from pathlib import PurePosixPath
 import platform
 import random
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -80,6 +81,8 @@ DIAGNOSTIC_ROOT_RE = re.compile(r"^feasibility_diagnostic_(\d{3})$")
 SELECTION_RE = re.compile(r"^feasibility_selection_(\d{3})\.json$")
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 ARTIFACT_PARENT = REPO_ROOT / "artifacts" / "phase8_toy_lm_bridge"
+IGNORED_IMPORT_SURFACE_SUFFIXES = frozenset({".py", ".pyc", ".pyo", ".so", ".pth"})
+IGNORED_IMPORT_HOOK_STEMS = frozenset({"sitecustomize", "usercustomize"})
 HEX_OPERAND_RE = re.compile(r"(?<![0-9A-Fa-f])([0-9a-f]{16})(?![0-9A-Fa-f])", re.IGNORECASE)
 NAMED_VALUE_KEYS = ("red", "blue", "green", "silver")
 NAMED_VALUE_KEYS_BY_SPLIT = {
@@ -309,6 +312,14 @@ POSTMORTEM_ROW_COUNTS = {
     "cell_metrics": 24,
     "error_taxonomy": 1536,
 }
+POSTMORTEM_TERMINAL_FILE_NAMES = (
+    "DONE.json",
+    "cell_metrics.jsonl",
+    "error_taxonomy.jsonl",
+    "manifest.json",
+    "summary.json",
+    "teacher_forced_rows.jsonl",
+)
 POSTMORTEM_TEACHER_ROW_KEYS = frozenset({
     "schema_version",
     "family",
@@ -4732,9 +4743,19 @@ def publish_current_feasibility_root_or_leave_incomplete(
 
 
 def remove_diagnostic_terminal_markers(root: Path) -> None:
+    try:
+        root_metadata = root.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+        return
     for name in ("DONE.json", "FAILED.json"):
         marker = root / name
-        if marker.is_file() and not marker.is_symlink():
+        try:
+            marker_metadata = marker.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISREG(marker_metadata.st_mode):
             marker.unlink()
 
 
@@ -5580,34 +5601,97 @@ def verify_source_unchanged(snapshot: SourceSnapshot, *, active_output_root: Pat
         raise SourceChangedError("Ignored executable source inputs changed during feasibility run before terminal publication.")
 
 
+def ignored_import_surface_candidate(path: Path, *, is_symlink: bool, link_target: str | None) -> bool:
+    if path.is_absolute():
+        raise ValueError("Ignored source scan requires repository-relative paths.")
+    relative = PurePosixPath(path.as_posix())
+    if "__pycache__" in relative.parts:
+        return True
+    if path.suffix in IGNORED_IMPORT_SURFACE_SUFFIXES:
+        return True
+    if path.name in IGNORED_IMPORT_HOOK_STEMS or path.stem in IGNORED_IMPORT_HOOK_STEMS:
+        return True
+    if is_symlink:
+        if link_target is None:
+            return True
+        target = PurePosixPath(link_target)
+        if "__pycache__" in target.parts:
+            return True
+        if target.suffix in IGNORED_IMPORT_SURFACE_SUFFIXES:
+            return True
+        if target.name in IGNORED_IMPORT_HOOK_STEMS or target.stem in IGNORED_IMPORT_HOOK_STEMS:
+            return True
+        return True
+    return False
+
+
+def sha256_regular_file_no_follow(path: Path, expected_stat: os.stat_result | None = None) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        observed = os.fstat(fd)
+        if not stat.S_ISREG(observed.st_mode):
+            raise ValueError("Source snapshot can hash only regular non-symlink files.")
+        if expected_stat is not None:
+            expected_identity = (expected_stat.st_dev, expected_stat.st_ino, stat.S_IFMT(expected_stat.st_mode), expected_stat.st_size)
+            observed_identity = (observed.st_dev, observed.st_ino, stat.S_IFMT(observed.st_mode), observed.st_size)
+            if observed_identity != expected_identity:
+                raise ValueError("Source snapshot file identity changed while hashing.")
+        digest = sha256()
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def symlink_target_sha256(path: Path) -> tuple[str, int]:
+    target = os.readlink(path)
+    payload = os.fsencode(target)
+    return sha256(payload).hexdigest(), len(payload)
+
+
+def ignored_source_input_snapshot(path: Path) -> dict[str, object] | None:
+    if path.is_absolute():
+        raise ValueError("Ignored source snapshot requires repository-relative paths.")
+    absolute = REPO_ROOT / path
+    try:
+        metadata = absolute.lstat()
+    except FileNotFoundError:
+        return None
+    is_symlink = stat.S_ISLNK(metadata.st_mode)
+    link_target = os.readlink(absolute) if is_symlink else None
+    if not ignored_import_surface_candidate(path, is_symlink=is_symlink, link_target=link_target):
+        return None
+    if is_symlink:
+        digest, byte_count = symlink_target_sha256(absolute)
+    elif stat.S_ISREG(metadata.st_mode):
+        digest = sha256_regular_file_no_follow(absolute, metadata)
+        byte_count = metadata.st_size
+    else:
+        raise ValueError("Ignored import-surface input must be a regular file or symlink.")
+    return {"path": path.as_posix(), "sha256": digest, "bytes": int(byte_count)}
+
+
 def ignored_source_inputs() -> tuple[dict[str, object], ...]:
     rows: list[dict[str, object]] = []
     completed = subprocess.run(
-        [
-            "git",
-            "status",
-            "--porcelain=v1",
-            "--ignored",
-            "--untracked-files=all",
-            "capability_certificate_lab",
-            "scripts",
-        ],
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
         check=True,
         text=True,
         stdout=subprocess.PIPE,
         cwd=REPO_ROOT,
     )
-    for line in completed.stdout.splitlines():
-        if not line.startswith("!! "):
+    for rel in completed.stdout.split("\0"):
+        if not rel:
             continue
-        rel = line[3:]
         path = Path(rel)
-        if "__pycache__" not in path.parts and path.suffix not in {".py", ".pyc", ".pyo", ".so"}:
-            continue
-        resolved = (path if path.is_absolute() else REPO_ROOT / path).resolve()
-        if not resolved.is_file():
-            continue
-        rows.append({"path": path.as_posix(), "sha256": file_sha256(resolved), "bytes": resolved.stat().st_size})
+        snapshot = ignored_source_input_snapshot(path)
+        if snapshot is not None:
+            rows.append(snapshot)
     return tuple(sorted(rows, key=lambda row: str(row["path"])))
 
 
@@ -8700,15 +8784,70 @@ def expected_postmortem_input_binding_for_posthoc_validation() -> dict[str, obje
     return require_exact_mapping(binding, POSTMORTEM_INPUT_BINDING_KEYS, "postmortem.expected_input_binding")
 
 
-def postmortem_terminal_fingerprint(root: Path) -> tuple[tuple[str, str, int], ...]:
-    expected_files = ("DONE.json", "cell_metrics.jsonl", "error_taxonomy.jsonl", "manifest.json", "summary.json", "teacher_forced_rows.jsonl")
-    rows: list[tuple[str, str, int]] = []
-    for relative_path in expected_files:
-        path = root / relative_path
-        if not path.is_file() or path.is_symlink():
-            raise ValueError("Postmortem terminal fingerprint requires the exact six output files.")
-        rows.append((relative_path, file_sha256(path), path.stat().st_size))
+def postmortem_path_identity(path: Path, *, field_name: str, directory: bool) -> tuple[int, int, int]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError(f"{field_name} must exist for postmortem publication.") from exc
+    file_type = stat.S_IFMT(metadata.st_mode)
+    if stat.S_ISLNK(metadata.st_mode):
+        raise ValueError(f"{field_name} must be a real non-symlink path.")
+    if directory:
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(f"{field_name} must be a real non-symlink directory.")
+    elif not stat.S_ISREG(metadata.st_mode):
+        raise ValueError(f"{field_name} must be a regular non-symlink file.")
+    return (int(metadata.st_dev), int(metadata.st_ino), int(file_type))
+
+
+def postmortem_terminal_root_identity(root: Path) -> tuple[int, int, int]:
+    return postmortem_path_identity(root, field_name="postmortem terminal root", directory=True)
+
+
+def require_postmortem_terminal_root_identity(root: Path, expected: tuple[int, int, int], stage: str) -> None:
+    observed = postmortem_terminal_root_identity(root)
+    if observed != expected:
+        raise ValueError(f"Postmortem terminal root identity changed {stage}.")
+
+
+def postmortem_terminal_file_identity(path: Path) -> tuple[int, int, int, str, int]:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise ValueError("Postmortem terminal root must contain exactly the six required files.") from exc
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("Postmortem terminal root entries must be regular non-symlink files.")
+    digest = sha256_regular_file_no_follow(path, metadata)
+    observed = path.lstat()
+    if (observed.st_dev, observed.st_ino, stat.S_IFMT(observed.st_mode), observed.st_size) != (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        metadata.st_size,
+    ):
+        raise ValueError("Postmortem terminal file identity changed while fingerprinting.")
+    return (int(metadata.st_dev), int(metadata.st_ino), int(stat.S_IFMT(metadata.st_mode)), digest, int(metadata.st_size))
+
+
+def validate_postmortem_terminal_root_entries(root: Path) -> tuple[tuple[str, int, int, int, str, int], ...]:
+    postmortem_terminal_root_identity(root)
+    try:
+        entry_names = sorted(entry.name for entry in os.scandir(root))
+    except FileNotFoundError as exc:
+        raise ValueError("Postmortem terminal root must exist before publication.") from exc
+    if entry_names != sorted(POSTMORTEM_TERMINAL_FILE_NAMES):
+        raise ValueError("Postmortem terminal root must contain exactly six root-level entries with the required names.")
+    rows: list[tuple[str, int, int, int, str, int]] = []
+    for relative_path in POSTMORTEM_TERMINAL_FILE_NAMES:
+        device, inode, file_type, digest, byte_count = postmortem_terminal_file_identity(root / relative_path)
+        rows.append((relative_path, device, inode, file_type, digest, byte_count))
     return tuple(rows)
+
+
+def postmortem_terminal_fingerprint(root: Path) -> tuple[tuple[object, ...], ...]:
+    root_device, root_inode, root_type = postmortem_terminal_root_identity(root)
+    file_rows = validate_postmortem_terminal_root_entries(root)
+    return (("__root__", root_device, root_inode, root_type), *file_rows)
 
 
 def validate_postmortem_terminal_root(
@@ -8723,6 +8862,7 @@ def validate_postmortem_terminal_root(
     expected_cell_rows: Sequence[dict[str, object]] | None = None,
     expected_taxonomy_rows: Sequence[dict[str, object]] | None = None,
 ) -> None:
+    validate_postmortem_terminal_root_entries(root)
     terminals = [path.name for path in (root / "DONE.json", root / "FAILED.json") if path.exists()]
     if terminals != ["DONE.json"]:
         raise ValueError("Postmortem root must contain DONE.json only; finalized FAILED roots are forbidden.")
@@ -8815,6 +8955,7 @@ def validate_postmortem_terminal_root(
 
 
 def validate_postmortem_terminal_inventory_snapshot(root: Path) -> None:
+    validate_postmortem_terminal_root_entries(root)
     manifest_path = root / "manifest.json"
     done_path = root / "DONE.json"
     if not manifest_path.is_file() or not done_path.is_file():
@@ -8847,6 +8988,7 @@ def publish_postmortem_root(
 ) -> None:
     if output_root.exists() or output_root.is_symlink():
         raise FileExistsError(f"Refusing to overwrite existing postmortem root: {output_root}")
+    temp_root_identity = postmortem_terminal_root_identity(temp_root)
     validate_postmortem_terminal_root(
         temp_root,
         output_root,
@@ -8858,9 +9000,11 @@ def publish_postmortem_root(
         expected_cell_rows=expected_cell_rows,
         expected_taxonomy_rows=expected_taxonomy_rows,
     )
+    require_postmortem_terminal_root_identity(temp_root, temp_root_identity, "after initial validation")
     fingerprint = postmortem_terminal_fingerprint(temp_root)
     if final_callback is not None:
         final_callback()
+    require_postmortem_terminal_root_identity(temp_root, temp_root_identity, "after validation callback")
     validate_postmortem_terminal_root(
         temp_root,
         output_root,
@@ -8872,11 +9016,14 @@ def publish_postmortem_root(
         expected_cell_rows=expected_cell_rows,
         expected_taxonomy_rows=expected_taxonomy_rows,
     )
+    require_postmortem_terminal_root_identity(temp_root, temp_root_identity, "after callback validation")
     if postmortem_terminal_fingerprint(temp_root) != fingerprint:
         raise ValueError("Postmortem terminal files changed after validation.")
     validate_postmortem_terminal_inventory_snapshot(temp_root)
+    require_postmortem_terminal_root_identity(temp_root, temp_root_identity, "after final inventory validation")
     if final_callback is not None:
         final_callback()
+    require_postmortem_terminal_root_identity(temp_root, temp_root_identity, "after final callback")
     validate_postmortem_terminal_root(
         temp_root,
         output_root,
@@ -8888,9 +9035,23 @@ def publish_postmortem_root(
         expected_cell_rows=expected_cell_rows,
         expected_taxonomy_rows=expected_taxonomy_rows,
     )
+    require_postmortem_terminal_root_identity(temp_root, temp_root_identity, "after final callback validation")
     if postmortem_terminal_fingerprint(temp_root) != fingerprint:
         raise ValueError("Postmortem terminal files changed after final callback.")
+    require_postmortem_terminal_root_identity(temp_root, temp_root_identity, "immediately before atomic rename")
+    if postmortem_terminal_fingerprint(temp_root) != fingerprint:
+        raise ValueError("Postmortem terminal files changed immediately before atomic rename.")
     atomic_rename_noreplace(temp_root, output_root)
+    try:
+        require_postmortem_terminal_root_identity(output_root, temp_root_identity, "after atomic rename")
+        if postmortem_terminal_fingerprint(output_root) != fingerprint:
+            raise ValueError("Postmortem terminal fingerprint changed after atomic rename.")
+    except Exception:
+        try:
+            atomic_rename_noreplace(output_root, temp_root)
+        except Exception as rollback_exc:
+            raise FeasibilityPublicationError("Postmortem final root identity mismatch and rollback failed.") from rollback_exc
+        raise
 
 
 def publish_postmortem_root_or_leave_incomplete(

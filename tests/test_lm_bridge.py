@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import replace
+from hashlib import sha256
 import importlib
 import inspect
 import json
@@ -3107,8 +3108,8 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
         ) -> subprocess.CompletedProcess[str]:
             if args[:4] == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
                 return subprocess.CompletedProcess(args, 0, stdout="".join(f"?? {path}\n" for path in paths))
-            if args[:5] == ["git", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"]:
-                return subprocess.CompletedProcess(args, 0, stdout="".join(f"!! {line}\n" for line in ignored_lines))
+            if args == ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"]:
+                return subprocess.CompletedProcess(args, 0, stdout="".join(f"{line}\0" for line in ignored_lines))
             if args == ["git", "rev-parse", "HEAD"]:
                 return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
             if args[:3] == ["git", "cat-file", "-e"]:
@@ -3138,6 +3139,51 @@ def test_source_clean_only_allows_inventory_bound_predecessor_files(
     set_git_status(allowed_paths, ignored_lines=("scripts/phase8_sequence_feasibility.py",))
     with pytest.raises(RuntimeError, match="Ignored executable source input"):
         sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
+
+
+def test_repo_wide_ignored_source_scan_detects_root_sourceless_import_hooks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("*.pyc\n*.pyo\n*.so\n*.pth\nignored_link\n__pycache__/\n", encoding="utf-8")
+    sitecustomize = repo / "sitecustomize.pyc"
+    shadow_module = repo / "shadow_module.pyc"
+    nested_cache = repo / "pkg" / "__pycache__" / "nested.cpython-313.pyc"
+    nested_cache.parent.mkdir(parents=True)
+    sitecustomize.write_bytes(b"root ignored sourceless sitecustomize")
+    shadow_module.write_bytes(b"root ignored sourceless shadow module")
+    nested_cache.write_bytes(b"nested ignored cache")
+    symlink_path = repo / "ignored_link"
+    symlink_created = False
+    try:
+        symlink_path.symlink_to("shadow_module.pyc")
+        symlink_created = True
+    except OSError:
+        pass
+
+    monkeypatch.setattr(sf, "REPO_ROOT", repo)
+    rows = sf.ignored_source_inputs()
+    by_path = {row["path"]: row for row in rows}
+    assert "sitecustomize.pyc" in by_path
+    assert "shadow_module.pyc" in by_path
+    assert "pkg/__pycache__/nested.cpython-313.pyc" in by_path
+    assert by_path["sitecustomize.pyc"] == {
+        "path": "sitecustomize.pyc",
+        "sha256": sf.file_sha256(sitecustomize),
+        "bytes": sitecustomize.stat().st_size,
+    }
+    assert by_path["shadow_module.pyc"] == {
+        "path": "shadow_module.pyc",
+        "sha256": sf.file_sha256(shadow_module),
+        "bytes": shadow_module.stat().st_size,
+    }
+    if symlink_created:
+        assert by_path["ignored_link"]["sha256"] == sha256(b"shadow_module.pyc").hexdigest()
+        assert by_path["ignored_link"]["bytes"] == len(b"shadow_module.pyc")
 
 
 def test_source_snapshot_rejects_head_or_status_change_before_terminal_publication(
@@ -3189,8 +3235,8 @@ def test_source_snapshot_rejects_head_or_status_change_before_terminal_publicati
             return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
         if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
             return subprocess.CompletedProcess(args, 0, stdout="")
-        if args[:5] == ["git", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"]:
-            return subprocess.CompletedProcess(args, 0, stdout="!! scripts/phase8_sequence_feasibility.py\n")
+        if args == ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"]:
+            return subprocess.CompletedProcess(args, 0, stdout="scripts/phase8_sequence_feasibility.py\0")
         raise AssertionError(args)
 
     monkeypatch.setattr(sf.subprocess, "run", changed_ignored)
@@ -3214,7 +3260,7 @@ def test_source_snapshot_rejects_head_or_status_change_before_terminal_publicati
                 0,
                 stdout="?? artifacts/phase8_toy_lm_bridge/feasibility_001.tmp/in_progress.txt\n",
             )
-        if args[:5] == ["git", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"]:
+        if args == ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"]:
             return subprocess.CompletedProcess(args, 0, stdout="")
         raise AssertionError(args)
 
@@ -6846,6 +6892,121 @@ def test_d3_postmortem_publication_rejects_coherent_callback_output_rewrite_with
         )
     assert not output_root.exists()
     assert temp_root.exists()
+    assert not (temp_root / "DONE.json").exists()
+    assert not (temp_root / "FAILED.json").exists()
+
+
+def test_d3_postmortem_terminal_root_rejects_extra_directory_and_non_file_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "extra_dir", monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    (output_root / "empty_extra_dir").mkdir()
+    with pytest.raises(ValueError, match="exactly six root-level entries"):
+        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "non_file", monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    (output_root / "DONE.json").unlink()
+    (output_root / "DONE.json").mkdir()
+    with pytest.raises(ValueError, match="regular non-symlink files"):
+        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+
+
+def test_d3_postmortem_publication_rejects_temp_root_symlink_swap_without_following_external_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    output_root.rename(temp_root)
+    external_copy = tmp_path / "external_copy"
+    original_temp = tmp_path / "original_temp"
+    shutil.copytree(temp_root, external_copy)
+    callback_ran = False
+
+    def swap_temp_for_external_symlink() -> None:
+        nonlocal callback_ran
+        if callback_ran:
+            return
+        callback_ran = True
+        temp_root.rename(original_temp)
+        temp_root.symlink_to(external_copy, target_is_directory=True)
+
+    with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+        sf.publish_postmortem_root_or_leave_incomplete(
+            temp_root,
+            output_root,
+            **context,
+            final_callback=swap_temp_for_external_symlink,
+        )
+    assert callback_ran is True
+    assert not output_root.exists()
+    assert temp_root.is_symlink()
+    assert (external_copy / "DONE.json").is_file()
+    assert (original_temp / "DONE.json").is_file()
+
+
+def test_d3_postmortem_publication_rejects_same_byte_temp_directory_inode_swap_and_removes_new_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    output_root.rename(temp_root)
+    replacement = tmp_path / "same_byte_replacement"
+    callback_ran = False
+
+    def swap_temp_for_same_byte_directory() -> None:
+        nonlocal callback_ran
+        if callback_ran:
+            return
+        callback_ran = True
+        shutil.copytree(temp_root, replacement)
+        shutil.rmtree(temp_root)
+        replacement.rename(temp_root)
+
+    with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+        sf.publish_postmortem_root_or_leave_incomplete(
+            temp_root,
+            output_root,
+            **context,
+            final_callback=swap_temp_for_same_byte_directory,
+        )
+    assert callback_ran is True
+    assert not output_root.exists()
+    assert temp_root.is_dir()
+    assert not temp_root.is_symlink()
+    assert not (temp_root / "DONE.json").exists()
+    assert not (temp_root / "FAILED.json").exists()
+
+
+def test_d3_postmortem_publication_rolls_back_final_identity_mismatch_without_final_root_or_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    output_root.rename(temp_root)
+    rename_calls: list[tuple[Path, Path]] = []
+
+    def copytree_rename(source: Path, destination: Path) -> None:
+        rename_calls.append((source, destination))
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(destination)
+        shutil.copytree(source, destination)
+        shutil.rmtree(source)
+
+    monkeypatch.setattr(sf, "atomic_rename_noreplace", copytree_rename)
+    with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+        sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **context)
+    assert rename_calls == [(temp_root, output_root), (output_root, temp_root)]
+    assert not output_root.exists()
+    assert temp_root.is_dir()
     assert not (temp_root / "DONE.json").exists()
     assert not (temp_root / "FAILED.json").exists()
 
