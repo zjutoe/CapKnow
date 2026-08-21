@@ -19,6 +19,12 @@ are consistent with optimization, teacher-forced prediction, or greedy decoding.
 does not amend the model, data, optimizer, `52/64` threshold, 1500-step budget, D2
 stop rule, or scientific interpretation.
 
+Revision after implementation review corrects the descriptive logits width from
+`259` to the frozen tokenizer/model value `260`, requires an isolated interpreter
+bootstrap before any repository or third-party import, and closes terminal cleanup
+and rollback identity gaps. These are feasibility/security corrections only; they do
+not change any scientific computation, accepted 005 result, or authority boundary.
+
 Acceptance of this proposal would authorize only a separate implementation handoff.
 That implementation must be delegated to a fresh-context `gpt-5.5` executor, frozen
 in a commit, tested, and independently reviewed before `main` may authorize one
@@ -130,6 +136,28 @@ The future implementation must freeze the exact command and require real kernel 
 real environment, clean committed source, the absent output root, and complete input
 validation before CUDA model construction or output-root creation.
 
+The canonical command must invoke Python with both `-I` and `-B`. `-I` must keep the
+repository root, its `scripts` directory, and `PYTHONPATH=.` off the interpreter's
+startup import path; `-B` independently enforces no bytecode writes because isolated
+mode ignores `PYTHONDONTWRITEBYTECODE` as an interpreter setting. The three exact
+environment strings above remain recorded unchanged for equality with the 005 input.
+Before adding the exact repository root to `sys.path`, and before importing Torch or
+any repository module, a standard-library-only bootstrap must:
+
+- require the repository-root CWD, real `__main__` process, exact kernel argv, and
+  active isolated/no-bytecode flags;
+- use `/usr/bin/git` to reject tracked/staged drift, every untracked
+  path outside the bound Phase 8 artifact parent, and every repository-wide ignored
+  executable, import hook, sourceless module, native module, `.pth` file, importable
+  cache entry, or symlink without following its target; and
+- before those imports can execute, compare the bytes of the actually executed runner
+  and every tracked repository import-surface candidate with the corresponding blob
+  at the same runtime HEAD, irrespective of index assume-unchanged/skip-worktree bits.
+
+The later full evidence-aware cleanliness check remains mandatory. A source hook or
+shadow module that executes and deletes itself before the bootstrap is a test failure,
+not an allowed clean state.
+
 The complete runtime `environment` and `deterministic_flags` objects must equal the
 input manifest field-for-field before CUDA construction and before publication.
 Parameters, logits, and loss are float32; autocast is disabled; CUDA/cuDNN TF32 are
@@ -146,7 +174,7 @@ reproduce that definition rather than call an opaque aggregate helper.
 Teacher forcing predicts every response byte plus EOS with exact response-only
 shifted labels, `ignore_index=-100`, float32 unreduced cross-entropy, and
 `logits.argmax(dim=-1)` at selected source positions. Inputs/labels are int64; exact
-shapes are `[64,256]` inputs, `[64,256]` labels, `[64,256,259]` logits, and
+shapes are `[64,256]` inputs, `[64,256]` labels, `[64,256,260]` logits, and
 `[64,256]` loss. Process original record order as eight contiguous train batches and
 one eval batch, with no partial batch, shuffle, autocast, or second aggregate forward.
 Per-row NLL is `math.fsum` of selected host Python float values in ascending position
@@ -310,7 +338,8 @@ implicit coercions are rejected.
 
 `proposal_binding` records the exact independently accepted proposal commit and blob
 supplied externally by `main`; it is not self-embedded here. `implementation_binding`
-records runtime HEAD and runner blob. `input_binding` separately records the 005
+records runtime HEAD and runner blob, and the bootstrap must prove that blob is also
+the byte identity of the runner actually being executed. `input_binding` separately records the 005
 source commit, three top-level hashes, terminal, full 49-entry inventory, and all 24
 cell/checkpoint/generation identities. No field may be omitted or added.
 
@@ -338,8 +367,22 @@ Publication uses same-parent
 must be absent before exclusive no-clobber creation. DONE requires all cardinalities,
 schemas, checksums, aggregates, lineage, RNG-state equality, runtime/source equality,
 and inventory to validate before a final source/runtime check and atomic
-rename-no-replace. Any exception removes both terminal markers and preserves an
-explicitly incomplete temp root; it never renames. Scientific values never cause
+rename-no-replace. The implementation must retain no-follow directory descriptors for
+the artifact parent and the exclusively created temp directory, bind the temp
+directory device/inode/type, require exactly the six declared root-level regular
+non-symlink files, and validate root and file identity across every callback and the
+rename boundary. Failure cleanup must address `DONE.json` and `FAILED.json` relative
+to the trusted directory descriptor without following either a root or marker
+symlink; symlink, FIFO, socket, device, and directory-shaped terminal names must be
+atomically demoted from those names rather than left terminal-looking.
+
+Any exception before rename preserves a non-terminalized incomplete temp root. If a
+post-rename identity check fails, the just-published entry must be moved back to the
+exact temp path with no overwrite and the final path must be absent before the error
+returns. An unexpected occupant of the temp name must first be preserved under a
+noncanonical, non-terminal collision quarantine in the same parent; it must never
+block removal of the invalid final path or be treated as a retry/output root. Cleanup
+must not follow or delete an external symlink target. Scientific values never cause
 failure or retry.
 
 ## Frozen metrics and interpretations
@@ -412,10 +455,15 @@ A future D3 implementation handoff must require tests for:
    save, or generation call can occur, plus byte-identical loaded parameters and
    process-global Python, Torch CPU,
    and all-CUDA RNG states across reconstruction, load, inference, and publication;
-6. source-clean preflight before CUDA construction or output creation, no-clobber
-   temporary-root publication, terminal/inventory validation, and source-unchanged
-   checks before atomic rename;
-7. permanent rejection of selection use, feasibility verdict changes, `010D`
+6. an isolated/no-bytecode subprocess bootstrap before repository/Torch imports,
+   including self-removing root `sitecustomize` and sourceless-shadow tests, actual
+   runner/imported-source byte equality with HEAD, source-clean preflight before CUDA
+   construction or output creation, no-clobber temporary-root publication,
+   terminal/inventory validation, and source-unchanged checks before atomic rename;
+7. no-follow cleanup for regular, symlink, FIFO, socket, device, directory, and
+   root-symlink terminal substitutions; occupied-temp rollback must preserve the
+   collision, remove the invalid final path, and leave only a non-terminal temp root;
+8. permanent rejection of selection use, feasibility verdict changes, `010D`
    authorization, retry, or alternate-root fallback.
 
 ## Independent proposal-review gate
