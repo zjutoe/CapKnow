@@ -4,8 +4,8 @@
 
 ```text
 status: implementation handoff pending independent review
-accepted proposal commit: 336afdc7cb079086998a0db527f544f16b68950c
-accepted proposal blob: 1c52056e6579262045d81315224132f8897bb9a3
+accepted proposal commit: 06ee71d958eb1c4cb446ede3d120e99eb64bba97
+accepted proposal blob: 5ea32f67d078408a6764adbb2d66518f713245d7
 implementation authority: none until this handoff is accepted at an exact commit
 execution authority: none
 training authority: none
@@ -13,10 +13,18 @@ selection authority: none
 Task 010D authority: false
 ```
 
-This handoff is subordinate to the independently accepted proposal at
+This revised handoff is subordinate to the independently accepted proposal at
 `phase8/Task_010C_D3_Feasibility_005_Postmortem_Proposal.md`. The proposal is the
 scientific contract. This document freezes the bounded implementation package,
 command surface, tests, and return format. It does not authorize a postmortem run.
+The accepted repair corrects only the descriptive logits width and pre-import/
+publication trust boundaries; it does not change the accepted 005 evidence, metric
+semantics, model, data, optimizer, step budget, threshold, or authority boundary.
+Implementation commits `365cd33aad276ac9d77255b6a75d86b23e668b5c`,
+`5c078b2c375c373228196e09f244e5e16fe6e983`, and
+`ca0626b12e198eefb0d3d0f9ac4254818705c97c` remain rejected and have no launch
+authority; the next executor repairs the current code under this revised handoff and
+the accepted proposal above.
 
 After this handoff is accepted, `main` may delegate implementation to one
 fresh-context Codex subagent with model identifier exactly `gpt-5.5`,
@@ -60,14 +68,12 @@ a copied root or the artifact parent directory.
 The executor may modify only:
 
 ```text
-Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md
-phase8/README.md
-phase8/Task_010C_Tokenizer_Model_and_Feasibility.md
 scripts/phase8_sequence_feasibility.py
 tests/test_lm_bridge.py
 ```
 
-Do not modify this handoff, the accepted D3 proposal, model/tokenizer/train modules,
+Do not modify this handoff, the accepted D3 proposal, the exact verifier source at
+`phase8/Task_010C_D3_Postmortem_Verifier.py.txt`, model/tokenizer/train modules,
 corpus generators, earlier handoffs, any artifact, or any later Phase 8 task. If the
 implementation cannot fit these paths without changing an accepted scientific
 contract, stop and return the smallest ambiguity to `main`.
@@ -75,54 +81,119 @@ contract, stop and return the smallest ambiguity to `main`.
 ## Required command surface
 
 Add exactly one CLI subcommand named `postmortem-failure`. Its future canonical
-command is:
+launch is not a shell command. A separately reviewed external supervisor, bound only
+in a later launch packet, must call `execve()` with this exact template:
 
 ```text
-PYTHONDONTWRITEBYTECODE=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_sequence_feasibility.py postmortem-failure --device cuda:0 --input-root artifacts/phase8_toy_lm_bridge/feasibility_005 --output-root artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001 --accepted-proposal-commit 336afdc7cb079086998a0db527f544f16b68950c
+executable: /opt/anaconda3/bin/python
+cwd: /home/mye/src/llm/CapKnow
+environment: {"LC_ALL":"C","PYTHONDONTWRITEBYTECODE":"1","CUBLAS_WORKSPACE_CONFIG":":4096:8","PYTHONPATH":"."}
+argv:
+  /opt/anaconda3/bin/python
+  -I
+  -B
+  -S
+  -c
+  <exact UTF-8 bytes of phase8/Task_010C_D3_Postmortem_Verifier.py.txt>
+  --verifier-sha256
+  0ec580597442655a095c9c0090917697798c3e6bc895962eec5fb368eb723bc6
+  --accepted-implementation-commit
+  <later independently accepted implementation commit>
+  --runner-path
+  scripts/phase8_sequence_feasibility.py
+  --
+  postmortem-failure
+  --device
+  cuda:0
+  --input-root
+  artifacts/phase8_toy_lm_bridge/feasibility_005
+  --output-root
+  artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001
+  --accepted-proposal-commit
+  06ee71d958eb1c4cb446ede3d120e99eb64bba97
+  --accepted-implementation-commit
+  <same later independently accepted implementation commit>
 ```
 
-The implementation encodes and tests this command but must not execute it. Refuse
-programmatic `main(argv)` and direct-import invocation of the normative writer. The
-writer itself, before model construction or output creation, must require its real
-`__main__` process context, exact `/proc/self/cmdline`, exact environment variables,
-`--device cuda:0`, the two exact roots, and the exact accepted proposal commit.
+The verifier source is exactly `20,428` bytes, has Git blob
+`da20df1bdf78a6ccaf42df2ac0178daaaa9040a7`, and has the SHA-256 above. The
+implementation must embed and test that SHA and reject any byte difference. It must
+not execute the launch. This handoff supplies no supervisor identity and no accepted
+implementation commit, so it supplies no complete launch command and no execution
+authority.
+
+Two pre-existing ignored `__pycache__` files under `scripts/` and `tests/` currently
+make verifier source authentication fail closed. The executor must not delete or
+modify them to make tests or a launch pass. Their disposition belongs to a later
+main-thread launch-precondition decision; this implementation task remains valid and
+non-executing while they are present.
+
+Refuse programmatic `main(argv)`, direct script execution of `postmortem-failure`,
+`runpy`, and direct-import invocation of the normative writer. The writer must require
+the verifier-injected globals, exact verifier SHA, exact accepted implementation
+commit repeated in CLI, real `__main__` process context, exact `/proc/self/cmdline`,
+exact environment, isolated/no-bytecode/no-site flags, `--device cuda:0`, the two
+exact roots, and the accepted proposal commit before model construction or output.
 
 The proposal binding written later is:
 
 ```text
-commit: 336afdc7cb079086998a0db527f544f16b68950c
+commit: 06ee71d958eb1c4cb446ede3d120e99eb64bba97
 path: phase8/Task_010C_D3_Feasibility_005_Postmortem_Proposal.md
-blob: 1c52056e6579262045d81315224132f8897bb9a3
+blob: 5ea32f67d078408a6764adbb2d66518f713245d7
 ```
 
 The implementation binding is the clean runtime HEAD plus the Git blob of
 `scripts/phase8_sequence_feasibility.py`. Do not embed the future implementation
-commit into source. `main` supplies and reviews the exact implementation commit in a
+commit into source; accept it only from the verifier and the duplicate exact CLI
+argument. `main` supplies and reviews that commit plus the external supervisor in a
 later launch packet.
+
+The verifier injects the accepted commit, verifier SHA, closed loader, hermetic
+`git_run` callable, and a full `verify_repository_unchanged` callback into the runner
+globals. The normative runner must require those exact objects and use only the
+injected Git/callback boundary for all later Git/source checks. Calling ambient
+`git`, reparsing local configuration, reopening repository source, or replacing an
+injected object is forbidden and covered by sentinels.
 
 ## Preflight order
 
 The exact fail-closed order is:
 
-1. validate argument types and canonical root basenames;
-2. require exact real main context, kernel argv, environment strings, and absent final
+1. before the runner or any repository/third-party module executes, the external
+   supervisor supplies the exact clean `execve()` boundary and the inline verifier
+   validates its source/argv/flags/CWD/environment;
+2. the verifier authenticates the canonical non-redirected Git store with hermetic
+   plumbing, the accepted implementation HEAD, complete tree/index/worktree bytes and
+   modes, untracked/ignored import surface, runner bytes, and every repository Python
+   module buffer; it installs the closed in-memory repository loader, adds only the
+   frozen site-packages path, and executes the captured runner;
+3. validate runner argument types and canonical root basenames;
+4. require exact real main/verifier context, kernel argv, environment strings, and absent final
    and same-parent `.tmp` output roots;
-3. shallow-validate the input path, terminal, three top-level hashes, 49-entry
+5. shallow-validate the input path, terminal, three top-level hashes, 49-entry
    inventory paths/sizes/hashes, plus the exact 005-bound paths/top-level hashes and
    complete inventories of predecessors 001–004 and D1; derive only those exact files
    as source-clean exclusions;
-4. require clean tracked/staged source and reject every ignored executable input;
-5. verify current HEAD, proposal commit/blob, runner blob, full A800 runtime object,
+6. repeat the full evidence-aware clean-source check and reject every ignored
+   executable input using only the injected hermetic Git/source callbacks;
+7. verify current HEAD, proposal commit/blob, executed runner blob, accepted
+   implementation commit, full A800 runtime object,
    and deterministic flags;
-6. deep-validate input manifest/summary/terminal equality, 24 ordered cells,
+8. deep-validate input manifest/summary/terminal equality, 24 ordered cells,
    generation rows and scores, tied checkpoint schemas/duplicate byte equality, and
    complete input lineage;
-7. reconstruct the eight record sets with local PRNGs, verify all eight frozen hashes,
+9. reconstruct the eight record sets with local PRNGs, verify all eight frozen hashes,
    and prove global Python/Torch CPU/all-CUDA RNG states unchanged before any restore;
-8. only then create the `.tmp` root and enter the checkpoint-forward loop.
+10. only then create the `.tmp` root and enter the checkpoint-forward loop.
 
-No tensor load, model construction, CUDA forward, record schedule, or output path may
-occur before source cleanliness. Shallow validation may hash files but must not load
+No worktree repository byte may execute: the runner and every
+`capability_certificate_lab` package/module execute only from verifier-captured,
+accepted-commit buffers through the closed highest-priority loader. The repository,
+`scripts`, and artifact paths never enter `sys.path`; site-packages shadowing and
+post-capture source mutation cannot change executed bytes. No tensor load, model
+construction, CUDA forward, record schedule, or output path may occur before full
+source cleanliness. Shallow validation may hash files but must not load
 checkpoints or construct models. Tests must use call-order sentinels for both failure
 and passing paths.
 
@@ -143,10 +214,11 @@ input JSONL.
 
 For each cell, evaluate exactly its own family records: 512 train records in eight
 contiguous 64-row batches followed by 64 eval records in one batch. Preserve exact
-record order, `[64,256]` encoding, response-only shifted labels including EOS,
-float32 unreduced CE, argmax, `math.fsum` row/cell order, `float.hex()` NLL
-serialization, integer-first metrics, and every Named/Array/common rule in the
-accepted proposal and its bound D1 metric oracle.
+record order, `[64,256]` int64 inputs/labels, `[64,256,260]` float32 logits,
+`[64,256]` float32 unreduced CE, response-only shifted labels including EOS, argmax,
+`math.fsum` row/cell order, `float.hex()` NLL serialization, integer-first metrics,
+and every Named/Array/common rule in the accepted proposal and its bound D1 metric
+oracle. Error messages and tests must use width `260`; `259` is forbidden.
 
 Snapshot process-global Python, Torch CPU, and all-CUDA RNG states at every boundary
 required by the proposal. Record reconstruction must compare before any restore.
@@ -182,45 +254,78 @@ artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001.tmp
 ```
 
 Create it exclusively only after preflight. A finalized FAILED root is forbidden. On
-any exception, remove `DONE.json` and `FAILED.json` if present, preserve the incomplete
-temp root, do not rename, and re-raise. On success, write summary, then manifest, then
-DONE; validate every schema, cardinality, path, hash, aggregate, binding, parameter
-snapshot, RNG state, source/runtime snapshot, and inventory; repeat the final
-source/runtime/RNG check; then use Linux atomic rename-no-replace. Never overwrite,
-delete, retry, or create `feasibility_postmortem_002`.
+creation retain no-follow descriptors for the real artifact parent and temp root and
+bind their device/inode/type. Require exactly the six declared root-level regular
+non-symlink files and bind every file identity/content across callbacks and rename.
+On any exception, remove or atomically demote both terminal names through the trusted
+directory descriptor without following a root or marker symlink; preserve a
+non-terminal incomplete temp root and re-raise. On success, write summary, then
+manifest, then DONE; validate every schema, cardinality, path, hash, aggregate,
+binding, parameter snapshot, RNG state, source/runtime snapshot, identity, and
+inventory; repeat the final source/runtime/RNG check; then use Linux atomic
+rename-no-replace and verify the same directory identity at the final path.
+
+If post-rename validation fails, first preserve an unexpected occupant of the exact
+temp name under a unique noncanonical, non-terminal same-parent collision quarantine,
+then move the invalid final entry back to the exact temp path without overwrite,
+demote terminal names through its no-follow descriptor, and require the final path to
+be absent before returning an error. A quarantine is never an output, retry, fallback,
+or evidence root. Never follow/delete an external symlink target, overwrite, retry,
+or create `feasibility_postmortem_002`.
 
 ## Required tests
 
 Add focused tests covering at least:
 
-1. exact CLI argv/environment/main-context acceptance and rejection, including direct
-   import and programmatic-main refusal before output/model work;
-2. exact input root/top-level hashes/configuration/record hashes/cells/inventory and
+1. exact verifier source bytes/blob/SHA-256, supervisor `execve` executable/CWD/
+   environment/argv, isolated/no-bytecode/no-site flags, `/proc/self/cmdline`, and
+   duplicate implementation-commit binding; reject shell, `/usr/bin/env`, direct
+   script, `runpy`, import, changed verifier, and programmatic-main routes before any
+   repository/Torch/output/model work;
+2. temporary-Git-repository anti-execution tests for inherited loader/Python/Git
+   variables, local/global FSMonitor and hooks, pager, external diff/textconv/filter,
+   assume-unchanged/skip-worktree, replacements, alternates/grafts, `commondir`,
+   partial-clone/promisor packs and lazy fetch. Every sentinel remains absent;
+3. complete accepted commit/HEAD/tree/index/mode/raw-worktree/blob equality, regular
+   no-follow reads, unauthorized untracked and repo-wide ignored import surfaces,
+   actual runner bytes, all captured repository Python modules, injected immutable
+   Git/source callbacks, repeated source verification, and rejection of every ambient
+   or replaced Git/source helper;
+4. a closed highest-priority in-memory loader test for package initializers, relative
+   and transitive imports, missing-module rejection, no worktree path on `sys.path`,
+   site-packages namespace shadowing, and post-capture worktree mutation. Only the
+   captured accepted buffers may execute;
+5. exact CLI argument/environment/main-context acceptance plus refusal before
+   output/model work;
+6. exact input root/top-level hashes/configuration/record hashes/cells/inventory and
    rejection of copies, substitutions, symlinks, missing/extra fields/files, size/hash
    drift, terminal drift, generation mutation, and tied-checkpoint mutation;
-3. shallow → clean source → deep input → records/RNG → `.tmp` → model/forward call
+7. verifier → shallow input → full clean source → deep input → records/RNG → `.tmp`
+   → model/forward call
    order, with no early tensor/model/CUDA/output work;
-4. local record PRNG success, global RNG mutation rejection before restore, the single
+8. local record PRNG success, global RNG mutation rejection before restore, the single
    constructor restore scope, and byte-identical Python/Torch CPU/all-CUDA states
    after load/inference/publication;
-5. exact 24-cell order, 13,824 teacher rows, 24 cell rows, 1,536 taxonomy rows, batch
-   shapes/order, labels including EOS, float32/no-autocast CE, `math.fsum`,
-   `float.hex()`, and no second aggregate forward;
-6. an independent test oracle for common/Named/Array row fields, null conditions,
+9. exact 24-cell order, 13,824 teacher rows, 24 cell rows, 1,536 taxonomy rows,
+   `[64,256]` inputs/labels/loss, `[64,256,260]` logits, labels including EOS,
+   float32/no-autocast CE, `math.fsum`, `float.hex()`, and no second aggregate forward;
+10. an independent test oracle for common/Named/Array row fields, null conditions,
    sparse histograms, item-count strata, conditional denominators, item multisets,
    paired exact table, and all summary aggregates;
-7. checkpoint metadata copied descriptively without comparing it to fresh
+11. checkpoint metadata copied descriptively without comparing it to fresh
    teacher-forced statistics;
-8. sentinels rejecting optimizer construction, grad enablement, backward, post-load
+12. sentinels rejecting optimizer construction, grad enablement, backward, post-load
    parameter/buffer mutation, checkpoint save, generation, extra records, or new data;
-9. exact JSON/JSONL keys, types, enums, nullability, ordering, canonical bytes,
+13. exact JSON/JSONL keys, types, enums, nullability, ordering, canonical bytes,
    cardinalities, bindings, four-file inventory, and one-way DONE→manifest checksum;
-10. publication mutation tests for every output file, aggregate, input/proposal/
-    implementation binding, runtime/source/RNG callback, no-clobber target, and atomic
-    rename; every failure must leave no terminal marker and no final root;
-11. permanent rejection of selection use, feasibility verdict change, retry,
+14. descriptor-bound publication mutation tests for every output/aggregate/binding/
+    callback, root and marker symlinks, same-byte directory swaps, extra/non-regular
+    entries, marker FIFO/socket/directory/device forms, no-clobber, post-rename
+    mismatch, and occupied-temp collision quarantine; every failure leaves no
+    terminal-looking marker and no final root without following external targets;
+15. permanent rejection of selection use, feasibility verdict change, retry,
     `feasibility_006`, alternate postmortem root, or `010D` authorization;
-12. regression coverage for existing D1/D2 validators, current feasibility artifacts,
+16. regression coverage for existing D1/D2 validators, current feasibility artifacts,
     and selection rejection.
 
 Run in this order:
@@ -229,7 +334,7 @@ Run in this order:
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -q tests/test_lm_bridge.py -k 'd3 or postmortem'
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -q tests/test_lm_bridge.py
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m pytest -q
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -m py_compile scripts/phase8_sequence_feasibility.py tests/test_lm_bridge.py
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python -c 'from pathlib import Path; [compile(path.read_bytes(), str(path), "exec") for path in (Path("scripts/phase8_sequence_feasibility.py"), Path("tests/test_lm_bridge.py"))]'
 git diff --check
 ```
 
@@ -239,9 +344,8 @@ postmortem root.
 
 ## Documentation boundary
 
-Update only the allowed existing documents to record the implementation status,
-exact command, non-evidence classification, DONE-only publication, and permanent 005
-stop. Do not mark the implementation accepted before `main` freezes and reviews it.
+Do not modify documentation in the implementation package. `main` records accepted
+implementation status and any later launch boundary only after exact-commit review.
 Do not record a postmortem outcome because this task cannot run it.
 
 ## Executor return
@@ -276,11 +380,16 @@ Before delegation, freeze this handoff and review it at an exact commit with a
 fresh-context `gpt-5.6-sol`, `xhigh`, strict read-only agent. The review must verify:
 
 - exact proposal and 005 evidence binding;
-- executable allowed paths and command/main-context contract;
+- exact verifier source/blob/SHA, external supervisor `execve` template, unavailable-
+  supervisor no-execution boundary, duplicate accepted implementation commit, and
+  command/main-context contract;
+- hermetic Git plumbing, complete tree/index/worktree/import-surface authentication,
+  no-helper/no-lazy-fetch behavior, and closed captured-buffer repository loader;
 - shallow/source-clean/deep/RNG/output ordering;
 - teacher-forced and taxonomy semantic fidelity;
 - RNG-neutral construction and post-load parameter immutability;
-- closed schemas, cardinalities, provenance, runtime, DONE-only atomic publication;
+- closed schemas, cardinalities, provenance, runtime, descriptor-bound no-follow
+  cleanup, occupied-temp quarantine/rollback, and DONE-only atomic publication;
 - forbidden-operation and tamper test completeness; and
 - no training, generation, selection, retry, verdict reversal, or `010D` authority.
 

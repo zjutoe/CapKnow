@@ -82,9 +82,11 @@ condition and must be returned to `main`.
   add only fail-closed checkpoint-read-only analysis to the existing Phase 8 runner
   and tests. The handoff, implementation commit, and future command each require
   separate acceptance; D3-I itself cannot run the postmortem or authorize `010D`.
-  The implementation package records the future canonical `postmortem-failure`
-  command, validates exact 005/proposal/source/runtime bindings, and can publish
-  only a non-evidence `DONE` postmortem root after a separate launch decision.
+  The revised implementation package records a future supervisor-to-`execve`
+  `postmortem-failure` launch template, authenticates source before repository/Torch
+  imports, validates exact 005/proposal/source/runtime bindings, and can publish only
+  a non-evidence `DONE` postmortem root after separate implementation, supervisor,
+  and launch decisions.
 - `010D`: formal training/checkpoint primitives and isolated evaluator.
 - `010E`: behavioral response matrices and exact/adaptive certificate integration.
 - `010F`: frozen metrics, sensitivity matrices, aggregation, and report-ready

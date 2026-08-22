@@ -735,18 +735,28 @@ a selection, or authorize `010D`. The proposal, any later implementation handoff
 the implementation commit, and any future command each require their own explicit
 review/authorization boundary.
 
-The accepted 010C-D3 proposal and D3-I handoff define one future command surface only:
+The repaired 010C-D3 proposal accepted at
+`06ee71d958eb1c4cb446ede3d120e99eb64bba97` and revised D3-I handoff define one
+future launch surface only. It is a direct `execve()` by a separately accepted
+external supervisor, not a shell command:
 
 ```text
-PYTHONDONTWRITEBYTECODE=1 CUBLAS_WORKSPACE_CONFIG=:4096:8 PYTHONPATH=. python scripts/phase8_sequence_feasibility.py postmortem-failure --device cuda:0 --input-root artifacts/phase8_toy_lm_bridge/feasibility_005 --output-root artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001 --accepted-proposal-commit 336afdc7cb079086998a0db527f544f16b68950c
+executable: /opt/anaconda3/bin/python
+cwd: /home/mye/src/llm/CapKnow
+environment: exact clean LC_ALL plus the three frozen 005 environment values
+argv prefix: python -I -B -S -c <verifier bytes> --verifier-sha256 0ec580597442655a095c9c0090917697798c3e6bc895962eec5fb368eb723bc6 --accepted-implementation-commit <accepted SHA> --runner-path scripts/phase8_sequence_feasibility.py --
+runner argv: postmortem-failure --device cuda:0 --input-root artifacts/phase8_toy_lm_bridge/feasibility_005 --output-root artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001 --accepted-proposal-commit 06ee71d958eb1c4cb446ede3d120e99eb64bba97 --accepted-implementation-commit <same accepted SHA>
 ```
 
-The D3-I implementation package may encode the command, exact proposal/005/source/
-runtime bindings, checkpoint-read-only teacher-forced metrics, retained-generation
-taxonomy, forbidden-operation sentinels, and DONE-only atomic publication. It does
-not authorize running the command, does not authorize a finalized FAILED postmortem
-root, does not create a selection, and does not change the permanent 005 stop before
-`010D`.
+The exact verifier source is frozen by the revised D3-I handoff. It authenticates the
+accepted implementation tree/index/worktree and loads repository modules only from
+captured accepted buffers before Torch or runner execution. The D3-I implementation
+package may encode this launch template, exact proposal/005/source/runtime bindings,
+checkpoint-read-only teacher-forced metrics, retained-generation taxonomy,
+forbidden-operation sentinels, and descriptor-bound DONE-only atomic publication. It
+does not supply the future accepted implementation SHA or supervisor, authorize a
+run or finalized FAILED postmortem root, create a selection, or change the permanent
+005 stop before `010D`.
 
 ### 9.5 Non-scientific resource benchmark and authorization
 

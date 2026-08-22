@@ -1,0 +1,502 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.abc
+import importlib.util
+import os
+from pathlib import Path, PurePosixPath
+import re
+import stat
+import subprocess
+import sys
+from types import ModuleType
+
+
+REPO_ROOT = Path("/home/mye/src/llm/CapKnow")
+GIT_DIR = REPO_ROOT / ".git"
+GIT = "/usr/bin/git"
+PYTHON = "/opt/anaconda3/bin/python"
+SITE_PACKAGES = "/opt/anaconda3/lib/python3.13/site-packages"
+RUNNER_PATH = "scripts/phase8_sequence_feasibility.py"
+ARTIFACT_PREFIX = PurePosixPath("artifacts/phase8_toy_lm_bridge")
+INITIAL_SYS_PATH = [
+    "/opt/anaconda3/lib/python313.zip",
+    "/opt/anaconda3/lib/python3.13",
+    "/opt/anaconda3/lib/python3.13/lib-dynload",
+]
+EXPECTED_ENVIRONMENT = {
+    "LC_ALL": "C",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "CUBLAS_WORKSPACE_CONFIG": ":4096:8",
+    "PYTHONPATH": ".",
+}
+GIT_ENVIRONMENT = {
+    "LC_ALL": "C",
+    "GIT_ATTR_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_LITERAL_PATHSPECS": "1",
+    "GIT_NO_LAZY_FETCH": "1",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_PAGER": "cat",
+}
+GIT_PREFIX = [
+    GIT,
+    "--no-pager",
+    "--no-replace-objects",
+    "--literal-pathspecs",
+    f"--git-dir={GIT_DIR}",
+    f"--work-tree={REPO_ROOT}",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "core.excludesFile=/dev/null",
+    "-c",
+    "core.pager=cat",
+    "-c",
+    "pager.rev-parse=false",
+    "-c",
+    "pager.ls-tree=false",
+    "-c",
+    "pager.ls-files=false",
+    "-c",
+    "pager.cat-file=false",
+]
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+IGNORED_IMPORT_SUFFIXES = frozenset({".py", ".pyc", ".pyo", ".so", ".pth"})
+IGNORED_IMPORT_HOOK_STEMS = frozenset({"sitecustomize", "usercustomize"})
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"Phase 8 postmortem verifier rejected launch: {message}")
+
+
+def require_real_directory(path: Path, field_name: str) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        fail(f"{field_name} is absent")
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+        fail(f"{field_name} is not a real directory")
+    return metadata
+
+
+def require_real_file(path: Path, field_name: str) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        fail(f"{field_name} is absent")
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        fail(f"{field_name} is not a real regular file")
+    return metadata
+
+
+def canonical_relative_path(raw: str, field_name: str) -> PurePosixPath:
+    path = PurePosixPath(raw)
+    if not raw or "\\" in raw or "//" in raw or path.is_absolute():
+        fail(f"{field_name} is not canonical")
+    if path.as_posix() != raw or any(part in {"", ".", ".."} for part in path.parts):
+        fail(f"{field_name} is not canonical")
+    return path
+
+
+def read_regular_repo_file_no_follow(raw: str) -> tuple[bytes, os.stat_result]:
+    relative = canonical_relative_path(raw, "tracked path")
+    directory_fd = os.open(REPO_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in relative.parts[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_fd = os.open(relative.parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
+        try:
+            before = os.fstat(file_fd)
+            if not stat.S_ISREG(before.st_mode):
+                fail(f"tracked path is not a regular file: {raw}")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(file_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.fstat(file_fd)
+            path_after = os.stat(relative.parts[-1], dir_fd=directory_fd, follow_symlinks=False)
+            identity_before = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode), before.st_size)
+            identity_after = (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode), after.st_size)
+            identity_path = (path_after.st_dev, path_after.st_ino, stat.S_IFMT(path_after.st_mode), path_after.st_size)
+            if identity_before != identity_after or identity_before != identity_path:
+                fail(f"tracked path changed while captured: {raw}")
+            return b"".join(chunks), before
+        finally:
+            os.close(file_fd)
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        fail(f"tracked path could not be captured without following links: {raw}: {exc}")
+    finally:
+        os.close(directory_fd)
+
+
+def git_blob_oid(payload: bytes) -> str:
+    header = f"blob {len(payload)}\0".encode("ascii")
+    return hashlib.sha1(header + payload, usedforsecurity=False).hexdigest()
+
+
+def git_run(*args: str) -> bytes:
+    allowed = {"rev-parse", "ls-tree", "ls-files", "cat-file"}
+    if not args or args[0] not in allowed:
+        fail("non-plumbing Git command requested")
+    completed = subprocess.run(
+        [*GIT_PREFIX, *args],
+        cwd=REPO_ROOT,
+        env=GIT_ENVIRONMENT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        close_fds=True,
+        timeout=30,
+    )
+    if completed.returncode != 0 or completed.stderr:
+        fail(f"Git plumbing failed: {args[0]}")
+    return completed.stdout
+
+
+def reject_noncanonical_git_entries(root: Path, field_name: str) -> None:
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError as exc:
+            fail(f"{field_name} cannot be enumerated: {exc}")
+        for entry in entries:
+            try:
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                fail(f"{field_name} entry cannot be inspected: {entry.name}: {exc}")
+            if stat.S_ISLNK(metadata.st_mode):
+                fail(f"{field_name} contains a symlink: {entry.path}")
+            if stat.S_ISDIR(metadata.st_mode):
+                stack.append(Path(entry.path))
+            elif not stat.S_ISREG(metadata.st_mode):
+                fail(f"{field_name} contains a non-file entry: {entry.path}")
+
+
+def reject_redirected_git_state() -> None:
+    require_real_directory(REPO_ROOT, "repository root")
+    require_real_directory(GIT_DIR, "Git directory")
+    require_real_directory(GIT_DIR / "objects", "Git object directory")
+    require_real_directory(GIT_DIR / "refs", "Git refs directory")
+    reject_noncanonical_git_entries(GIT_DIR / "objects", "Git object store")
+    reject_noncanonical_git_entries(GIT_DIR / "refs", "Git refs store")
+    require_real_file(GIT_DIR / "HEAD", "Git HEAD")
+    require_real_file(GIT_DIR / "index", "Git index")
+    config_path = GIT_DIR / "config"
+    require_real_file(config_path, "Git local config")
+    forbidden_paths = (
+        GIT_DIR / "commondir",
+        GIT_DIR / "config.worktree",
+        GIT_DIR / "info" / "grafts",
+        GIT_DIR / "objects" / "info" / "alternates",
+        GIT_DIR / "objects" / "info" / "http-alternates",
+    )
+    if any(os.path.lexists(path) for path in forbidden_paths):
+        fail("redirected, alternate, or grafted Git state exists")
+    replace_root = GIT_DIR / "refs" / "replace"
+    if os.path.lexists(replace_root):
+        fail("Git replacement refs exist")
+    packed_refs = GIT_DIR / "packed-refs"
+    if os.path.lexists(packed_refs):
+        packed_payload, _metadata = read_regular_repo_file_no_follow(".git/packed-refs")
+        if b" refs/replace/" in packed_payload:
+            fail("packed Git replacement refs exist")
+    pack_root = GIT_DIR / "objects" / "pack"
+    if os.path.lexists(pack_root):
+        require_real_directory(pack_root, "Git pack directory")
+        if any(entry.name.endswith(".promisor") for entry in os.scandir(pack_root)):
+            fail("Git promisor packs exist")
+    config_payload, _config_metadata = read_regular_repo_file_no_follow(".git/config")
+    config_payload = config_payload.lower()
+    forbidden_config_tokens = (
+        b"alternaterefscommand",
+        b"diff.external",
+        b"filter.",
+        b"fsmonitor",
+        b"hookspath",
+        b"include",
+        b"pager",
+        b"partialclone",
+        b"promisor",
+        b"textconv",
+        b"worktree",
+    )
+    if any(token in config_payload for token in forbidden_config_tokens):
+        fail("Git local config contains an executable or redirecting setting")
+
+
+def parse_tree(payload: bytes) -> dict[str, tuple[str, str]]:
+    rows: dict[str, tuple[str, str]] = {}
+    for raw in payload.split(b"\0"):
+        if not raw:
+            continue
+        try:
+            metadata, raw_path = raw.split(b"\t", 1)
+            mode, object_type, oid = metadata.decode("ascii").split(" ")
+            path = raw_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            fail("HEAD tree contains a malformed entry")
+        canonical_relative_path(path, "HEAD tree path")
+        if object_type != "blob" or mode != "100644" or GIT_SHA_RE.fullmatch(oid) is None:
+            fail(f"HEAD tree contains a non-regular or executable entry: {path}")
+        if path in rows:
+            fail("HEAD tree contains a duplicate path")
+        rows[path] = (mode, oid)
+    if not rows:
+        fail("HEAD tree is empty")
+    return rows
+
+
+def parse_index(payload: bytes) -> dict[str, tuple[str, str]]:
+    rows: dict[str, tuple[str, str]] = {}
+    for raw in payload.split(b"\0"):
+        if not raw:
+            continue
+        try:
+            metadata, raw_path = raw.split(b"\t", 1)
+            mode, oid, stage = metadata.decode("ascii").split(" ")
+            path = raw_path.decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            fail("Git index contains a malformed entry")
+        canonical_relative_path(path, "index path")
+        if stage != "0" or mode != "100644" or GIT_SHA_RE.fullmatch(oid) is None:
+            fail(f"Git index contains a non-stage-zero regular entry: {path}")
+        if path in rows:
+            fail("Git index contains a duplicate path")
+        rows[path] = (mode, oid)
+    return rows
+
+
+def parse_index_flags(payload: bytes) -> set[str]:
+    paths: set[str] = set()
+    for raw in payload.split(b"\0"):
+        if not raw:
+            continue
+        if not raw.startswith(b"H "):
+            fail("Git index contains assume-unchanged, skip-worktree, or another special flag")
+        try:
+            path = raw[2:].decode("utf-8")
+        except UnicodeDecodeError:
+            fail("Git index flag path is not UTF-8")
+        canonical_relative_path(path, "index flag path")
+        if path in paths:
+            fail("Git index flags contain a duplicate path")
+        paths.add(path)
+    return paths
+
+
+def parse_path_list(payload: bytes, field_name: str) -> tuple[str, ...]:
+    rows: list[str] = []
+    for raw in payload.split(b"\0"):
+        if not raw:
+            continue
+        try:
+            path = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            fail(f"{field_name} contains a non-UTF-8 path")
+        canonical_relative_path(path, field_name)
+        rows.append(path)
+    if len(rows) != len(set(rows)):
+        fail(f"{field_name} contains duplicate paths")
+    return tuple(rows)
+
+
+def ignored_import_candidate(path: str) -> bool:
+    relative = PurePosixPath(path)
+    absolute = REPO_ROOT / path
+    try:
+        metadata = absolute.lstat()
+    except FileNotFoundError:
+        fail(f"ignored path disappeared during verification: {path}")
+    if stat.S_ISLNK(metadata.st_mode):
+        return True
+    if "__pycache__" in relative.parts or relative.suffix in IGNORED_IMPORT_SUFFIXES:
+        return True
+    return relative.name in IGNORED_IMPORT_HOOK_STEMS or relative.stem in IGNORED_IMPORT_HOOK_STEMS
+
+
+def authenticate_repository(accepted_commit: str) -> dict[str, bytes]:
+    reject_redirected_git_state()
+    if git_run("rev-parse", "--show-object-format") != b"sha1\n":
+        fail("Git object format is not SHA-1")
+    head = git_run("rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
+    if head != accepted_commit:
+        fail("runtime HEAD is not the accepted implementation commit")
+    if git_run("cat-file", "-t", accepted_commit) != b"commit\n":
+        fail("accepted implementation object is not a commit")
+    tree = parse_tree(git_run("ls-tree", "-rz", "--full-tree", accepted_commit))
+    index = parse_index(git_run("ls-files", "--stage", "-z"))
+    flags = parse_index_flags(git_run("ls-files", "-v", "-z"))
+    if index != tree or flags != set(tree):
+        fail("HEAD tree, index entries, or index flags differ")
+
+    captured: dict[str, bytes] = {}
+    for path, (_mode, expected_oid) in sorted(tree.items()):
+        payload, metadata = read_regular_repo_file_no_follow(path)
+        if metadata.st_mode & 0o111:
+            fail(f"worktree executable bit differs from HEAD: {path}")
+        if git_blob_oid(payload) != expected_oid:
+            fail(f"worktree bytes differ from accepted HEAD: {path}")
+        if path == RUNNER_PATH or (path.startswith("capability_certificate_lab/") and path.endswith(".py")):
+            if git_run("cat-file", "blob", expected_oid) != payload:
+                fail(f"Git object bytes differ from captured worktree bytes: {path}")
+            captured[path] = payload
+
+    untracked = parse_path_list(
+        git_run("ls-files", "--others", "--exclude-standard", "-z"),
+        "untracked path",
+    )
+    for path in untracked:
+        relative = PurePosixPath(path)
+        if relative != ARTIFACT_PREFIX and ARTIFACT_PREFIX not in relative.parents:
+            fail(f"untracked path lies outside the bound artifact parent: {path}")
+
+    ignored = parse_path_list(
+        git_run("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+        "ignored path",
+    )
+    dangerous = [path for path in ignored if ignored_import_candidate(path)]
+    if dangerous:
+        fail(f"ignored import surface exists: {dangerous[0]}")
+    return captured
+
+
+def module_name_for_path(path: str) -> tuple[str, bool]:
+    relative = PurePosixPath(path)
+    if relative.parts[0] != "capability_certificate_lab" or relative.suffix != ".py":
+        fail(f"invalid repository module path: {path}")
+    if relative.name == "__init__.py":
+        return ".".join(relative.parts[:-1]), True
+    return ".".join((*relative.parts[:-1], relative.stem)), False
+
+
+class ClosedRepositoryLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    def __init__(self, captured: dict[str, bytes]) -> None:
+        self.sources: dict[str, tuple[str, bytes, bool]] = {}
+        for path, payload in captured.items():
+            if not path.startswith("capability_certificate_lab/") or not path.endswith(".py"):
+                continue
+            module_name, is_package = module_name_for_path(path)
+            if module_name in self.sources:
+                fail(f"duplicate repository module name: {module_name}")
+            self.sources[module_name] = (path, payload, is_package)
+        if "capability_certificate_lab" not in self.sources:
+            fail("closed repository package root is absent")
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: object = None,
+        target: ModuleType | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        if fullname in self.sources:
+            _source_path, _payload, is_package = self.sources[fullname]
+            return importlib.util.spec_from_loader(fullname, self, is_package=is_package)
+        if fullname == "capability_certificate_lab" or fullname.startswith("capability_certificate_lab."):
+            raise ImportError(f"repository module is outside the closed verifier set: {fullname}")
+        return None
+
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> ModuleType | None:
+        return None
+
+    def exec_module(self, module: ModuleType) -> None:
+        source_path, payload, is_package = self.sources[module.__name__]
+        canonical_path = str(REPO_ROOT / source_path)
+        module.__file__ = canonical_path
+        module.__cached__ = None
+        if is_package:
+            module.__path__ = []
+        code = compile(payload, canonical_path, "exec", dont_inherit=True)
+        exec(code, module.__dict__, module.__dict__)
+
+
+def parse_launch() -> tuple[str, str, str, list[str]]:
+    if os.getcwd() != str(REPO_ROOT):
+        fail("CWD is not the canonical repository root")
+    if os.environ != EXPECTED_ENVIRONMENT:
+        fail("process environment is not the exact supervisor-supplied environment")
+    if sys.flags.isolated != 1 or sys.flags.dont_write_bytecode != 1 or sys.flags.no_site != 1:
+        fail("isolated/no-bytecode/no-site interpreter flags are not active")
+    if sys.path != INITIAL_SYS_PATH or "site" in sys.modules:
+        fail("initial import path is not the frozen standard-library-only path")
+    if len(sys.argv) < 10:
+        fail("verifier arguments are incomplete")
+    if sys.argv[1] != "--verifier-sha256" or sys.argv[3] != "--accepted-implementation-commit":
+        fail("verifier binding arguments are malformed")
+    if sys.argv[5] != "--runner-path" or sys.argv[7] != "--":
+        fail("runner binding arguments are malformed")
+    verifier_sha = sys.argv[2]
+    accepted_commit = sys.argv[4]
+    runner_path = sys.argv[6]
+    runner_args = sys.argv[8:]
+    if re.fullmatch(r"[0-9a-f]{64}", verifier_sha) is None:
+        fail("verifier SHA-256 is malformed")
+    if GIT_SHA_RE.fullmatch(accepted_commit) is None:
+        fail("accepted implementation commit is malformed")
+    if runner_path != RUNNER_PATH:
+        fail("runner path is not canonical")
+    source = sys.orig_argv[5] if len(sys.orig_argv) >= 6 else ""
+    if hashlib.sha256(source.encode("utf-8")).hexdigest() != verifier_sha:
+        fail("inline verifier source does not match its SHA-256 argument")
+    expected_orig_argv = [PYTHON, "-I", "-B", "-S", "-c", source, *sys.argv[1:]]
+    if sys.orig_argv != expected_orig_argv:
+        fail("kernel Python argv is not exact")
+    inner_flag = "--accepted-implementation-commit"
+    if runner_args.count(inner_flag) != 1:
+        fail("runner accepted-implementation binding is absent or duplicated")
+    inner_index = runner_args.index(inner_flag)
+    if inner_index + 1 >= len(runner_args) or runner_args[inner_index + 1] != accepted_commit:
+        fail("runner accepted-implementation binding disagrees with verifier binding")
+    return verifier_sha, accepted_commit, runner_path, runner_args
+
+
+def main() -> None:
+    verifier_sha, accepted_commit, runner_path, runner_args = parse_launch()
+    captured = authenticate_repository(accepted_commit)
+    runner_payload = captured.get(runner_path)
+    if runner_payload is None:
+        fail("accepted runner bytes were not captured")
+    if any(
+        name == "capability_certificate_lab" or name.startswith("capability_certificate_lab.")
+        for name in sys.modules
+    ):
+        fail("repository package was imported before closed-loader installation")
+    require_real_directory(Path(SITE_PACKAGES), "frozen site-packages directory")
+    loader = ClosedRepositoryLoader(captured)
+    sys.meta_path.insert(0, loader)
+    sys.path.append(SITE_PACKAGES)
+    sys.argv = [str(REPO_ROOT / runner_path), *runner_args]
+
+    def verify_repository_unchanged() -> None:
+        if authenticate_repository(accepted_commit) != captured:
+            fail("captured repository sources changed after verifier preflight")
+
+    runner_globals = {
+        "__name__": "__main__",
+        "__file__": str(REPO_ROOT / runner_path),
+        "__package__": None,
+        "__cached__": None,
+        "__builtins__": __builtins__,
+        "__phase8_verifier_sha256__": verifier_sha,
+        "__phase8_accepted_implementation_commit__": accepted_commit,
+        "__phase8_git_run__": git_run,
+        "__phase8_repository_loader__": loader,
+        "__phase8_verify_repository_unchanged__": verify_repository_unchanged,
+    }
+    code = compile(runner_payload, str(REPO_ROOT / runner_path), "exec", dont_inherit=True)
+    exec(code, runner_globals, runner_globals)
+
+
+main()
