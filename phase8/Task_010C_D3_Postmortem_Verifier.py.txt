@@ -21,6 +21,9 @@ PYTHON_EXE = "/opt/anaconda3/bin/python3.13"
 SITE_PACKAGES = "/opt/anaconda3/lib/python3.13/site-packages"
 RUNNER_PATH = "scripts/phase8_sequence_feasibility.py"
 ARTIFACT_PREFIX = PurePosixPath("artifacts/phase8_toy_lm_bridge")
+INPUT_ROOT = "artifacts/phase8_toy_lm_bridge/feasibility_005"
+OUTPUT_ROOT = "artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001"
+PROPOSAL_COMMIT = "06ee71d958eb1c4cb446ede3d120e99eb64bba97"
 INITIAL_SYS_PATH = [
     "/opt/anaconda3/lib/python313.zip",
     "/opt/anaconda3/lib/python3.13",
@@ -255,10 +258,12 @@ class PinnedGitContext:
             if name not in {None, ".git", "objects", "refs", "info"}
         }
         self.directory_snapshots = {
+            self.git_fd: snapshot_directory_tree(self.git_fd, "Git control store"),
             self.objects_fd: snapshot_directory_tree(self.objects_fd, "Git object store"),
             self.refs_fd: snapshot_directory_tree(self.refs_fd, "Git refs store"),
             self.info_fd: snapshot_directory_tree(self.info_fd, "Git info store"),
         }
+        self.absent_git_entries = ("commondir", "config.worktree")
         self.absent_info_entries = ("attributes",)
         self.revalidate()
 
@@ -291,6 +296,12 @@ class PinnedGitContext:
         for fd, expected in self.directory_snapshots.items():
             if snapshot_directory_tree(fd, "pinned Git directory") != expected:
                 fail("pinned Git directory content changed")
+        for name in self.absent_git_entries:
+            try:
+                os.stat(name, dir_fd=self.git_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            fail(f"redirectable Git control input appeared: {name}")
         for name in self.absent_info_entries:
             try:
                 os.stat(name, dir_fd=self.info_fd, follow_symlinks=False)
@@ -329,6 +340,7 @@ class PinnedGitContext:
     def git_environment(self) -> dict[str, str]:
         return {
             **GIT_ENVIRONMENT,
+            "GIT_COMMON_DIR": f"/proc/self/fd/{self.git_fd}",
             "GIT_INDEX_FILE": f"/proc/self/fd/{self.index_fd}",
             "GIT_OBJECT_DIRECTORY": f"/proc/self/fd/{self.objects_fd}",
         }
@@ -560,7 +572,7 @@ def ignored_import_candidate(path: str) -> bool:
 
 def authenticate_repository(
     accepted_commit: str,
-) -> tuple[dict[str, bytes], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[dict[str, bytes], dict[str, int], tuple[str, ...], tuple[str, ...]]:
     reject_redirected_git_state()
     if git_run("rev-parse", "--show-object-format") != b"sha1\n":
         fail("Git object format is not SHA-1")
@@ -576,8 +588,10 @@ def authenticate_repository(
         fail("HEAD tree, index entries, or index flags differ")
 
     captured: dict[str, bytes] = {}
+    worktree_modes: dict[str, int] = {}
     for path, (_mode, expected_oid) in sorted(tree.items()):
         payload, metadata = read_regular_repo_file_no_follow(path)
+        worktree_modes[path] = metadata.st_mode
         if metadata.st_mode & 0o111:
             fail(f"worktree executable bit differs from HEAD: {path}")
         if git_blob_oid(payload) != expected_oid:
@@ -606,7 +620,7 @@ def authenticate_repository(
     if PINNED_GIT is None:
         fail("repository authentication lost its descriptor binding")
     PINNED_GIT.revalidate()
-    return captured, untracked, ignored
+    return captured, worktree_modes, untracked, ignored
 
 
 def module_name_for_path(path: str) -> tuple[str, bool]:
@@ -667,8 +681,8 @@ def parse_launch() -> tuple[str, str, str, list[str]]:
         fail("isolated/no-bytecode/no-site interpreter flags are not active")
     if sys.path != INITIAL_SYS_PATH or "site" in sys.modules:
         fail("initial import path is not the frozen standard-library-only path")
-    if len(sys.argv) < 10:
-        fail("verifier arguments are incomplete")
+    if len(sys.argv) != 19 or len(sys.orig_argv) != 24:
+        fail("verifier argument cardinality is not exact")
     if sys.argv[1] != "--verifier-sha256" or sys.argv[3] != "--accepted-implementation-commit":
         fail("verifier binding arguments are malformed")
     if sys.argv[5] != "--runner-path" or sys.argv[7] != "--":
@@ -683,10 +697,36 @@ def parse_launch() -> tuple[str, str, str, list[str]]:
         fail("accepted implementation commit is malformed")
     if runner_path != RUNNER_PATH:
         fail("runner path is not canonical")
-    source = sys.orig_argv[5] if len(sys.orig_argv) >= 6 else ""
+    expected_runner_args = [
+        "postmortem-failure",
+        "--device",
+        "cuda:0",
+        "--input-root",
+        INPUT_ROOT,
+        "--output-root",
+        OUTPUT_ROOT,
+        "--accepted-proposal-commit",
+        PROPOSAL_COMMIT,
+        "--accepted-implementation-commit",
+        accepted_commit,
+    ]
+    expected_verifier_args = [
+        "--verifier-sha256",
+        verifier_sha,
+        "--accepted-implementation-commit",
+        accepted_commit,
+        "--runner-path",
+        RUNNER_PATH,
+        "--",
+        *expected_runner_args,
+    ]
+    expected_sys_argv = ["-c", *expected_verifier_args]
+    if sys.argv != expected_sys_argv or runner_args != expected_runner_args:
+        fail("verifier or runner arguments differ from the frozen command")
+    source = sys.orig_argv[5]
     if hashlib.sha256(source.encode("utf-8")).hexdigest() != verifier_sha:
         fail("inline verifier source does not match its SHA-256 argument")
-    expected_orig_argv = [PYTHON, "-I", "-B", "-S", "-c", source, *sys.argv[1:]]
+    expected_orig_argv = [PYTHON, "-I", "-B", "-S", "-c", source, *expected_verifier_args]
     if sys.orig_argv != expected_orig_argv:
         fail("kernel Python argv is not exact")
     if os.readlink("/proc/self/exe") != PYTHON_EXE:
@@ -704,12 +744,6 @@ def parse_launch() -> tuple[str, str, str, list[str]]:
     expected_cmdline = b"\0".join(arg.encode("utf-8") for arg in expected_orig_argv) + b"\0"
     if bytes(cmdline) != expected_cmdline:
         fail("/proc/self/cmdline is not exact")
-    inner_flag = "--accepted-implementation-commit"
-    if runner_args.count(inner_flag) != 1:
-        fail("runner accepted-implementation binding is absent or duplicated")
-    inner_index = runner_args.index(inner_flag)
-    if inner_index + 1 >= len(runner_args) or runner_args[inner_index + 1] != accepted_commit:
-        fail("runner accepted-implementation binding disagrees with verifier binding")
     return verifier_sha, accepted_commit, runner_path, runner_args
 
 
@@ -717,7 +751,9 @@ def main() -> None:
     global PINNED_GIT
     verifier_sha, accepted_commit, runner_path, runner_args = parse_launch()
     PINNED_GIT = PinnedGitContext()
-    captured, initial_untracked, initial_ignored = authenticate_repository(accepted_commit)
+    captured, captured_modes, initial_untracked, initial_ignored = authenticate_repository(
+        accepted_commit
+    )
     runner_payload = captured.get(runner_path)
     if runner_payload is None:
         fail("accepted runner bytes were not captured")
@@ -733,11 +769,11 @@ def main() -> None:
     sys.argv = [str(REPO_ROOT / runner_path), *runner_args]
 
     def verify_repository_unchanged() -> tuple[tuple[str, ...], tuple[str, ...]]:
-        current_captured, current_untracked, current_ignored = authenticate_repository(
-            accepted_commit
+        current_captured, current_modes, current_untracked, current_ignored = (
+            authenticate_repository(accepted_commit)
         )
-        if current_captured != captured:
-            fail("captured repository sources changed after verifier preflight")
+        if current_captured != captured or current_modes != captured_modes:
+            fail("captured repository sources or modes changed after verifier preflight")
         return current_untracked, current_ignored
 
     if verify_repository_unchanged() != (initial_untracked, initial_ignored):

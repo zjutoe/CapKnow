@@ -26,6 +26,8 @@ Implementation commits `365cd33aad276ac9d77255b6a75d86b23e668b5c`,
 authority; the next executor repairs the current code under this revised handoff and
 the accepted proposal above. Handoff commit
 `3f99add9a512986a9fc6f7b16d45f5b01f5aa1ce` is likewise rejected and supplies no
+delegation authority. Repair commit
+`58f6466e2ffc11b39f07da7ec95b7bc46228306f` is also rejected and supplies no
 delegation authority; this revision closes its four review findings.
 
 After this handoff is accepted, `main` may delegate implementation to one
@@ -98,7 +100,7 @@ argv:
   -c
   <exact UTF-8 bytes of phase8/Task_010C_D3_Postmortem_Verifier.py.txt>
   --verifier-sha256
-  7442c22ca7ff1558f6be9122db2097e1f5a1473b084d6448152619d105ace958
+  890671e89404a1c172b669cad8200fe926b9c052de0ab32d5c860549dd903432
   --accepted-implementation-commit
   <later independently accepted implementation commit>
   --runner-path
@@ -117,8 +119,8 @@ argv:
   <same later independently accepted implementation commit>
 ```
 
-The verifier source is exactly `32,877` bytes, has Git blob
-`973826ecc02516cba7ec225ada5b720218e93ecc`, and has the SHA-256 above. The
+The verifier source is exactly `34,156` bytes, has Git blob
+`87ea81df9b2dfdb4f5f5e85dfe5e7340e2b9b6aa`, and has the SHA-256 above. The
 implementation must embed and test that SHA and reject any byte difference. It must
 not execute the launch. This handoff supplies no supervisor identity and no accepted
 implementation commit, so it supplies no complete launch command and no execution
@@ -140,10 +142,13 @@ normalization or escaping transformation before JSON serialization; its UTF-8
 re-encoding must have the verifier SHA-256 above. Index 7 is that SHA-256. Indexes 9
 and 23 are the same later accepted implementation commit; index 21 is the accepted
 proposal commit. The other indexes equal the command template above. The manifest's
-separate `environment` object must equal `exact_command.environment` field-for-field,
-and `implementation_binding.commit` must equal both implementation-commit argv
-positions. Canonical JSON serialization may escape the source string but decoding
-the JSON must reproduce the exact original string and bytes.
+separate top-level `environment` object is intentionally different: as required by
+the accepted proposal, it equals the feasibility-005 manifest's complete
+CUDA/Python/Torch/platform runtime environment field-for-field. Only
+`exact_command.environment` is the four-key `execve` environment.
+`implementation_binding.commit` must equal both implementation-commit argv positions.
+Canonical JSON serialization may escape the source string but decoding the JSON must
+reproduce the exact original string and bytes.
 
 Two pre-existing ignored `__pycache__` files under `scripts/` and `tests/` currently
 make verifier source authentication fail closed. The executor must not delete or
@@ -188,10 +193,12 @@ unrepresentable. Before and after every allowed Git call it revalidates retained
 no-follow descriptors plus device/inode/full-mode/size/content snapshots for the
 repository root, `.git`, object/ref/info stores, HEAD, index, local config,
 `packed-refs`, and `info/exclude`; Git receives only `/proc/self/fd` paths through
-`pass_fds`. `info/attributes` must remain absent. The local config is parsed
-structurally and must equal the frozen inert `core` and `remote "origin"` map; an
-extra section or key, including a filter/diff/include/helper setting under any case
-or whitespace spelling, fails closed.
+`pass_fds`. The complete `.git` control namespace/content is snapshotted around every
+call, `GIT_COMMON_DIR` is pinned to the retained `.git` descriptor, and `commondir`,
+`config.worktree`, and `info/attributes` must remain absent. The local config is
+parsed structurally and must equal the frozen inert `core` and `remote "origin"` map;
+an extra section or key, including a filter/diff/include/helper setting under any
+case or whitespace spelling, fails closed.
 
 ## Preflight order
 
@@ -199,7 +206,9 @@ The exact fail-closed order is:
 
 1. before the runner or any repository/third-party module executes, the external
    supervisor supplies the exact clean `execve()` boundary and the inline verifier
-   validates its source/argv/flags/CWD/environment;
+   validates its source/flags/CWD/environment plus the exact 24-string kernel argv,
+   exact 19-string Python `sys.argv`, complete frozen runner suffix, and absence of
+   reordered, substituted, or extra arguments;
 2. the verifier authenticates the canonical non-redirected Git store with hermetic
    exact-argv plumbing over retained descriptors, the accepted implementation HEAD,
    complete tree/index/worktree bytes and full modes, untracked/ignored import
@@ -318,16 +327,19 @@ Add focused tests covering at least:
 1. exact verifier source bytes/blob/SHA-256, supervisor `execve` executable/CWD/
    environment/argv, isolated/no-bytecode/no-site flags, `/proc/self/cmdline`, and
    duplicate implementation-commit binding; exact four-key `exact_command` object,
-   including round-tripped verifier bytes and agreement with the separate manifest
-   environment/implementation binding; reject shell, `/usr/bin/env`, direct script,
-   `runpy`, import, changed verifier, and programmatic-main routes before any
-   repository/Torch/output/model work;
+   including round-tripped verifier bytes, the deliberate distinction from the
+   top-level 005 runtime `environment`, and agreement with the separate implementation
+   binding; mutate every runner-suffix token and add/reorder a token, and reject each
+   before runner/repository/Torch/output/model work; likewise reject shell,
+   `/usr/bin/env`, direct script, `runpy`, import, changed verifier, and
+   programmatic-main routes;
 2. temporary-Git-repository anti-execution tests for inherited loader/Python/Git
    variables, local/global FSMonitor and hooks, pager, external diff/textconv/filter,
    assume-unchanged/skip-worktree, replacements, alternates/grafts, `commondir`,
    partial-clone/promisor packs and lazy fetch; directly attempt `cat-file --filters`,
-   `--textconv`, option injection, extra config sections/keys, `info/attributes`, and
-   config spelling/case variants. Every sentinel remains absent;
+   `--textconv`, option injection, extra config sections/keys, `info/attributes`,
+   same-size `.git` namespace mutation, and `commondir`/common-info insertion during
+   plumbing, plus config spelling/case variants. Every sentinel remains absent;
 3. complete accepted commit/HEAD/tree/index/mode/raw-worktree/blob equality, regular
    no-follow reads, full-mode/chmod drift, Git metadata/object/ref/config/info entry
    identity/content swaps before/during/after plumbing, unauthorized untracked and
@@ -425,8 +437,9 @@ fresh-context `gpt-5.6-sol`, `xhigh`, strict read-only agent. The review must ve
 
 - exact proposal and 005 evidence binding;
 - exact verifier source/blob/SHA, external supervisor `execve` template, unavailable-
-  supervisor no-execution boundary, duplicate accepted implementation commit, closed
-  four-key `exact_command` value, and command/main-context contract;
+  supervisor no-execution boundary, exact full command suffix/cardinalities, duplicate
+  accepted implementation commit, closed four-key `exact_command` value, separation
+  of execve and 005 runtime environment objects, and command/main-context contract;
 - exact-argv hermetic Git plumbing, descriptor/content-bound Git inputs, structural
   local-config allowlist, complete tree/index/full-mode worktree/import-surface
   authentication, no-helper/no-filter/no-lazy-fetch behavior, sole no-argument

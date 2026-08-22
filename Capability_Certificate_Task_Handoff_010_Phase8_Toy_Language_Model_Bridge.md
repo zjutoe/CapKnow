@@ -744,7 +744,7 @@ external supervisor, not a shell command:
 executable: /opt/anaconda3/bin/python
 cwd: /home/mye/src/llm/CapKnow
 environment: exact clean LC_ALL plus the three frozen 005 environment values
-argv prefix: python -I -B -S -c <verifier bytes> --verifier-sha256 7442c22ca7ff1558f6be9122db2097e1f5a1473b084d6448152619d105ace958 --accepted-implementation-commit <accepted SHA> --runner-path scripts/phase8_sequence_feasibility.py --
+argv prefix: python -I -B -S -c <verifier bytes> --verifier-sha256 890671e89404a1c172b669cad8200fe926b9c052de0ab32d5c860549dd903432 --accepted-implementation-commit <accepted SHA> --runner-path scripts/phase8_sequence_feasibility.py --
 runner argv: postmortem-failure --device cuda:0 --input-root artifacts/phase8_toy_lm_bridge/feasibility_005 --output-root artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001 --accepted-proposal-commit 06ee71d958eb1c4cb446ede3d120e99eb64bba97 --accepted-implementation-commit <same accepted SHA>
 ```
 
@@ -753,7 +753,9 @@ accepted implementation tree/index/full-mode worktree through exact-argv Git plu
 and retained descriptor/content bindings, then loads repository modules only from
 captured accepted buffers before Torch or runner execution. The manifest records the
 launch as the handoff's exact closed four-key `exact_command` object, including the
-verifier source and both matching implementation-commit argv positions. The D3-I
+verifier source and both matching implementation-commit argv positions. Its nested
+four-variable environment records `execve`; the separate top-level manifest
+environment remains the exact feasibility-005 runtime object. The D3-I
 implementation package may encode this launch template, exact proposal/005/source/runtime bindings,
 checkpoint-read-only teacher-forced metrics, retained-generation taxonomy,
 forbidden-operation sentinels, and descriptor-bound DONE-only atomic publication. It
