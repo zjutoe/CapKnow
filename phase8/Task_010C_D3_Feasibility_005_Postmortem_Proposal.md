@@ -21,10 +21,11 @@ stop rule, or scientific interpretation.
 
 Revision after implementation review corrects the descriptive logits width from
 `259` to the frozen tokenizer/model value `260`, requires an isolated no-site
-interpreter and an independently bound inline bootstrap before any repository or
-third-party import, and closes terminal cleanup and rollback identity gaps. These are
-feasibility/security corrections only; they do not change any scientific computation,
-accepted 005 result, or authority boundary.
+interpreter launched by a separately bound supervisor, an independently bound inline
+bootstrap before any repository or third-party import, and authenticated in-memory
+repository-module loading. It also closes Git-helper and terminal cleanup/rollback
+identity gaps. These are feasibility/security corrections only; they do not change
+any scientific computation, accepted 005 result, or authority boundary.
 
 Acceptance of this proposal would authorize only a separate implementation handoff.
 That implementation must be delegated to a fresh-context `gpt-5.5` executor, frozen
@@ -137,13 +138,17 @@ The future implementation must freeze the exact command and require real kernel 
 real environment, clean committed source, the absent output root, and complete input
 validation before CUDA model construction or output-root creation.
 
-The canonical command must begin with `/usr/bin/env -i LC_ALL=C`, set only the three
-frozen experiment variables above, and invoke the frozen
-`/opt/anaconda3/bin/python` with `-I -B -S -c <verifier>` rather than execute the
-repository runner directly. The empty inherited environment prevents loader,
-Python-startup, Git, pager, locale, and PATH state from executing or redirecting code
-before the verifier. `-I` must keep the repository root, its `scripts` directory, and
-`PYTHONPATH=.` off the
+The later launch packet must bind an independently reviewed supervisor outside the
+repository by exact identity and require it to call `execve()` directly on the frozen
+`/opt/anaconda3/bin/python`. The supervisor supplies an exact environment containing
+only `LC_ALL=C` and the three frozen experiment variables above, and exact argv
+beginning `python -I -B -S -c <verifier>`; it must not invoke a shell, dynamic
+`/usr/bin/env`, repository launcher, or other intermediate process. The supervisor's
+clean `execve` environment is the dynamic-loader trust boundary. If that exact
+supervisor primitive is unavailable or cannot prove the executable, argv, environment,
+and CWD passed to `execve`, execution remains unauthorized.
+
+`-I` must keep the repository root, its `scripts` directory, and `PYTHONPATH=.` off the
 interpreter's startup import path; `-B` independently enforces no bytecode writes
 because isolated mode ignores `PYTHONDONTWRITEBYTECODE` as an interpreter setting;
 and `-S` prevents global `sitecustomize`, `usercustomize`, site-packages, and `.pth`
@@ -157,19 +162,22 @@ The exact UTF-8 inline verifier source, its SHA-256, its position in
 the later launch packet, and every remaining argument must be frozen and tested by
 the implementation handoff. This command-line source is the pre-runner trust root;
 the worktree runner is data until the verifier accepts it. Before compiling or
-executing any runner byte, adding the repository root to `sys.path`, or importing
-Torch or any repository module, the standard-library-only verifier must:
+executing any runner byte, exposing any repository path to import machinery, or
+importing Torch or any repository module, the standard-library-only verifier must:
 
 - require the repository-root CWD, real `__main__` process, exact kernel argv, and
   active isolated/no-bytecode flags;
-- require `.git` to be the canonical real repository directory and reject Git object
-  alternates, grafts, and replacement refs before object lookup; invoke `/usr/bin/git`
+- require `.git` to be the canonical real repository directory and reject
+  `commondir`, symlinked or redirected object/ref stores, object alternates, grafts,
+  replacement refs, partial-clone/promisor configuration, and promisor packs before
+  object lookup; invoke `/usr/bin/git`
   only through a frozen wrapper with an explicit canonical
   git-dir/work-tree, `--no-pager`, `--no-replace-objects`, literal pathspecs, disabled
   FSMonitor/hooks/pager/external diff/textconv, and a minimal environment that removes
-  every inherited `GIT_*` variable before setting only wrapper-owned controls that
-  disable system/global configuration, optional locks, attributes, and paging; local
-  configuration must not be able to re-enable any executable feature;
+  every inherited `GIT_*` variable before setting only wrapper-owned controls,
+  including `GIT_NO_LAZY_FETCH=1`, that disable system/global configuration, optional
+  locks, attributes, paging, and lazy fetching; local configuration must not be able
+  to re-enable any executable feature or remote/helper access;
 - use only non-extensible `rev-parse`, `ls-tree`, `ls-files`, and `cat-file` plumbing
   argv and require the repository object format to be exactly SHA-1. The verifier,
   not Git diff/status/filter machinery, must compare the complete
@@ -179,19 +187,26 @@ Torch or any repository module, the standard-library-only verifier must:
   Phase 8 artifact parent, and every repository-wide ignored executable, import hook,
   sourceless module, native module, `.pth` file, importable cache entry, or symlink;
   and
-- before those imports can execute, compare the bytes of the actually executed runner
-  and every tracked repository import-surface candidate with the corresponding blob
-  at the exact accepted implementation commit, require runtime HEAD to equal that
-  commit, and reject index assume-unchanged/skip-worktree bits.
+- before those imports can execute, capture and compare the bytes of the actually
+  executed runner and every allowed repository Python module with the corresponding
+  blob at the exact accepted implementation commit, require runtime HEAD to equal
+  that commit, and reject index assume-unchanged/skip-worktree bits.
 
 Only after all checks pass may the verifier append, without importing `site` or using
 `site.addsitedir()`, the exact frozen
-`/opt/anaconda3/lib/python3.13/site-packages` directory and the exact repository root
-to `sys.path`, compile the already-verified runner bytes with the canonical runner
-filename, and execute them as `__main__`. The runner must require the exact verifier
-source/argv context and the separately supplied accepted implementation commit;
-direct script execution, `runpy`, import invocation, a changed verifier, or an
-unreviewed runtime HEAD must fail before the normative writer can run.
+`/opt/anaconda3/lib/python3.13/site-packages` directory to `sys.path`. It must never add
+the repository root, `scripts`, artifact parent, or another worktree path. Before
+importing Torch or executing the runner, it must install a closed highest-priority
+finder/loader for the exact allowed `capability_certificate_lab` package/module names.
+That loader compiles only the captured authenticated buffers, serves package metadata
+without reopening worktree paths, and rejects any other repository-package import;
+the site-packages path finder cannot shadow the closed repository namespace. The
+runner itself is likewise compiled from its captured buffer with the canonical
+filename and executed as `__main__`. The runner must require the exact verifier
+source/argv context and separately supplied accepted implementation commit; direct
+script execution, `runpy`, import invocation, a changed verifier, filesystem mutation
+after capture, site-packages shadowing, or an unreviewed runtime HEAD must fail before
+the normative writer can run or must be unable to affect executed bytes.
 
 The later full evidence-aware cleanliness check remains mandatory. Tests must prove
 that repository and global-site startup hooks never execute, and that a modified
@@ -199,11 +214,12 @@ runner preamble or shadow module which would create a sentinel or delete itself 
 rejected while its sentinel remains absent and its bytes remain untouched.
 Tests must also install sentinel local/global FSMonitor and external-diff settings,
 inherited `GIT_DIR`/`GIT_WORK_TREE` redirection, replacement refs, pager variables,
-object alternates/grafts, loader/startup environment variables, and index flags; the
-verifier must either reject the state or authenticate the exact accepted tree with
-every sentinel absent. No Git command used by the verifier may consult a filter,
-textconv, pager, hook, replacement object, alternate object/work tree, or ambient
-config.
+object alternates/grafts, `commondir`, promisor configuration/packs, loader/startup
+environment variables, index flags, a site-packages repository-package shadow, and a
+post-capture worktree mutation; the verifier must either reject the state or execute
+only the captured accepted bytes with every sentinel absent. No Git command used by
+the verifier may consult a filter, textconv, pager, hook, replacement object,
+alternate object/work tree, lazy fetch/remote helper, or ambient config.
 
 The complete runtime `environment` and `deterministic_flags` objects must equal the
 input manifest field-for-field before CUDA construction and before publication.
@@ -502,16 +518,19 @@ A future D3 implementation handoff must require tests for:
    save, or generation call can occur, plus byte-identical loaded parameters and
    process-global Python, Torch CPU,
    and all-CUDA RNG states across reconstruction, load, inference, and publication;
-6. an exact `/opt/anaconda3/bin/python -I -B -S -c <verifier>` subprocess bootstrap
-   before repository/Torch imports, including non-execution tests for repository and
-   global-site startup hooks, a modified runner preamble, and self-removing sourceless
-   shadows; exact runner/import-surface byte equality with the accepted implementation
-   commit despite index flags; direct-script/verifier/argv rejection; source-clean
-   preflight before CUDA construction or output creation; hermetic-Git sentinel tests
-   for local/global FSMonitor, hooks, external diff/textconv, pagers, replacement refs,
-   object alternates/grafts, inherited Git/loader/startup redirection, and index flags;
-   no-clobber temporary-root publication, terminal/inventory validation, and
-   source-unchanged checks before atomic rename;
+6. an independently bound supervisor-to-`execve` launch with the exact frozen Python
+   `-I -B -S -c <verifier>` argv/environment/CWD, followed by the inline bootstrap
+   before repository/Torch imports; non-execution tests must cover repository and
+   global-site startup hooks, a modified runner preamble, self-removing sourceless
+   shadows, a site-packages namespace shadow, and post-capture worktree mutation;
+   exact captured runner/module equality with the accepted implementation commit must
+   hold despite index flags; direct-script/verifier/argv rejection and source-clean
+   preflight must precede CUDA/output work; hermetic-Git sentinel tests must cover
+   local/global FSMonitor, hooks, external diff/textconv, pagers, replacement refs,
+   object alternates/grafts, `commondir`, partial-clone/promisor/lazy-fetch state,
+   inherited Git/loader/startup redirection, and index flags; no-clobber temp-root
+   publication, terminal/inventory validation, and source-unchanged checks must precede
+   atomic rename;
 7. no-follow cleanup for regular, symlink, FIFO, socket, device, directory, and
    root-symlink terminal substitutions; occupied-temp rollback must preserve the
    collision, remove the invalid final path, and leave only a non-terminal temp root;
