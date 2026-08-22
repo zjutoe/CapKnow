@@ -24,7 +24,9 @@ Implementation commits `365cd33aad276ac9d77255b6a75d86b23e668b5c`,
 `5c078b2c375c373228196e09f244e5e16fe6e983`, and
 `ca0626b12e198eefb0d3d0f9ac4254818705c97c` remain rejected and have no launch
 authority; the next executor repairs the current code under this revised handoff and
-the accepted proposal above.
+the accepted proposal above. Handoff commit
+`3f99add9a512986a9fc6f7b16d45f5b01f5aa1ce` is likewise rejected and supplies no
+delegation authority; this revision closes its four review findings.
 
 After this handoff is accepted, `main` may delegate implementation to one
 fresh-context Codex subagent with model identifier exactly `gpt-5.5`,
@@ -96,7 +98,7 @@ argv:
   -c
   <exact UTF-8 bytes of phase8/Task_010C_D3_Postmortem_Verifier.py.txt>
   --verifier-sha256
-  0ec580597442655a095c9c0090917697798c3e6bc895962eec5fb368eb723bc6
+  7442c22ca7ff1558f6be9122db2097e1f5a1473b084d6448152619d105ace958
   --accepted-implementation-commit
   <later independently accepted implementation commit>
   --runner-path
@@ -115,12 +117,33 @@ argv:
   <same later independently accepted implementation commit>
 ```
 
-The verifier source is exactly `20,428` bytes, has Git blob
-`da20df1bdf78a6ccaf42df2ac0178daaaa9040a7`, and has the SHA-256 above. The
+The verifier source is exactly `32,877` bytes, has Git blob
+`973826ecc02516cba7ec225ada5b720218e93ecc`, and has the SHA-256 above. The
 implementation must embed and test that SHA and reject any byte difference. It must
 not execute the launch. This handoff supplies no supervisor identity and no accepted
 implementation commit, so it supplies no complete launch command and no execution
 authority.
+
+`manifest.json.exact_command` is one closed JSON object, never a shell string or token
+display list. It has exactly four keys: `executable,cwd,environment,argv`. Its values
+are constructed only from the already authenticated real process state:
+
+```text
+executable: "/opt/anaconda3/bin/python"
+cwd: "/home/mye/src/llm/CapKnow"
+environment: exactly the four-key object printed above
+argv: exactly sys.orig_argv, as a JSON array of 24 strings
+```
+
+Within `argv`, index 5 is the exact verifier source decoded as UTF-8 with no newline
+normalization or escaping transformation before JSON serialization; its UTF-8
+re-encoding must have the verifier SHA-256 above. Index 7 is that SHA-256. Indexes 9
+and 23 are the same later accepted implementation commit; index 21 is the accepted
+proposal commit. The other indexes equal the command template above. The manifest's
+separate `environment` object must equal `exact_command.environment` field-for-field,
+and `implementation_binding.commit` must equal both implementation-commit argv
+positions. Canonical JSON serialization may escape the source string but decoding
+the JSON must reproduce the exact original string and bytes.
 
 Two pre-existing ignored `__pycache__` files under `scripts/` and `tests/` currently
 make verifier source authentication fail closed. The executor must not delete or
@@ -149,12 +172,26 @@ commit into source; accept it only from the verifier and the duplicate exact CLI
 argument. `main` supplies and reviews that commit plus the external supervisor in a
 later launch packet.
 
-The verifier injects the accepted commit, verifier SHA, closed loader, hermetic
-`git_run` callable, and a full `verify_repository_unchanged` callback into the runner
-globals. The normative runner must require those exact objects and use only the
-injected Git/callback boundary for all later Git/source checks. Calling ambient
-`git`, reparsing local configuration, reopening repository source, or replacing an
-injected object is forbidden and covered by sentinels.
+The verifier injects the accepted commit, verifier SHA, closed loader, and one
+no-argument `verify_repository_unchanged` callback into the runner globals. The
+callback reauthenticates the full repository and returns exactly an immutable pair of
+`(untracked_paths, ignored_paths)` tuples for the evidence-aware cleanliness check.
+It exposes no argument-taking Git callable. The normative runner must require those
+exact objects and use only this callback for every later Git/source check. Calling
+ambient `git`, reaching verifier-internal Git plumbing, reparsing local configuration,
+reopening repository source, or replacing an injected object is forbidden and
+covered by sentinels.
+
+Verifier Git plumbing has an exact complete argv allowlist, so variants such as
+`cat-file --filters`, `--textconv`, option injection, and new subcommands are
+unrepresentable. Before and after every allowed Git call it revalidates retained
+no-follow descriptors plus device/inode/full-mode/size/content snapshots for the
+repository root, `.git`, object/ref/info stores, HEAD, index, local config,
+`packed-refs`, and `info/exclude`; Git receives only `/proc/self/fd` paths through
+`pass_fds`. `info/attributes` must remain absent. The local config is parsed
+structurally and must equal the frozen inert `core` and `remote "origin"` map; an
+extra section or key, including a filter/diff/include/helper setting under any case
+or whitespace spelling, fails closed.
 
 ## Preflight order
 
@@ -164,10 +201,11 @@ The exact fail-closed order is:
    supervisor supplies the exact clean `execve()` boundary and the inline verifier
    validates its source/argv/flags/CWD/environment;
 2. the verifier authenticates the canonical non-redirected Git store with hermetic
-   plumbing, the accepted implementation HEAD, complete tree/index/worktree bytes and
-   modes, untracked/ignored import surface, runner bytes, and every repository Python
-   module buffer; it installs the closed in-memory repository loader, adds only the
-   frozen site-packages path, and executes the captured runner;
+   exact-argv plumbing over retained descriptors, the accepted implementation HEAD,
+   complete tree/index/worktree bytes and full modes, untracked/ignored import
+   surface, runner bytes, and every repository Python module buffer; it installs the
+   closed in-memory repository loader, adds only the frozen site-packages path, and
+   executes the captured runner;
 3. validate runner argument types and canonical root basenames;
 4. require exact real main/verifier context, kernel argv, environment strings, and absent final
    and same-parent `.tmp` output roots;
@@ -279,18 +317,24 @@ Add focused tests covering at least:
 
 1. exact verifier source bytes/blob/SHA-256, supervisor `execve` executable/CWD/
    environment/argv, isolated/no-bytecode/no-site flags, `/proc/self/cmdline`, and
-   duplicate implementation-commit binding; reject shell, `/usr/bin/env`, direct
-   script, `runpy`, import, changed verifier, and programmatic-main routes before any
+   duplicate implementation-commit binding; exact four-key `exact_command` object,
+   including round-tripped verifier bytes and agreement with the separate manifest
+   environment/implementation binding; reject shell, `/usr/bin/env`, direct script,
+   `runpy`, import, changed verifier, and programmatic-main routes before any
    repository/Torch/output/model work;
 2. temporary-Git-repository anti-execution tests for inherited loader/Python/Git
    variables, local/global FSMonitor and hooks, pager, external diff/textconv/filter,
    assume-unchanged/skip-worktree, replacements, alternates/grafts, `commondir`,
-   partial-clone/promisor packs and lazy fetch. Every sentinel remains absent;
+   partial-clone/promisor packs and lazy fetch; directly attempt `cat-file --filters`,
+   `--textconv`, option injection, extra config sections/keys, `info/attributes`, and
+   config spelling/case variants. Every sentinel remains absent;
 3. complete accepted commit/HEAD/tree/index/mode/raw-worktree/blob equality, regular
-   no-follow reads, unauthorized untracked and repo-wide ignored import surfaces,
-   actual runner bytes, all captured repository Python modules, injected immutable
-   Git/source callbacks, repeated source verification, and rejection of every ambient
-   or replaced Git/source helper;
+   no-follow reads, full-mode/chmod drift, Git metadata/object/ref/config/info entry
+   identity/content swaps before/during/after plumbing, unauthorized untracked and
+   repo-wide ignored import surfaces, actual runner bytes, all captured repository
+   Python modules, the sole immutable no-argument source callback, repeated source
+   verification, and rejection of every ambient, raw, argument-taking, or replaced
+   Git/source helper;
 4. a closed highest-priority in-memory loader test for package initializers, relative
    and transitive imports, missing-module rejection, no worktree path on `sys.path`,
    site-packages namespace shadowing, and post-capture worktree mutation. Only the
@@ -381,10 +425,12 @@ fresh-context `gpt-5.6-sol`, `xhigh`, strict read-only agent. The review must ve
 
 - exact proposal and 005 evidence binding;
 - exact verifier source/blob/SHA, external supervisor `execve` template, unavailable-
-  supervisor no-execution boundary, duplicate accepted implementation commit, and
-  command/main-context contract;
-- hermetic Git plumbing, complete tree/index/worktree/import-surface authentication,
-  no-helper/no-lazy-fetch behavior, and closed captured-buffer repository loader;
+  supervisor no-execution boundary, duplicate accepted implementation commit, closed
+  four-key `exact_command` value, and command/main-context contract;
+- exact-argv hermetic Git plumbing, descriptor/content-bound Git inputs, structural
+  local-config allowlist, complete tree/index/full-mode worktree/import-surface
+  authentication, no-helper/no-filter/no-lazy-fetch behavior, sole no-argument
+  source callback, and closed captured-buffer repository loader;
 - shallow/source-clean/deep/RNG/output ordering;
 - teacher-forced and taxonomy semantic fidelity;
 - RNG-neutral construction and post-load parameter immutability;

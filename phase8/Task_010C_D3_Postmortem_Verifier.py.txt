@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import configparser
 import hashlib
 import importlib.abc
 import importlib.util
@@ -16,6 +17,7 @@ REPO_ROOT = Path("/home/mye/src/llm/CapKnow")
 GIT_DIR = REPO_ROOT / ".git"
 GIT = "/usr/bin/git"
 PYTHON = "/opt/anaconda3/bin/python"
+PYTHON_EXE = "/opt/anaconda3/bin/python3.13"
 SITE_PACKAGES = "/opt/anaconda3/lib/python3.13/site-packages"
 RUNNER_PATH = "scripts/phase8_sequence_feasibility.py"
 ARTIFACT_PREFIX = PurePosixPath("artifacts/phase8_toy_lm_bridge")
@@ -40,35 +42,10 @@ GIT_ENVIRONMENT = {
     "GIT_OPTIONAL_LOCKS": "0",
     "GIT_PAGER": "cat",
 }
-GIT_PREFIX = [
-    GIT,
-    "--no-pager",
-    "--no-replace-objects",
-    "--literal-pathspecs",
-    f"--git-dir={GIT_DIR}",
-    f"--work-tree={REPO_ROOT}",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.attributesFile=/dev/null",
-    "-c",
-    "core.excludesFile=/dev/null",
-    "-c",
-    "core.pager=cat",
-    "-c",
-    "pager.rev-parse=false",
-    "-c",
-    "pager.ls-tree=false",
-    "-c",
-    "pager.ls-files=false",
-    "-c",
-    "pager.cat-file=false",
-]
 GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 IGNORED_IMPORT_SUFFIXES = frozenset({".py", ".pyc", ".pyo", ".so", ".pth"})
 IGNORED_IMPORT_HOOK_STEMS = frozenset({"sitecustomize", "usercustomize"})
+PINNED_GIT: PinnedGitContext | None = None
 
 
 def fail(message: str) -> None:
@@ -106,7 +83,10 @@ def canonical_relative_path(raw: str, field_name: str) -> PurePosixPath:
 
 def read_regular_repo_file_no_follow(raw: str) -> tuple[bytes, os.stat_result]:
     relative = canonical_relative_path(raw, "tracked path")
-    directory_fd = os.open(REPO_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    if PINNED_GIT is None:
+        directory_fd = os.open(REPO_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    else:
+        directory_fd = os.dup(PINNED_GIT.repo_fd)
     try:
         for part in relative.parts[:-1]:
             next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd)
@@ -125,12 +105,12 @@ def read_regular_repo_file_no_follow(raw: str) -> tuple[bytes, os.stat_result]:
                 chunks.append(chunk)
             after = os.fstat(file_fd)
             path_after = os.stat(relative.parts[-1], dir_fd=directory_fd, follow_symlinks=False)
-            identity_before = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode), before.st_size)
-            identity_after = (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode), after.st_size)
-            identity_path = (path_after.st_dev, path_after.st_ino, stat.S_IFMT(path_after.st_mode), path_after.st_size)
+            identity_before = (before.st_dev, before.st_ino, before.st_mode, before.st_size)
+            identity_after = (after.st_dev, after.st_ino, after.st_mode, after.st_size)
+            identity_path = (path_after.st_dev, path_after.st_ino, path_after.st_mode, path_after.st_size)
             if identity_before != identity_after or identity_before != identity_path:
                 fail(f"tracked path changed while captured: {raw}")
-            return b"".join(chunks), before
+            return b"".join(chunks), path_after
         finally:
             os.close(file_fd)
     except (FileNotFoundError, NotADirectoryError, OSError) as exc:
@@ -144,21 +124,252 @@ def git_blob_oid(payload: bytes) -> str:
     return hashlib.sha1(header + payload, usedforsecurity=False).hexdigest()
 
 
+def descriptor_identity(fd: int) -> tuple[int, int, int, int]:
+    metadata = os.fstat(fd)
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size)
+
+
+def read_regular_fd(fd: int, field_name: str) -> bytes:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode):
+        fail(f"{field_name} is not a regular file")
+    payload = bytearray()
+    offset = 0
+    while offset < before.st_size:
+        chunk = os.pread(fd, min(1024 * 1024, before.st_size - offset), offset)
+        if not chunk:
+            fail(f"{field_name} was truncated while read")
+        payload.extend(chunk)
+        offset += len(chunk)
+    after = os.fstat(fd)
+    if descriptor_identity(fd) != (
+        before.st_dev,
+        before.st_ino,
+        before.st_mode,
+        before.st_size,
+    ):
+        fail(f"{field_name} changed while read")
+    return bytes(payload)
+
+
+def snapshot_directory_tree(root_fd: int, field_name: str) -> tuple[tuple[object, ...], ...]:
+    rows: list[tuple[object, ...]] = []
+    stack = [(PurePosixPath(), os.dup(root_fd))]
+    while stack:
+        relative_parent, current_fd = stack.pop()
+        try:
+            entries = sorted(os.scandir(current_fd), key=lambda entry: entry.name)
+        except OSError as exc:
+            os.close(current_fd)
+            fail(f"{field_name} cannot be enumerated: {exc}")
+        try:
+            for entry in entries:
+                relative = relative_parent / entry.name
+                try:
+                    metadata = os.stat(entry.name, dir_fd=current_fd, follow_symlinks=False)
+                except OSError as exc:
+                    fail(f"{field_name} entry cannot be inspected: {relative}: {exc}")
+                identity = (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size)
+                if stat.S_ISLNK(metadata.st_mode):
+                    fail(f"{field_name} contains a symlink: {relative}")
+                if stat.S_ISDIR(metadata.st_mode):
+                    child_fd = os.open(
+                        entry.name,
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=current_fd,
+                    )
+                    if descriptor_identity(child_fd) != identity:
+                        os.close(child_fd)
+                        fail(f"{field_name} directory identity changed: {relative}")
+                    rows.append((relative.as_posix(), *identity, None))
+                    stack.append((relative, child_fd))
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    fail(f"{field_name} contains a non-file entry: {relative}")
+                file_fd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=current_fd)
+                try:
+                    if descriptor_identity(file_fd) != identity:
+                        fail(f"{field_name} entry identity changed: {relative}")
+                    payload = read_regular_fd(file_fd, f"{field_name} entry {relative}")
+                    path_after = os.stat(entry.name, dir_fd=current_fd, follow_symlinks=False)
+                    path_identity = (
+                        path_after.st_dev,
+                        path_after.st_ino,
+                        path_after.st_mode,
+                        path_after.st_size,
+                    )
+                    if path_identity != identity:
+                        fail(f"{field_name} entry changed while captured: {relative}")
+                finally:
+                    os.close(file_fd)
+                rows.append(
+                    (relative.as_posix(), *identity, hashlib.sha256(payload).hexdigest())
+                )
+        finally:
+            os.close(current_fd)
+    return tuple(sorted(rows))
+
+
+class PinnedGitContext:
+    def __init__(self) -> None:
+        self.repo_fd = os.open(REPO_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        self.repo_identity = descriptor_identity(self.repo_fd)
+        self.git_fd = os.open(".git", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.repo_fd)
+        self.objects_fd = os.open("objects", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.git_fd)
+        self.refs_fd = os.open("refs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.git_fd)
+        self.info_fd = os.open("info", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self.git_fd)
+        self.head_fd = os.open("HEAD", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.git_fd)
+        self.index_fd = os.open("index", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.git_fd)
+        self.config_fd = os.open("config", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.git_fd)
+        self.exclude_fd = os.open("exclude", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.info_fd)
+        self.packed_refs_fd = os.open("packed-refs", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.git_fd)
+        self.bound = (
+            (self.repo_fd, None, None, self.repo_identity),
+            (self.git_fd, self.repo_fd, ".git", descriptor_identity(self.git_fd)),
+            (self.objects_fd, self.git_fd, "objects", descriptor_identity(self.objects_fd)),
+            (self.refs_fd, self.git_fd, "refs", descriptor_identity(self.refs_fd)),
+            (self.info_fd, self.git_fd, "info", descriptor_identity(self.info_fd)),
+            (self.head_fd, self.git_fd, "HEAD", descriptor_identity(self.head_fd)),
+            (self.index_fd, self.git_fd, "index", descriptor_identity(self.index_fd)),
+            (self.config_fd, self.git_fd, "config", descriptor_identity(self.config_fd)),
+            (self.exclude_fd, self.info_fd, "exclude", descriptor_identity(self.exclude_fd)),
+            (
+                self.packed_refs_fd,
+                self.git_fd,
+                "packed-refs",
+                descriptor_identity(self.packed_refs_fd),
+            ),
+        )
+        for fd, _parent_fd, name, identity in self.bound:
+            metadata = os.fstat(fd)
+            if name in {None, ".git", "objects", "refs", "info"}:
+                if not stat.S_ISDIR(metadata.st_mode):
+                    fail("pinned Git directory binding is not a directory")
+            elif not stat.S_ISREG(metadata.st_mode):
+                fail("pinned Git file binding is not a regular file")
+            if stat.S_ISLNK(metadata.st_mode) or descriptor_identity(fd) != identity:
+                fail("pinned Git binding is not canonical")
+        self.bound_payloads = {
+            fd: hashlib.sha256(read_regular_fd(fd, f"pinned Git file {name}")).hexdigest()
+            for fd, _parent_fd, name, _identity in self.bound
+            if name not in {None, ".git", "objects", "refs", "info"}
+        }
+        self.directory_snapshots = {
+            self.objects_fd: snapshot_directory_tree(self.objects_fd, "Git object store"),
+            self.refs_fd: snapshot_directory_tree(self.refs_fd, "Git refs store"),
+            self.info_fd: snapshot_directory_tree(self.info_fd, "Git info store"),
+        }
+        self.absent_info_entries = ("attributes",)
+        self.revalidate()
+
+    @property
+    def pass_fds(self) -> tuple[int, ...]:
+        return tuple(fd for fd, _parent_fd, _name, _identity in self.bound)
+
+    def revalidate(self) -> None:
+        observed_repo = REPO_ROOT.lstat()
+        if (observed_repo.st_dev, observed_repo.st_ino, observed_repo.st_mode, observed_repo.st_size) != self.repo_identity:
+            fail("repository root identity changed")
+        for fd, parent_fd, name, identity in self.bound:
+            if descriptor_identity(fd) != identity:
+                fail("pinned Git descriptor identity changed")
+            if parent_fd is not None and name is not None:
+                try:
+                    metadata = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    fail(f"pinned Git path disappeared: {name}")
+                path_identity = (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size)
+                if path_identity != identity:
+                    fail(f"pinned Git path identity changed: {name}")
+            expected_payload = self.bound_payloads.get(fd)
+            if expected_payload is not None:
+                observed_payload = hashlib.sha256(
+                    read_regular_fd(fd, f"pinned Git file {name}")
+                ).hexdigest()
+                if observed_payload != expected_payload:
+                    fail(f"pinned Git file content changed: {name}")
+        for fd, expected in self.directory_snapshots.items():
+            if snapshot_directory_tree(fd, "pinned Git directory") != expected:
+                fail("pinned Git directory content changed")
+        for name in self.absent_info_entries:
+            try:
+                os.stat(name, dir_fd=self.info_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            fail(f"redirectable Git info input appeared: {name}")
+
+    def git_prefix(self) -> list[str]:
+        return [
+            GIT,
+            "--no-pager",
+            "--no-replace-objects",
+            "--literal-pathspecs",
+            f"--git-dir=/proc/self/fd/{self.git_fd}",
+            f"--work-tree=/proc/self/fd/{self.repo_fd}",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.excludesFile=/proc/self/fd/" + str(self.exclude_fd),
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "pager.rev-parse=false",
+            "-c",
+            "pager.ls-tree=false",
+            "-c",
+            "pager.ls-files=false",
+            "-c",
+            "pager.cat-file=false",
+        ]
+
+    def git_environment(self) -> dict[str, str]:
+        return {
+            **GIT_ENVIRONMENT,
+            "GIT_INDEX_FILE": f"/proc/self/fd/{self.index_fd}",
+            "GIT_OBJECT_DIRECTORY": f"/proc/self/fd/{self.objects_fd}",
+        }
+
+
+def require_allowed_git_argv(args: tuple[str, ...]) -> None:
+    fixed = {
+        ("rev-parse", "--show-object-format"),
+        ("rev-parse", "--verify", "HEAD^{commit}"),
+        ("ls-files", "--stage", "-z"),
+        ("ls-files", "-v", "-z"),
+        ("ls-files", "--others", "--exclude-standard", "-z"),
+        ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
+    }
+    if args in fixed:
+        return
+    if len(args) == 4 and args[:3] == ("ls-tree", "-rz", "--full-tree") and GIT_SHA_RE.fullmatch(args[3]):
+        return
+    if len(args) == 3 and args[:2] in {("cat-file", "-t"), ("cat-file", "blob")} and GIT_SHA_RE.fullmatch(args[2]):
+        return
+    fail("Git plumbing argv is outside the exact allowlist")
+
+
 def git_run(*args: str) -> bytes:
-    allowed = {"rev-parse", "ls-tree", "ls-files", "cat-file"}
-    if not args or args[0] not in allowed:
-        fail("non-plumbing Git command requested")
+    if PINNED_GIT is None:
+        fail("Git plumbing requested before descriptor binding")
+    require_allowed_git_argv(args)
+    PINNED_GIT.revalidate()
     completed = subprocess.run(
-        [*GIT_PREFIX, *args],
-        cwd=REPO_ROOT,
-        env=GIT_ENVIRONMENT,
+        [*PINNED_GIT.git_prefix(), *args],
+        cwd=f"/proc/self/fd/{PINNED_GIT.repo_fd}",
+        env=PINNED_GIT.git_environment(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
         close_fds=True,
+        pass_fds=PINNED_GIT.pass_fds,
         timeout=30,
     )
+    PINNED_GIT.revalidate()
     if completed.returncode != 0 or completed.stderr:
         fail(f"Git plumbing failed: {args[0]}")
     return completed.stdout
@@ -185,7 +396,42 @@ def reject_noncanonical_git_entries(root: Path, field_name: str) -> None:
                 fail(f"{field_name} contains a non-file entry: {entry.path}")
 
 
+def require_exact_local_config() -> None:
+    if PINNED_GIT is None:
+        fail("Git config requested before descriptor binding")
+    try:
+        payload = read_regular_fd(PINNED_GIT.config_fd, "Git local config").decode("utf-8")
+    except UnicodeDecodeError:
+        fail("Git local config is not UTF-8")
+    parser = configparser.RawConfigParser(interpolation=None, strict=True)
+    try:
+        parser.read_string(payload)
+    except configparser.Error as exc:
+        fail(f"Git local config is malformed: {exc}")
+    expected = {
+        "core": {
+            "repositoryformatversion": "0",
+            "filemode": "true",
+            "bare": "false",
+            "logallrefupdates": "true",
+        },
+        'remote "origin"': {
+            "url": "git@github.com:johnxye/CapKnow.git",
+            "fetch": "+refs/heads/*:refs/remotes/origin/*",
+        },
+    }
+    observed = {
+        section: dict(parser.items(section, raw=True))
+        for section in parser.sections()
+    }
+    if parser.defaults() or observed != expected:
+        fail("Git local config is outside the exact inert allowlist")
+
+
 def reject_redirected_git_state() -> None:
+    if PINNED_GIT is None:
+        fail("Git state requested before descriptor binding")
+    PINNED_GIT.revalidate()
     require_real_directory(REPO_ROOT, "repository root")
     require_real_directory(GIT_DIR, "Git directory")
     require_real_directory(GIT_DIR / "objects", "Git object directory")
@@ -218,23 +464,8 @@ def reject_redirected_git_state() -> None:
         require_real_directory(pack_root, "Git pack directory")
         if any(entry.name.endswith(".promisor") for entry in os.scandir(pack_root)):
             fail("Git promisor packs exist")
-    config_payload, _config_metadata = read_regular_repo_file_no_follow(".git/config")
-    config_payload = config_payload.lower()
-    forbidden_config_tokens = (
-        b"alternaterefscommand",
-        b"diff.external",
-        b"filter.",
-        b"fsmonitor",
-        b"hookspath",
-        b"include",
-        b"pager",
-        b"partialclone",
-        b"promisor",
-        b"textconv",
-        b"worktree",
-    )
-    if any(token in config_payload for token in forbidden_config_tokens):
-        fail("Git local config contains an executable or redirecting setting")
+    require_exact_local_config()
+    PINNED_GIT.revalidate()
 
 
 def parse_tree(payload: bytes) -> dict[str, tuple[str, str]]:
@@ -327,7 +558,9 @@ def ignored_import_candidate(path: str) -> bool:
     return relative.name in IGNORED_IMPORT_HOOK_STEMS or relative.stem in IGNORED_IMPORT_HOOK_STEMS
 
 
-def authenticate_repository(accepted_commit: str) -> dict[str, bytes]:
+def authenticate_repository(
+    accepted_commit: str,
+) -> tuple[dict[str, bytes], tuple[str, ...], tuple[str, ...]]:
     reject_redirected_git_state()
     if git_run("rev-parse", "--show-object-format") != b"sha1\n":
         fail("Git object format is not SHA-1")
@@ -370,7 +603,10 @@ def authenticate_repository(accepted_commit: str) -> dict[str, bytes]:
     dangerous = [path for path in ignored if ignored_import_candidate(path)]
     if dangerous:
         fail(f"ignored import surface exists: {dangerous[0]}")
-    return captured
+    if PINNED_GIT is None:
+        fail("repository authentication lost its descriptor binding")
+    PINNED_GIT.revalidate()
+    return captured, untracked, ignored
 
 
 def module_name_for_path(path: str) -> tuple[str, bool]:
@@ -453,6 +689,21 @@ def parse_launch() -> tuple[str, str, str, list[str]]:
     expected_orig_argv = [PYTHON, "-I", "-B", "-S", "-c", source, *sys.argv[1:]]
     if sys.orig_argv != expected_orig_argv:
         fail("kernel Python argv is not exact")
+    if os.readlink("/proc/self/exe") != PYTHON_EXE:
+        fail("kernel executable is not the frozen Python binary")
+    cmdline_fd = os.open("/proc/self/cmdline", os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        cmdline = bytearray()
+        while True:
+            chunk = os.read(cmdline_fd, 1024 * 1024)
+            if not chunk:
+                break
+            cmdline.extend(chunk)
+    finally:
+        os.close(cmdline_fd)
+    expected_cmdline = b"\0".join(arg.encode("utf-8") for arg in expected_orig_argv) + b"\0"
+    if bytes(cmdline) != expected_cmdline:
+        fail("/proc/self/cmdline is not exact")
     inner_flag = "--accepted-implementation-commit"
     if runner_args.count(inner_flag) != 1:
         fail("runner accepted-implementation binding is absent or duplicated")
@@ -463,8 +714,10 @@ def parse_launch() -> tuple[str, str, str, list[str]]:
 
 
 def main() -> None:
+    global PINNED_GIT
     verifier_sha, accepted_commit, runner_path, runner_args = parse_launch()
-    captured = authenticate_repository(accepted_commit)
+    PINNED_GIT = PinnedGitContext()
+    captured, initial_untracked, initial_ignored = authenticate_repository(accepted_commit)
     runner_payload = captured.get(runner_path)
     if runner_payload is None:
         fail("accepted runner bytes were not captured")
@@ -479,9 +732,16 @@ def main() -> None:
     sys.path.append(SITE_PACKAGES)
     sys.argv = [str(REPO_ROOT / runner_path), *runner_args]
 
-    def verify_repository_unchanged() -> None:
-        if authenticate_repository(accepted_commit) != captured:
+    def verify_repository_unchanged() -> tuple[tuple[str, ...], tuple[str, ...]]:
+        current_captured, current_untracked, current_ignored = authenticate_repository(
+            accepted_commit
+        )
+        if current_captured != captured:
             fail("captured repository sources changed after verifier preflight")
+        return current_untracked, current_ignored
+
+    if verify_repository_unchanged() != (initial_untracked, initial_ignored):
+        fail("repository path status changed after verifier preflight")
 
     runner_globals = {
         "__name__": "__main__",
@@ -491,7 +751,6 @@ def main() -> None:
         "__builtins__": __builtins__,
         "__phase8_verifier_sha256__": verifier_sha,
         "__phase8_accepted_implementation_commit__": accepted_commit,
-        "__phase8_git_run__": git_run,
         "__phase8_repository_loader__": loader,
         "__phase8_verify_repository_unchanged__": verify_repository_unchanged,
     }

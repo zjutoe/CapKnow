@@ -21,8 +21,9 @@ accepted D1 diagnostic remain historical untied artifacts only under their exact
 allowlists.
 
 Post-010C-D3 boundary: the accepted read-only postmortem proposal at commit
-`06ee71d958eb1c4cb446ede3d120e99eb64bba97` and its revised D3-I implementation handoff
-authorize only a bounded implementation package, not a run. The only future command
+`06ee71d958eb1c4cb446ede3d120e99eb64bba97` permits a revised D3-I implementation
+handoff to seek independent acceptance. Only an accepted exact handoff commit may
+authorize the bounded implementation package, never a run. The only future command
 surface is a separately reviewed supervisor-to-`execve` `postmortem-failure` launch
 against the exact failed
 `artifacts/phase8_toy_lm_bridge/feasibility_005` root and the single output root

@@ -744,14 +744,17 @@ external supervisor, not a shell command:
 executable: /opt/anaconda3/bin/python
 cwd: /home/mye/src/llm/CapKnow
 environment: exact clean LC_ALL plus the three frozen 005 environment values
-argv prefix: python -I -B -S -c <verifier bytes> --verifier-sha256 0ec580597442655a095c9c0090917697798c3e6bc895962eec5fb368eb723bc6 --accepted-implementation-commit <accepted SHA> --runner-path scripts/phase8_sequence_feasibility.py --
+argv prefix: python -I -B -S -c <verifier bytes> --verifier-sha256 7442c22ca7ff1558f6be9122db2097e1f5a1473b084d6448152619d105ace958 --accepted-implementation-commit <accepted SHA> --runner-path scripts/phase8_sequence_feasibility.py --
 runner argv: postmortem-failure --device cuda:0 --input-root artifacts/phase8_toy_lm_bridge/feasibility_005 --output-root artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001 --accepted-proposal-commit 06ee71d958eb1c4cb446ede3d120e99eb64bba97 --accepted-implementation-commit <same accepted SHA>
 ```
 
 The exact verifier source is frozen by the revised D3-I handoff. It authenticates the
-accepted implementation tree/index/worktree and loads repository modules only from
-captured accepted buffers before Torch or runner execution. The D3-I implementation
-package may encode this launch template, exact proposal/005/source/runtime bindings,
+accepted implementation tree/index/full-mode worktree through exact-argv Git plumbing
+and retained descriptor/content bindings, then loads repository modules only from
+captured accepted buffers before Torch or runner execution. The manifest records the
+launch as the handoff's exact closed four-key `exact_command` object, including the
+verifier source and both matching implementation-commit argv positions. The D3-I
+implementation package may encode this launch template, exact proposal/005/source/runtime bindings,
 checkpoint-read-only teacher-forced metrics, retained-generation taxonomy,
 forbidden-operation sentinels, and descriptor-bound DONE-only atomic publication. It
 does not supply the future accepted implementation SHA or supervisor, authorize a
