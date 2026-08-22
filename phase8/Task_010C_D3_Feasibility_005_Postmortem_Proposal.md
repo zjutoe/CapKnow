@@ -20,10 +20,11 @@ does not amend the model, data, optimizer, `52/64` threshold, 1500-step budget, 
 stop rule, or scientific interpretation.
 
 Revision after implementation review corrects the descriptive logits width from
-`259` to the frozen tokenizer/model value `260`, requires an isolated interpreter
-bootstrap before any repository or third-party import, and closes terminal cleanup
-and rollback identity gaps. These are feasibility/security corrections only; they do
-not change any scientific computation, accepted 005 result, or authority boundary.
+`259` to the frozen tokenizer/model value `260`, requires an isolated no-site
+interpreter and an independently bound inline bootstrap before any repository or
+third-party import, and closes terminal cleanup and rollback identity gaps. These are
+feasibility/security corrections only; they do not change any scientific computation,
+accepted 005 result, or authority boundary.
 
 Acceptance of this proposal would authorize only a separate implementation handoff.
 That implementation must be delegated to a fresh-context `gpt-5.5` executor, frozen
@@ -136,13 +137,24 @@ The future implementation must freeze the exact command and require real kernel 
 real environment, clean committed source, the absent output root, and complete input
 validation before CUDA model construction or output-root creation.
 
-The canonical command must invoke Python with both `-I` and `-B`. `-I` must keep the
-repository root, its `scripts` directory, and `PYTHONPATH=.` off the interpreter's
-startup import path; `-B` independently enforces no bytecode writes because isolated
-mode ignores `PYTHONDONTWRITEBYTECODE` as an interpreter setting. The three exact
-environment strings above remain recorded unchanged for equality with the 005 input.
-Before adding the exact repository root to `sys.path`, and before importing Torch or
-any repository module, a standard-library-only bootstrap must:
+The canonical command must invoke the frozen `/opt/anaconda3/bin/python` with
+`-I -B -S -c <verifier>` rather than execute the repository runner directly. `-I`
+must keep the repository root, its `scripts` directory, and `PYTHONPATH=.` off the
+interpreter's startup import path; `-B` independently enforces no bytecode writes
+because isolated mode ignores `PYTHONDONTWRITEBYTECODE` as an interpreter setting;
+and `-S` prevents global `sitecustomize`, `usercustomize`, site-packages, and `.pth`
+processing before the verifier. The verifier must assert `isolated=1`,
+`dont_write_bytecode=1`, and `no_site=1`, plus the frozen standard-library-only
+initial `sys.path`. The three exact environment strings above remain recorded
+unchanged for equality with the 005 input.
+
+The exact UTF-8 inline verifier source, its SHA-256, its position in
+`/proc/self/cmdline`, the runner path, the accepted implementation commit supplied by
+the later launch packet, and every remaining argument must be frozen and tested by
+the implementation handoff. This command-line source is the pre-runner trust root;
+the worktree runner is data until the verifier accepts it. Before compiling or
+executing any runner byte, adding the repository root to `sys.path`, or importing
+Torch or any repository module, the standard-library-only verifier must:
 
 - require the repository-root CWD, real `__main__` process, exact kernel argv, and
   active isolated/no-bytecode flags;
@@ -152,11 +164,22 @@ any repository module, a standard-library-only bootstrap must:
   cache entry, or symlink without following its target; and
 - before those imports can execute, compare the bytes of the actually executed runner
   and every tracked repository import-surface candidate with the corresponding blob
-  at the same runtime HEAD, irrespective of index assume-unchanged/skip-worktree bits.
+  at the exact accepted implementation commit, require runtime HEAD to equal that
+  commit, and reject index assume-unchanged/skip-worktree bits.
 
-The later full evidence-aware cleanliness check remains mandatory. A source hook or
-shadow module that executes and deletes itself before the bootstrap is a test failure,
-not an allowed clean state.
+Only after all checks pass may the verifier append, without importing `site` or using
+`site.addsitedir()`, the exact frozen
+`/opt/anaconda3/lib/python3.13/site-packages` directory and the exact repository root
+to `sys.path`, compile the already-verified runner bytes with the canonical runner
+filename, and execute them as `__main__`. The runner must require the exact verifier
+source/argv context and the separately supplied accepted implementation commit;
+direct script execution, `runpy`, import invocation, a changed verifier, or an
+unreviewed runtime HEAD must fail before the normative writer can run.
+
+The later full evidence-aware cleanliness check remains mandatory. Tests must prove
+that repository and global-site startup hooks never execute, and that a modified
+runner preamble or shadow module which would create a sentinel or delete itself is
+rejected while its sentinel remains absent and its bytes remain untouched.
 
 The complete runtime `environment` and `deterministic_flags` objects must equal the
 input manifest field-for-field before CUDA construction and before publication.
@@ -455,11 +478,14 @@ A future D3 implementation handoff must require tests for:
    save, or generation call can occur, plus byte-identical loaded parameters and
    process-global Python, Torch CPU,
    and all-CUDA RNG states across reconstruction, load, inference, and publication;
-6. an isolated/no-bytecode subprocess bootstrap before repository/Torch imports,
-   including self-removing root `sitecustomize` and sourceless-shadow tests, actual
-   runner/imported-source byte equality with HEAD, source-clean preflight before CUDA
-   construction or output creation, no-clobber temporary-root publication,
-   terminal/inventory validation, and source-unchanged checks before atomic rename;
+6. an exact `/opt/anaconda3/bin/python -I -B -S -c <verifier>` subprocess bootstrap
+   before repository/Torch imports, including non-execution tests for repository and
+   global-site startup hooks, a modified runner preamble, and self-removing sourceless
+   shadows; exact runner/import-surface byte equality with the accepted implementation
+   commit despite index flags; direct-script/verifier/argv rejection; source-clean
+   preflight before CUDA construction or output creation; no-clobber temporary-root
+   publication, terminal/inventory validation, and source-unchanged checks before
+   atomic rename;
 7. no-follow cleanup for regular, symlink, FIFO, socket, device, directory, and
    root-symlink terminal substitutions; occupied-temp rollback must preserve the
    collision, remove the invalid final path, and leave only a non-terminal temp root;
