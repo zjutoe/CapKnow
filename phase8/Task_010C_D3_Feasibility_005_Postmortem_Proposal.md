@@ -137,9 +137,13 @@ The future implementation must freeze the exact command and require real kernel 
 real environment, clean committed source, the absent output root, and complete input
 validation before CUDA model construction or output-root creation.
 
-The canonical command must invoke the frozen `/opt/anaconda3/bin/python` with
-`-I -B -S -c <verifier>` rather than execute the repository runner directly. `-I`
-must keep the repository root, its `scripts` directory, and `PYTHONPATH=.` off the
+The canonical command must begin with `/usr/bin/env -i LC_ALL=C`, set only the three
+frozen experiment variables above, and invoke the frozen
+`/opt/anaconda3/bin/python` with `-I -B -S -c <verifier>` rather than execute the
+repository runner directly. The empty inherited environment prevents loader,
+Python-startup, Git, pager, locale, and PATH state from executing or redirecting code
+before the verifier. `-I` must keep the repository root, its `scripts` directory, and
+`PYTHONPATH=.` off the
 interpreter's startup import path; `-B` independently enforces no bytecode writes
 because isolated mode ignores `PYTHONDONTWRITEBYTECODE` as an interpreter setting;
 and `-S` prevents global `sitecustomize`, `usercustomize`, site-packages, and `.pth`
@@ -158,10 +162,23 @@ Torch or any repository module, the standard-library-only verifier must:
 
 - require the repository-root CWD, real `__main__` process, exact kernel argv, and
   active isolated/no-bytecode flags;
-- use `/usr/bin/git` to reject tracked/staged drift, every untracked
-  path outside the bound Phase 8 artifact parent, and every repository-wide ignored
-  executable, import hook, sourceless module, native module, `.pth` file, importable
-  cache entry, or symlink without following its target; and
+- require `.git` to be the canonical real repository directory and reject Git object
+  alternates, grafts, and replacement refs before object lookup; invoke `/usr/bin/git`
+  only through a frozen wrapper with an explicit canonical
+  git-dir/work-tree, `--no-pager`, `--no-replace-objects`, literal pathspecs, disabled
+  FSMonitor/hooks/pager/external diff/textconv, and a minimal environment that removes
+  every inherited `GIT_*` variable before setting only wrapper-owned controls that
+  disable system/global configuration, optional locks, attributes, and paging; local
+  configuration must not be able to re-enable any executable feature;
+- use only non-extensible `rev-parse`, `ls-tree`, `ls-files`, and `cat-file` plumbing
+  argv and require the repository object format to be exactly SHA-1. The verifier,
+  not Git diff/status/filter machinery, must compare the complete
+  HEAD tree, index modes/object IDs/flags, and no-follow worktree bytes or symlink
+  payloads by independently computed Git blob IDs. It must reject tracked/staged
+  drift, assume-unchanged/skip-worktree flags, every untracked path outside the bound
+  Phase 8 artifact parent, and every repository-wide ignored executable, import hook,
+  sourceless module, native module, `.pth` file, importable cache entry, or symlink;
+  and
 - before those imports can execute, compare the bytes of the actually executed runner
   and every tracked repository import-surface candidate with the corresponding blob
   at the exact accepted implementation commit, require runtime HEAD to equal that
@@ -180,6 +197,13 @@ The later full evidence-aware cleanliness check remains mandatory. Tests must pr
 that repository and global-site startup hooks never execute, and that a modified
 runner preamble or shadow module which would create a sentinel or delete itself is
 rejected while its sentinel remains absent and its bytes remain untouched.
+Tests must also install sentinel local/global FSMonitor and external-diff settings,
+inherited `GIT_DIR`/`GIT_WORK_TREE` redirection, replacement refs, pager variables,
+object alternates/grafts, loader/startup environment variables, and index flags; the
+verifier must either reject the state or authenticate the exact accepted tree with
+every sentinel absent. No Git command used by the verifier may consult a filter,
+textconv, pager, hook, replacement object, alternate object/work tree, or ambient
+config.
 
 The complete runtime `environment` and `deterministic_flags` objects must equal the
 input manifest field-for-field before CUDA construction and before publication.
@@ -483,9 +507,11 @@ A future D3 implementation handoff must require tests for:
    global-site startup hooks, a modified runner preamble, and self-removing sourceless
    shadows; exact runner/import-surface byte equality with the accepted implementation
    commit despite index flags; direct-script/verifier/argv rejection; source-clean
-   preflight before CUDA construction or output creation; no-clobber temporary-root
-   publication, terminal/inventory validation, and source-unchanged checks before
-   atomic rename;
+   preflight before CUDA construction or output creation; hermetic-Git sentinel tests
+   for local/global FSMonitor, hooks, external diff/textconv, pagers, replacement refs,
+   object alternates/grafts, inherited Git/loader/startup redirection, and index flags;
+   no-clobber temporary-root publication, terminal/inventory validation, and
+   source-unchanged checks before atomic rename;
 7. no-follow cleanup for regular, symlink, FIFO, socket, device, directory, and
    root-symlink terminal substitutions; occupied-temp rollback must preserve the
    collision, remove the invalid final path, and leave only a non-terminal temp root;
