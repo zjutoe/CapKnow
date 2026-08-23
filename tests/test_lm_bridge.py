@@ -12,8 +12,11 @@ from pathlib import Path
 import random
 import re
 import shutil
+import socket
+import stat
 import subprocess
 import sys
+import tempfile
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -5650,7 +5653,7 @@ def test_diagnostic_frozen_configuration_expands_protocol_and_training_constants
 
 
 def _d3_env(sf: object) -> dict[str, str]:
-    return {key: str(value) for key, value in sf.FEASIBILITY_REQUIRED_ENV.items()}
+    return dict(sf.POSTMORTEM_EXECVE_ENVIRONMENT)
 
 
 def _d3_synthetic_teacher_rows(
@@ -5749,9 +5752,10 @@ def _d3_build_synthetic_postmortem_root(
         "path": sf.POSTMORTEM_PROPOSAL_PATH,
         "blob": sf.POSTMORTEM_PROPOSAL_BLOB,
     }
+    accepted_implementation_commit = _test_source_commit()
     implementation_binding = {
-        "commit": _test_source_commit(),
-        "runner_path": "scripts/phase8_sequence_feasibility.py",
+        "commit": accepted_implementation_commit,
+        "runner_path": sf.POSTMORTEM_RUNNER_PATH,
         "runner_blob": subprocess.run(
             ["git", "rev-parse", "HEAD:scripts/phase8_sequence_feasibility.py"],
             check=True,
@@ -5847,7 +5851,12 @@ def _d3_build_synthetic_postmortem_root(
             input_binding=input_binding,
             proposal_binding=proposal_binding,
             implementation_binding=implementation_binding,
-            exact_command=sf.postmortem_exact_command(input_root, output_root, sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT),
+            exact_command=sf.postmortem_exact_command(
+                input_root,
+                output_root,
+                sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+                accepted_implementation_commit,
+            ),
             environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
             deterministic_flags=_current_deterministic_flags(),
             rng_state_contract={key: True for key in sf.POSTMORTEM_RNG_CONTRACT_KEYS},
@@ -5872,7 +5881,12 @@ def _d3_expected_publication_context(sf: object, output_root: Path) -> dict[str,
         "expected_input_binding": manifest["input_binding"],
         "expected_proposal_binding": manifest["proposal_binding"],
         "expected_implementation_binding": manifest["implementation_binding"],
-        "expected_source_snapshot": sf.SourceSnapshot(commit=manifest["implementation_binding"]["commit"], status_lines=(), ignored_inputs=()),
+        "expected_source_snapshot": sf.SourceSnapshot(
+            commit=manifest["implementation_binding"]["commit"],
+            status_lines=(),
+            ignored_inputs=(),
+            runner_blob=manifest["implementation_binding"]["runner_blob"],
+        ),
         "expected_teacher_rows": sf.read_canonical_postmortem_jsonl(output_root / "teacher_forced_rows.jsonl", "test.teacher"),
         "expected_cell_rows": sf.read_canonical_postmortem_jsonl(output_root / "cell_metrics.jsonl", "test.cells"),
         "expected_taxonomy_rows": sf.read_canonical_postmortem_jsonl(output_root / "error_taxonomy.jsonl", "test.taxonomy"),
@@ -5978,33 +5992,108 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     input_root = Path(sf.POSTMORTEM_REQUIRED_INPUT_ROOT)
     output_root = Path(sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT)
-    exact_argv = sf.postmortem_exact_argv(input_root, output_root, sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT)
-    monkeypatch.setattr(sf, "postmortem_kernel_argv", lambda: exact_argv)
+    accepted_implementation_commit = "d" * 40
+    verifier_source = sf.postmortem_verifier_source_text()
+    verifier_path = REPO_ROOT / sf.POSTMORTEM_VERIFIER_PATH
+    verifier_bytes = verifier_path.read_bytes()
+    assert len(verifier_bytes) == sf.POSTMORTEM_VERIFIER_BYTE_COUNT == 34156
+    assert sha256(verifier_bytes).hexdigest() == sf.POSTMORTEM_VERIFIER_SHA256
+    assert subprocess.run(
+        ["git", "hash-object", sf.POSTMORTEM_VERIFIER_PATH],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        cwd=REPO_ROOT,
+    ).stdout.strip() == sf.POSTMORTEM_VERIFIER_BLOB
+    exact_argv = sf.postmortem_exact_argv(
+        input_root,
+        output_root,
+        sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        accepted_implementation_commit,
+        verifier_source=verifier_source,
+    )
+    assert len(exact_argv) == 24
+    assert exact_argv[0:5] == [sf.POSTMORTEM_EXECUTABLE, "-I", "-B", "-S", "-c"]
+    assert exact_argv[5] == verifier_source
+    assert exact_argv[7] == sf.POSTMORTEM_VERIFIER_SHA256
+    assert exact_argv[9] == exact_argv[23] == accepted_implementation_commit
+    assert exact_argv[21] == sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT
+    exact_command = sf.postmortem_exact_command(
+        input_root,
+        output_root,
+        sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        accepted_implementation_commit,
+        argv=exact_argv,
+    )
+    assert tuple(exact_command) == ("executable", "cwd", "environment", "argv")
+    assert exact_command["environment"] == sf.POSTMORTEM_EXECVE_ENVIRONMENT
+    assert exact_command["environment"] != sf.FEASIBILITY_REQUIRED_RUNTIME_ENV
+    assert exact_command["argv"] == exact_argv
+    decoded_command = json.loads(json.dumps(exact_command))
+    assert decoded_command["argv"][5].encode("utf-8") == verifier_source.encode("utf-8")
+    sf.validate_postmortem_exact_command_object(
+        decoded_command,
+        input_root=input_root,
+        output_root=output_root,
+        accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        accepted_implementation_commit=accepted_implementation_commit,
+        runtime_environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
+    )
+    for index in range(13, 24):
+        mutated = list(exact_argv)
+        mutated[index] = "e" * 40 if index in {9, 23} else f"{mutated[index]}-mutated"
+        with pytest.raises(ValueError, match="argv|implementation|proposal|verifier"):
+            sf.validate_postmortem_exact_argv(
+                mutated,
+                input_root=input_root,
+                output_root=output_root,
+                accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+                accepted_implementation_commit=accepted_implementation_commit,
+            )
+    with pytest.raises(ValueError, match="24"):
+        sf.validate_postmortem_exact_argv(
+            [*exact_argv, "--extra"],
+            input_root=input_root,
+            output_root=output_root,
+            accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            accepted_implementation_commit=accepted_implementation_commit,
+        )
+    reordered = list(exact_argv)
+    reordered[13], reordered[14] = reordered[14], reordered[13]
+    with pytest.raises(ValueError, match="argv"):
+        sf.validate_postmortem_exact_argv(
+            reordered,
+            input_root=input_root,
+            output_root=output_root,
+            accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            accepted_implementation_commit=accepted_implementation_commit,
+        )
 
+    def fake_verifier_context(**kwargs: object) -> None:
+        assert kwargs["accepted_implementation_commit"] == accepted_implementation_commit
+        assert kwargs["environ"] == _d3_env(sf)
+
+    original_verifier_context = sf.require_postmortem_verifier_context
+    monkeypatch.setattr(sf, "require_postmortem_verifier_context", fake_verifier_context)
     sf.validate_postmortem_cli_contract(
         device="cuda:0",
         input_root=input_root,
         output_root=output_root,
         accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        accepted_implementation_commit=accepted_implementation_commit,
         environ=_d3_env(sf),
     )
     with pytest.raises(ValueError, match="environment PYTHONPATH"):
+        monkeypatch.setattr(sf, "require_postmortem_verifier_context", lambda **kwargs: (_ for _ in ()).throw(ValueError("environment PYTHONPATH mismatch")))
         sf.validate_postmortem_cli_contract(
             device="cuda:0",
             input_root=input_root,
             output_root=output_root,
             accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            accepted_implementation_commit=accepted_implementation_commit,
             environ={**_d3_env(sf), "PYTHONPATH": str(REPO_ROOT)},
         )
-    monkeypatch.setattr(sf, "postmortem_kernel_argv", lambda: ["python", "-O", *exact_argv[1:]])
-    with pytest.raises(ValueError, match="process argv"):
-        sf.validate_postmortem_cli_contract(
-            device="cuda:0",
-            input_root=input_root,
-            output_root=output_root,
-            accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
-            environ=_d3_env(sf),
-        )
+    monkeypatch.setattr(sf, "require_postmortem_verifier_context", original_verifier_context)
     with pytest.raises(ValueError, match="postmortem-failure"):
         sf.main(
             [
@@ -6017,6 +6106,8 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
                 str(output_root),
                 "--accepted-proposal-commit",
                 sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+                "--accepted-implementation-commit",
+                accepted_implementation_commit,
             ]
         )
     with pytest.raises(ValueError, match="real __main__"):
@@ -6025,6 +6116,7 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
             input_root=input_root,
             output_root=output_root,
             accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            accepted_implementation_commit=accepted_implementation_commit,
             environ=_d3_env(sf),
         )
     with pytest.raises(ValueError, match="feasibility_postmortem_001"):
@@ -6033,6 +6125,7 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
             input_root=input_root,
             output_root=Path("artifacts/phase8_toy_lm_bridge/feasibility_postmortem_002"),
             accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            accepted_implementation_commit=accepted_implementation_commit,
         )
     with pytest.raises(ValueError, match="accepted proposal"):
         sf.validate_postmortem_argument_contract(
@@ -6040,6 +6133,7 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
             input_root=input_root,
             output_root=output_root,
             accepted_proposal_commit="0" * 40,
+            accepted_implementation_commit=accepted_implementation_commit,
         )
 
 
@@ -6050,12 +6144,14 @@ def test_d3_postmortem_permanent_no_selection_no_retry_no_006_no_010d_boundaries
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     input_root = Path(sf.POSTMORTEM_REQUIRED_INPUT_ROOT)
     output_root = Path(sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT)
+    accepted_implementation_commit = "d" * 40
     with pytest.raises(ValueError, match="feasibility_005"):
         sf.validate_postmortem_argument_contract(
             device="cuda:0",
             input_root=Path("artifacts/phase8_toy_lm_bridge/feasibility_006"),
             output_root=output_root,
             accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            accepted_implementation_commit=accepted_implementation_commit,
         )
     with pytest.raises(ValueError, match="retry|alternate|001"):
         sf.require_postmortem_root_path_string(
@@ -6074,6 +6170,8 @@ def test_d3_postmortem_permanent_no_selection_no_retry_no_006_no_010d_boundaries
                 str(output_root),
                 "--accepted-proposal-commit",
                 sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+                "--accepted-implementation-commit",
+                accepted_implementation_commit,
                 "--predecessor-selection",
                 "artifacts/phase8_toy_lm_bridge/feasibility_selection_001.json",
             ]
@@ -6090,6 +6188,8 @@ def test_d3_postmortem_permanent_no_selection_no_retry_no_006_no_010d_boundaries
                 str(output_root),
                 "--accepted-proposal-commit",
                 sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+                "--accepted-implementation-commit",
+                accepted_implementation_commit,
                 "--predecessor-root",
                 "artifacts/phase8_toy_lm_bridge/feasibility_004",
             ]
@@ -6114,11 +6214,17 @@ def test_d3_postmortem_cli_rejects_non_repo_cwd_before_shallow_or_output(
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     input_root = Path(sf.POSTMORTEM_REQUIRED_INPUT_ROOT)
     output_root = Path(sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT)
+    accepted_implementation_commit = "d" * 40
     copied_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
     copied_parent.mkdir(parents=True)
     (copied_parent / "feasibility_005").mkdir()
     (copied_parent / "feasibility_004").symlink_to(copied_parent / "feasibility_005")
-    exact_argv = sf.postmortem_exact_argv(input_root, output_root, sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT)
+    exact_argv = sf.postmortem_exact_argv(
+        input_root,
+        output_root,
+        sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        accepted_implementation_commit,
+    )
     monkeypatch.setattr(sf, "postmortem_kernel_argv", lambda: exact_argv)
     monkeypatch.setattr(sf, "validate_new_postmortem_root", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("output preflight ran before cwd guard")))
     monkeypatch.setattr(sf, "validate_postmortem_input_shallow", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("shallow validation ran before cwd guard")))
@@ -6129,8 +6235,77 @@ def test_d3_postmortem_cli_rejects_non_repo_cwd_before_shallow_or_output(
             input_root=input_root,
             output_root=output_root,
             accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            accepted_implementation_commit=accepted_implementation_commit,
             environ=_d3_env(sf),
         )
+
+
+def test_d3_postmortem_source_cleanliness_uses_only_injected_no_argument_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    accepted_implementation_commit = "d" * 40
+    runner_blob = "e" * 40
+    input_root = Path(sf.POSTMORTEM_REQUIRED_INPUT_ROOT)
+    output_root = Path(sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT)
+    allowed_relative = "artifacts/phase8_toy_lm_bridge/feasibility_005/manifest.json"
+    allowed_paths = {(REPO_ROOT / allowed_relative).resolve()}
+    benign_ignored = (".pytest_cache/v/cache/nodeids", "backup/phase8-note.txt")
+    ignored_paths_state = {"paths": benign_ignored}
+    calls: list[str] = []
+
+    def verify_repository_unchanged() -> tuple[tuple[str, ...], tuple[str, ...]]:
+        calls.append("callback")
+        return ((allowed_relative,), ignored_paths_state["paths"])
+
+    monkeypatch.setitem(sf.__dict__, "__phase8_verifier_sha256__", sf.POSTMORTEM_VERIFIER_SHA256)
+    monkeypatch.setitem(sf.__dict__, "__phase8_accepted_implementation_commit__", accepted_implementation_commit)
+    monkeypatch.setitem(sf.__dict__, "__phase8_repository_loader__", object())
+    monkeypatch.setitem(sf.__dict__, "__phase8_verify_repository_unchanged__", verify_repository_unchanged)
+    monkeypatch.setitem(sf.__dict__, "__phase8_runner_blob__", runner_blob)
+    monkeypatch.setattr(sf, "git_output", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ambient git_output used")))
+    monkeypatch.setattr(sf, "current_source_commit", lambda: (_ for _ in ()).throw(AssertionError("ambient HEAD lookup used")))
+    monkeypatch.setattr(sf, "ignored_source_inputs", lambda: (_ for _ in ()).throw(AssertionError("ambient ignored-source scan used")))
+
+    snapshot = sf.capture_postmortem_source_provenance(input_root, output_root, allowed_paths=allowed_paths)
+    assert snapshot == sf.SourceSnapshot(
+        commit=accepted_implementation_commit,
+        status_lines=(f"?? {allowed_relative}",),
+        ignored_inputs=benign_ignored,
+        runner_blob=runner_blob,
+    )
+    sf.verify_postmortem_source_unchanged(snapshot, active_output_root=output_root.with_name(output_root.name + ".tmp"))
+    assert calls == ["callback", "callback"]
+
+    ignored_paths_state["paths"] = (*benign_ignored, "backup/another-benign-note.txt")
+    with pytest.raises(sf.SourceChangedError, match="ignored executable source inputs changed"):
+        sf.verify_postmortem_source_unchanged(snapshot, active_output_root=output_root.with_name(output_root.name + ".tmp"))
+    ignored_paths_state["paths"] = benign_ignored
+
+    malformed_returns = (
+        [(), ()],
+        ([], ()),
+        ((123,), ()),
+        (("../escape",), ()),
+        ((), ("/tmp/absolute",)),
+        ((), ("not//canonical",)),
+    )
+    for malformed in malformed_returns:
+        monkeypatch.setitem(sf.__dict__, "__phase8_verify_repository_unchanged__", lambda malformed=malformed: malformed)
+        with pytest.raises(ValueError, match="verifier source callback"):
+            sf.call_postmortem_verify_callback()
+
+    monkeypatch.setitem(
+        sf.__dict__,
+        "__phase8_verify_repository_unchanged__",
+        lambda: ((), ("scripts/__pycache__/phase8_sequence_feasibility.cpython-313.pyc",)),
+    )
+    with pytest.raises(RuntimeError, match="dangerous ignored import surface"):
+        sf.capture_postmortem_source_provenance(input_root, output_root, allowed_paths=set())
+
+    monkeypatch.setitem(sf.__dict__, "__phase8_verify_repository_unchanged__", lambda _path: ((), ()))
+    with pytest.raises(ValueError, match="no arguments"):
+        sf.postmortem_verify_callback()
 
 
 def test_d3_postmortem_preflight_order_stops_before_source_clean_output_or_model(
@@ -6139,12 +6314,14 @@ def test_d3_postmortem_preflight_order_stops_before_source_clean_output_or_model
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     events: list[str] = []
+    accepted_implementation_commit = "d" * 40
     artifact_parent = Path(".pytest_d3_preflight") / tmp_path.name / "phase8_toy_lm_bridge"
     output_root = artifact_parent / "feasibility_postmortem_001"
     input_root = artifact_parent / "feasibility_005"
     monkeypatch.setattr(sf, "POSTMORTEM_REQUIRED_INPUT_ROOT", str(input_root))
     monkeypatch.setattr(sf, "POSTMORTEM_REQUIRED_OUTPUT_ROOT", str(output_root))
     monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
+    monkeypatch.setattr(sf, "validate_postmortem_argument_contract", lambda **kwargs: events.append("args"))
     monkeypatch.setattr(sf, "require_postmortem_real_main_context", lambda: events.append("real_main"))
     monkeypatch.setattr(sf, "validate_postmortem_cli_contract", lambda **kwargs: events.append("cli"))
     monkeypatch.setattr(
@@ -6174,9 +6351,10 @@ def test_d3_postmortem_preflight_order_stops_before_source_clean_output_or_model
             input_root=input_root,
             output_root=output_root,
             accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            accepted_implementation_commit=accepted_implementation_commit,
             environ=_d3_env(sf),
         )
-    assert events == ["real_main", "cli", "shallow", "source_clean"]
+    assert events == ["args", "cli", "shallow", "source_clean"]
     assert not output_root.exists()
     assert not output_root.with_name(output_root.name + ".tmp").exists()
 
@@ -6243,6 +6421,7 @@ def test_d3_postmortem_passing_path_call_order_reaches_publication_after_forward
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     events: list[str] = []
+    accepted_implementation_commit = "d" * 40
     input_root = tmp_path / "feasibility_005"
     output_root = tmp_path / "feasibility_postmortem_001"
     cell = {
@@ -6309,13 +6488,12 @@ def test_d3_postmortem_passing_path_call_order_reaches_publication_after_forward
         input_root=input_root,
         output_root=output_root,
         accepted_proposal_commit=sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+        accepted_implementation_commit=accepted_implementation_commit,
         environ=_d3_env(sf),
     )
-    ordered = [event for event in events if event in {"args", "real_main", "cwd", "cli", "shallow", "source_clean", "backend", "runtime", "proposal", "implementation", "deep", "records_rng", "tmp", "model", "forward:train", "forward:eval", "taxonomy", "cell_metrics", "output_publication"}]
+    ordered = [event for event in events if event in {"args", "cli", "shallow", "source_clean", "backend", "runtime", "proposal", "implementation", "deep", "records_rng", "tmp", "model", "forward:train", "forward:eval", "taxonomy", "cell_metrics", "output_publication"}]
     assert ordered == [
         "args",
-        "real_main",
-        "cwd",
         "cli",
         "shallow",
         "source_clean",
@@ -6914,6 +7092,154 @@ def test_d3_postmortem_terminal_root_rejects_extra_directory_and_non_file_entrie
         sf.validate_postmortem_terminal_root(output_root, output_root, **context)
 
 
+def test_d3_postmortem_guarded_publication_never_calls_path_based_terminal_validators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    output_root.rename(temp_root)
+    monkeypatch.setattr(
+        sf,
+        "validate_postmortem_terminal_root",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("path terminal validator used by guarded publish")),
+    )
+    monkeypatch.setattr(
+        sf,
+        "validate_postmortem_terminal_inventory_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("path inventory validator used by guarded publish")),
+    )
+    sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **context)
+    assert output_root.is_dir()
+    assert not temp_root.exists()
+    assert (output_root / "DONE.json").is_file()
+
+
+def test_d3_postmortem_guarded_publication_binds_fd_across_transient_same_byte_path_swap_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    output_root.rename(temp_root)
+    original_temp = tmp_path / "trusted_original_temp"
+    replacement = tmp_path / "same_byte_replacement"
+    shutil.copytree(temp_root, replacement)
+    callback_ran = False
+
+    def transient_swap_restore() -> None:
+        nonlocal callback_ran
+        if callback_ran:
+            return
+        callback_ran = True
+        temp_root.rename(original_temp)
+        replacement.rename(temp_root)
+        temp_root.rename(replacement)
+        original_temp.rename(temp_root)
+
+    monkeypatch.setattr(
+        sf,
+        "validate_postmortem_terminal_root",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("path terminal validator used during transient swap test")),
+    )
+    monkeypatch.setattr(
+        sf,
+        "validate_postmortem_terminal_inventory_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("path inventory validator used during transient swap test")),
+    )
+    sf.publish_postmortem_root_or_leave_incomplete(
+        temp_root,
+        output_root,
+        **context,
+        final_callback=transient_swap_restore,
+    )
+    assert callback_ran is True
+    assert output_root.is_dir()
+    assert replacement.is_dir()
+    assert not (replacement / "FAILED.json").exists()
+
+
+def test_d3_postmortem_fd_writer_does_not_follow_swapped_temp_root_path(
+    tmp_path: Path,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    output_root = tmp_path / "feasibility_postmortem_001"
+    guard = sf.create_postmortem_publication_guard(output_root)
+    temp_root = guard.temp_root
+    original_temp = tmp_path / "trusted_temp_directory"
+    external = tmp_path / "external_directory"
+    external.mkdir()
+    temp_root.rename(original_temp)
+    temp_root.symlink_to(external, target_is_directory=True)
+    try:
+        sf.write_postmortem_json_at(guard, "summary.json", {"sentinel": "trusted-fd"})
+    finally:
+        guard.close()
+    assert temp_root.is_symlink()
+    assert json.loads((original_temp / "summary.json").read_text(encoding="utf-8")) == {"sentinel": "trusted-fd"}
+    assert not (external / "summary.json").exists()
+
+
+@pytest.mark.parametrize("marker_kind", ("symlink", "fifo", "socket", "directory", "device"))
+def test_d3_postmortem_publication_demotes_nonregular_done_marker_forms_without_final_root_or_external_follow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    marker_kind: str,
+) -> None:
+    short_socket_base: Path | None = None
+    if marker_kind == "socket":
+        short_socket_base = Path(tempfile.mkdtemp(prefix="d3sock_"))
+    base_root = short_socket_base if short_socket_base is not None else tmp_path / marker_kind
+    try:
+        sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(base_root, monkeypatch)
+        context = _d3_expected_publication_context(sf, output_root)
+        temp_root = output_root.with_name(output_root.name + ".tmp")
+        output_root.rename(temp_root)
+        done_path = temp_root / "DONE.json"
+        done_path.unlink()
+        external_target = base_root / f"{marker_kind}_external_done_target"
+        marker_socket: socket.socket | None = None
+        try:
+            if marker_kind == "symlink":
+                external_target.write_text("external target remains untouched", encoding="utf-8")
+                done_path.symlink_to(external_target)
+            elif marker_kind == "fifo":
+                os.mkfifo(done_path)
+            elif marker_kind == "socket":
+                marker_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    marker_socket.bind(str(done_path))
+                except PermissionError:
+                    pytest.skip("socket marker publication fixture requires AF_UNIX bind permission")
+            elif marker_kind == "directory":
+                done_path.mkdir()
+            elif marker_kind == "device":
+                try:
+                    os.mknod(done_path, stat.S_IFCHR | 0o600, os.makedev(1, 7))
+                except PermissionError:
+                    pytest.skip("device-node publication fixture requires CAP_MKNOD")
+            else:
+                raise AssertionError(marker_kind)
+
+            with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+                sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **context)
+        finally:
+            if marker_socket is not None:
+                marker_socket.close()
+        assert not output_root.exists()
+        assert temp_root.is_dir()
+        assert not (temp_root / "DONE.json").exists()
+        assert not (temp_root / "FAILED.json").exists()
+        assert any(path.name.startswith(".DONE.json.demoted.") for path in temp_root.iterdir())
+        if marker_kind == "symlink":
+            assert external_target.read_text(encoding="utf-8") == "external target remains untouched"
+    finally:
+        if short_socket_base is not None:
+            shutil.rmtree(short_socket_base, ignore_errors=True)
+
+
 def test_d3_postmortem_publication_rejects_temp_root_symlink_swap_without_following_external_markers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6946,7 +7272,9 @@ def test_d3_postmortem_publication_rejects_temp_root_symlink_swap_without_follow
     assert not output_root.exists()
     assert temp_root.is_symlink()
     assert (external_copy / "DONE.json").is_file()
-    assert (original_temp / "DONE.json").is_file()
+    assert not (original_temp / "DONE.json").exists()
+    assert not (original_temp / "FAILED.json").exists()
+    assert any(path.name.startswith(".DONE.json.demoted.") for path in original_temp.iterdir())
 
 
 def test_d3_postmortem_publication_rejects_same_byte_temp_directory_inode_swap_and_removes_new_markers(
@@ -6992,23 +7320,37 @@ def test_d3_postmortem_publication_rolls_back_final_identity_mismatch_without_fi
     context = _d3_expected_publication_context(sf, output_root)
     temp_root = output_root.with_name(output_root.name + ".tmp")
     output_root.rename(temp_root)
-    rename_calls: list[tuple[Path, Path]] = []
+    rename_calls: list[tuple[str, str]] = []
+    real_rename_at = sf.atomic_rename_noreplace_at
 
-    def copytree_rename(source: Path, destination: Path) -> None:
-        rename_calls.append((source, destination))
-        if destination.exists() or destination.is_symlink():
-            raise FileExistsError(destination)
-        shutil.copytree(source, destination)
-        shutil.rmtree(source)
+    def rename_probe(
+        source_dir_fd: int,
+        source_name: str,
+        destination_dir_fd: int,
+        destination_name: str,
+        destination_label: object,
+    ) -> None:
+        rename_calls.append((source_name, destination_name))
+        real_rename_at(source_dir_fd, source_name, destination_dir_fd, destination_name, destination_label)
 
-    monkeypatch.setattr(sf, "atomic_rename_noreplace", copytree_rename)
+    real_fingerprint_at = sf.postmortem_terminal_fingerprint_at
+
+    def fingerprint_mismatch_after_rename(guard: object) -> tuple[tuple[object, ...], ...]:
+        fingerprint = real_fingerprint_at(guard)
+        if output_root.exists() and not temp_root.exists():
+            return (("__tampered_after_rename__",), *fingerprint[1:])
+        return fingerprint
+
+    monkeypatch.setattr(sf, "atomic_rename_noreplace_at", rename_probe)
+    monkeypatch.setattr(sf, "postmortem_terminal_fingerprint_at", fingerprint_mismatch_after_rename)
     with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
         sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **context)
-    assert rename_calls == [(temp_root, output_root), (output_root, temp_root)]
+    assert rename_calls[:2] == [(temp_root.name, output_root.name), (output_root.name, temp_root.name)]
     assert not output_root.exists()
     assert temp_root.is_dir()
     assert not (temp_root / "DONE.json").exists()
     assert not (temp_root / "FAILED.json").exists()
+    assert any(path.name.startswith(".DONE.json.demoted.") for path in temp_root.iterdir())
 
 
 def test_d3_postmortem_publication_guard_covers_callbacks_and_no_clobber(
@@ -7019,10 +7361,10 @@ def test_d3_postmortem_publication_guard_covers_callbacks_and_no_clobber(
     temp_root = tmp_path / "feasibility_postmortem_001.tmp"
     output_root = tmp_path / "feasibility_postmortem_001"
     temp_root.mkdir()
-    monkeypatch.setattr(sf, "validate_postmortem_terminal_root", lambda *args, **kwargs: None)
-    monkeypatch.setattr(sf, "validate_postmortem_terminal_inventory_snapshot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(sf, "postmortem_terminal_fingerprint", lambda *args, **kwargs: ())
-    monkeypatch.setattr(sf, "atomic_rename_noreplace", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rename ran after forbidden callback")))
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_root_at", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_inventory_snapshot_at", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "postmortem_terminal_fingerprint_at", lambda *args, **kwargs: ())
+    monkeypatch.setattr(sf, "atomic_rename_noreplace_at", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("rename ran after forbidden callback")))
     required_context = {
         "expected_input_binding": {},
         "expected_proposal_binding": {},
