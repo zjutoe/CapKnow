@@ -35,6 +35,12 @@ objects, unbound output-file staging identities/modes, an incomplete rollback
 absence guarantee, missing runtime proposal-object authentication, a resolved-path
 source-clean alias, and test-oracle/trust-boundary gaps. This revision closes those
 findings without changing the accepted scientific contract.
+Protocol repair commit `4c47adcc3c0f4a928cc029631057626d40769516` is also rejected and
+supplies no implementation or launch authority. Its review confirmed the proposal,
+lexical source, retained-file, and test-oracle repairs, but found that the loader
+attribute and raw function callback behavior were not sealed, ignored executable
+mode was omitted, and the final evacuation promise did not define persistent
+filesystem failure. This revision closes those remaining findings.
 
 After this handoff is accepted, `main` may delegate implementation to one
 fresh-context Codex subagent with model identifier exactly `gpt-5.5`,
@@ -106,7 +112,7 @@ argv:
   -c
   <exact UTF-8 bytes of phase8/Task_010C_D3_Postmortem_Verifier.py.txt>
   --verifier-sha256
-  b20e576eb81908f70ed12b4396de1623e5d597d53754c43c91859832023c95ef
+  ae37a62b4ac6ed9c2d3847d76d1af2d0c160d191b1b6f938959640d239555a8a
   --accepted-implementation-commit
   <later independently accepted implementation commit>
   --runner-path
@@ -125,9 +131,9 @@ argv:
   <same later independently accepted implementation commit>
 ```
 
-The verifier source is exactly `35,928` bytes, has Git blob
-`2706e358d2c2eb5dc3fc6c8ba0e5eb121c01e551`, and has SHA-256
-`b20e576eb81908f70ed12b4396de1623e5d597d53754c43c91859832023c95ef`. The
+The verifier source is exactly `39,528` bytes, has Git blob
+`6497c05ecf9aad33aaa7f1f46ebf633fa8289290`, and has SHA-256
+`ae37a62b4ac6ed9c2d3847d76d1af2d0c160d191b1b6f938959640d239555a8a`. The
 implementation must embed and test that SHA and reject any byte difference. It must
 not execute the launch. This handoff supplies no supervisor identity and no accepted
 implementation commit, so it supplies no complete launch command and no execution
@@ -193,23 +199,31 @@ that object id. It repeats this authentication inside every later repository
 callback. A constant-only comparison is not authentication.
 
 The verifier injects the accepted commit, executed runner blob, authenticated
-immutable proposal tuple, verifier SHA, a unique authority token, closed loader, and
-one no-argument `verify_repository_unchanged` callback into the runner globals. The
-exact injected names are
+immutable proposal tuple, verifier SHA, a unique authority token, sealed closed
+loader, and one sealed zero-argument callable repository-authority object into the
+runner globals. The exact injected names are
 `__phase8_accepted_implementation_commit__`, `__phase8_runner_blob__`,
 `__phase8_proposal_binding__`, `__phase8_verifier_sha256__`,
 `__phase8_authority_token__`, `__phase8_repository_loader__`, and
 `__phase8_verify_repository_unchanged__`; the proposal tuple is exactly
-`(commit,path,blob)` in that order. The loader's captured source map is immutable. The
-callback reauthenticates the full repository and returns exactly an immutable pair of
+`(commit,path,blob)` in that order. The loader has no instance dictionary, exposes its
+captured source map only through a read-only property backed by a sealed slot, and
+rejects attribute rebinding. The repository-authority object likewise has no instance
+dictionary, stores immutable captured source/mode maps and exact helper/code
+bindings in sealed slots, verifies those bindings before and after every call,
+reauthenticates the full repository, and returns exactly an immutable pair of
 `(untracked_paths, ignored_paths)` tuples for the evidence-aware cleanliness check.
 It exposes no argument-taking Git callable. At initial verifier-context validation,
-the normative runner must retain the exact injected callback, loader, proposal tuple,
+the normative runner must retain the exact injected authority, loader, proposal tuple,
 authority token, accepted commit, runner blob, and verifier SHA objects/values in its
-internal runtime binding. Every later source check invokes only that retained
-callback and first and afterward requires every injected global to remain the
-identical object (`is`) and value. Replacing a callback or loader with a well-formed
-object of the same signature/content must fail. Calling ambient `git`, reaching
+internal runtime binding. It must additionally snapshot the loader source-map object
+and contents; the loader type/property/finder/loader method objects and code; and the
+authority type/call method/code, sealed-slot object identities/values, and helper/code
+bindings. Every later source check invokes only that retained authority and first and
+afterward requires the entire snapshot plus every injected global to remain
+identical. Replacing an injected object, rebinding a loader source map, or mutating
+the authority's code, globals/helper lookup, or sealed state while preserving object
+identity must fail. Calling ambient `git`, reaching
 verifier-internal Git plumbing, reparsing local configuration, reopening repository
 source, or replacing an injected object is forbidden and covered by sentinels.
 
@@ -250,10 +264,11 @@ The exact fail-closed order is:
    complete inventories of predecessors 001–004 and D1; derive only those exact files
    as source-clean exclusions;
 6. repeat the full evidence-aware clean-source check and reject every ignored
-   executable input using only the retained hermetic Git/source callback; compare
+   executable input using only the retained hermetic Git/source authority; compare
    verifier-returned untracked names to a canonical repository-relative lexical
    allowlist without `resolve()` or target equivalence, and reject every untracked
-   symlink/non-regular entry before runner execution;
+   symlink/non-regular entry before runner execution; reject every ignored symlink,
+   ignored import surface, and ignored regular file with any executable mode bit;
 7. verify current HEAD, the verifier-authenticated proposal commit/path/blob tuple,
    executed runner blob, accepted
    implementation commit, full A800 runtime object,
@@ -352,16 +367,27 @@ binding, parameter snapshot, RNG state, source/runtime snapshot, identity, and
 inventory; repeat the final source/runtime/RNG check; then use Linux atomic
 rename-no-replace and verify the same directory identity at the final path.
 
-If post-rename validation fails, first preserve an unexpected occupant of the exact
-temp name under a unique noncanonical, non-terminal same-parent collision quarantine,
-then move the invalid final entry back to the exact temp path without overwrite,
+If post-rename validation fails, first atomically demote both terminal names through
+the retained directory descriptor, before any collision or evacuation operation, so
+no subsequent filesystem error can leave a terminal-looking canonical root. Then
+preserve an unexpected occupant of the exact temp name under a unique noncanonical,
+non-terminal same-parent collision quarantine, then move the invalid final entry back
+to the exact temp path without overwrite,
 demote terminal names through its no-follow descriptor, and require the final path to
 be absent before returning an error. Collision-preservation failure must not skip
 final-root evacuation. If the exact final-to-temp rollback fails, atomically move the
 invalid final entry to a unique noncanonical, non-terminal same-parent quarantine,
 demote its terminal names through the retained descriptor, and still require the
 canonical final name to be absent before control returns. Tests must inject failures
-in collision preservation and the first rollback rename. A quarantine is never an output, retry, fallback,
+in collision preservation and the first rollback rename. If both the exact rollback
+and final-to-quarantine evacuation fail, revalidate through the retained descriptors
+that both terminal names are absent and enter immediate `os._exit(74)` fail-stop;
+this catastrophic path must not return or raise through ordinary Python
+control flow and permanently blocks acceptance or retry pending manual inspection.
+Thus every ordinary error return still has an absent canonical final as required by
+the accepted proposal, while an irrecoverable directory-operation failure cannot
+return a terminal-looking root as evidence. A quarantine is never an output, retry,
+fallback,
 or evidence root. Never follow/delete an external symlink target, overwrite, retry,
 or create `feasibility_postmortem_002`.
 
@@ -396,10 +422,14 @@ Add focused tests covering at least:
    identity/content swaps before/during/after plumbing, unauthorized untracked and
    repo-wide ignored import surfaces, actual runner bytes, all captured repository
    Python modules, canonical lexical untracked authorization, rejection of an
-   untracked symlink alias to an allowed artifact, the sole immutable no-argument
-   source callback, immutable loader/proposal/authority-token bindings, repeated
+   untracked symlink alias to an allowed artifact and an extensionless ignored
+   regular `0755` file, the sole immutable no-argument source authority, immutable
+   loader/proposal/authority-token bindings, repeated
    source verification, and rejection of every ambient, raw, argument-taking, or
-   same-signature replaced Git/source helper;
+   same-signature replaced Git/source helper; mutate the retained authority's type
+   call code, helper globals/code, and sealed slots plus the retained loader's source
+   property/slot and method code without changing injected object identity, and
+   require rejection before any subsequent repository import or publication;
 4. a closed highest-priority in-memory loader test for package initializers, relative
    and transitive imports, missing-module rejection, no worktree path on `sys.path`,
    site-packages namespace shadowing, and post-capture worktree mutation. Only the
@@ -434,7 +464,8 @@ Add focused tests covering at least:
     chmod/full-mode drift, root and marker symlinks, same-byte directory swaps,
     extra/non-regular entries, marker FIFO/socket/directory/device forms, no-clobber,
     post-rename mismatch, occupied-temp collision preservation failure, first
-    rollback-rename failure, and quarantine fallback; every failure leaves no
+    rollback-rename failure, quarantine fallback, and final quarantine-evacuation
+    failure in a child-process fail-stop test. Every ordinary failure leaves no
     terminal-looking marker and no canonical final root without following external
     targets;
 15. permanent rejection of selection use, feasibility verdict change, retry,
@@ -500,8 +531,8 @@ fresh-context `gpt-5.6-sol`, `xhigh`, strict read-only agent. The review must ve
   of execve and 005 runtime environment objects, and command/main-context contract;
 - exact-argv hermetic Git plumbing, descriptor/content-bound Git inputs, structural
   local-config allowlist, complete tree/index/full-mode worktree/import-surface
-  authentication, no-helper/no-filter/no-lazy-fetch behavior, sole no-argument
-  source callback, and closed captured-buffer repository loader;
+  authentication, no-helper/no-filter/no-lazy-fetch behavior, sealed no-argument
+  repository authority, and sealed closed captured-buffer repository loader;
 - shallow/source-clean/deep/RNG/output ordering;
 - teacher-forced and taxonomy semantic fidelity;
 - RNG-neutral construction and post-load parameter immutability;

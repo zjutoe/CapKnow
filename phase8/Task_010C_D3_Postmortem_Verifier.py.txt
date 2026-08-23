@@ -567,6 +567,8 @@ def ignored_import_candidate(path: str) -> bool:
         fail(f"ignored path disappeared during verification: {path}")
     if stat.S_ISLNK(metadata.st_mode):
         return True
+    if metadata.st_mode & 0o111:
+        return True
     if "__pycache__" in relative.parts or relative.suffix in IGNORED_IMPORT_SUFFIXES:
         return True
     return relative.name in IGNORED_IMPORT_HOOK_STEMS or relative.stem in IGNORED_IMPORT_HOOK_STEMS
@@ -659,7 +661,81 @@ def module_name_for_path(path: str) -> tuple[str, bool]:
     return ".".join((*relative.parts[:-1], relative.stem)), False
 
 
+class RepositoryAuthority:
+    __slots__ = (
+        "_accepted_commit",
+        "_captured",
+        "_captured_modes",
+        "_proposal_binding",
+        "_authenticate_repository",
+        "_authenticate_repository_code",
+        "_authenticate_proposal",
+        "_authenticate_proposal_code",
+        "_fail",
+        "_fail_code",
+        "_call_code",
+        "_sealed",
+    )
+
+    def __init__(
+        self,
+        accepted_commit: str,
+        captured: MappingProxyType,
+        captured_modes: MappingProxyType,
+        proposal_binding: tuple[str, str, str],
+    ) -> None:
+        object.__setattr__(self, "_accepted_commit", accepted_commit)
+        object.__setattr__(self, "_captured", captured)
+        object.__setattr__(self, "_captured_modes", captured_modes)
+        object.__setattr__(self, "_proposal_binding", proposal_binding)
+        object.__setattr__(self, "_authenticate_repository", authenticate_repository)
+        object.__setattr__(self, "_authenticate_repository_code", authenticate_repository.__code__)
+        object.__setattr__(self, "_authenticate_proposal", authenticate_proposal)
+        object.__setattr__(self, "_authenticate_proposal_code", authenticate_proposal.__code__)
+        object.__setattr__(self, "_fail", fail)
+        object.__setattr__(self, "_fail_code", fail.__code__)
+        object.__setattr__(self, "_call_code", type(self).__call__.__code__)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            fail("repository authority object is sealed")
+        object.__setattr__(self, name, value)
+
+    def __call__(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        if (
+            type(self).__call__.__code__ is not self._call_code
+            or authenticate_repository is not self._authenticate_repository
+            or authenticate_repository.__code__ is not self._authenticate_repository_code
+            or authenticate_proposal is not self._authenticate_proposal
+            or authenticate_proposal.__code__ is not self._authenticate_proposal_code
+            or fail is not self._fail
+            or fail.__code__ is not self._fail_code
+        ):
+            self._fail("repository authority behavior binding changed")
+        current_captured, current_modes, current_untracked, current_ignored = (
+            self._authenticate_repository(self._accepted_commit)
+        )
+        if current_captured != self._captured or current_modes != self._captured_modes:
+            self._fail("captured repository sources or modes changed after verifier preflight")
+        if self._authenticate_proposal() != self._proposal_binding:
+            self._fail("accepted proposal binding changed after verifier preflight")
+        if (
+            type(self).__call__.__code__ is not self._call_code
+            or authenticate_repository is not self._authenticate_repository
+            or authenticate_repository.__code__ is not self._authenticate_repository_code
+            or authenticate_proposal is not self._authenticate_proposal
+            or authenticate_proposal.__code__ is not self._authenticate_proposal_code
+            or fail is not self._fail
+            or fail.__code__ is not self._fail_code
+        ):
+            self._fail("repository authority behavior binding changed during callback")
+        return current_untracked, current_ignored
+
+
 class ClosedRepositoryLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    __slots__ = ("_sources", "_sealed")
+
     def __init__(self, captured: dict[str, bytes]) -> None:
         sources: dict[str, tuple[str, bytes, bool]] = {}
         for path, payload in captured.items():
@@ -671,7 +747,17 @@ class ClosedRepositoryLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader)
             sources[module_name] = (path, payload, is_package)
         if "capability_certificate_lab" not in sources:
             fail("closed repository package root is absent")
-        self.sources = MappingProxyType(sources)
+        object.__setattr__(self, "_sources", MappingProxyType(sources))
+        object.__setattr__(self, "_sealed", True)
+
+    @property
+    def sources(self) -> MappingProxyType:
+        return self._sources
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            fail("closed repository loader is sealed")
+        object.__setattr__(self, name, value)
 
     def find_spec(
         self,
@@ -779,9 +865,11 @@ def main() -> None:
     global PINNED_GIT
     verifier_sha, accepted_commit, runner_path, runner_args = parse_launch()
     PINNED_GIT = PinnedGitContext()
-    captured, captured_modes, initial_untracked, initial_ignored = authenticate_repository(
+    mutable_captured, mutable_captured_modes, initial_untracked, initial_ignored = authenticate_repository(
         accepted_commit
     )
+    captured = MappingProxyType(dict(mutable_captured))
+    captured_modes = MappingProxyType(dict(mutable_captured_modes))
     proposal_binding = authenticate_proposal()
     runner_payload = captured.get(runner_path)
     if runner_payload is None:
@@ -797,17 +885,13 @@ def main() -> None:
     sys.path.append(SITE_PACKAGES)
     sys.argv = [str(REPO_ROOT / runner_path), *runner_args]
 
-    def verify_repository_unchanged() -> tuple[tuple[str, ...], tuple[str, ...]]:
-        current_captured, current_modes, current_untracked, current_ignored = (
-            authenticate_repository(accepted_commit)
-        )
-        if current_captured != captured or current_modes != captured_modes:
-            fail("captured repository sources or modes changed after verifier preflight")
-        if authenticate_proposal() != proposal_binding:
-            fail("accepted proposal binding changed after verifier preflight")
-        return current_untracked, current_ignored
-
-    if verify_repository_unchanged() != (initial_untracked, initial_ignored):
+    repository_authority = RepositoryAuthority(
+        accepted_commit,
+        captured,
+        captured_modes,
+        proposal_binding,
+    )
+    if repository_authority() != (initial_untracked, initial_ignored):
         fail("repository path status changed after verifier preflight")
 
     authority_token = object()
@@ -823,7 +907,7 @@ def main() -> None:
         "__phase8_proposal_binding__": proposal_binding,
         "__phase8_authority_token__": authority_token,
         "__phase8_repository_loader__": loader,
-        "__phase8_verify_repository_unchanged__": verify_repository_unchanged,
+        "__phase8_verify_repository_unchanged__": repository_authority,
     }
     code = compile(runner_payload, str(REPO_ROOT / runner_path), "exec", dont_inherit=True)
     exec(code, runner_globals, runner_globals)
