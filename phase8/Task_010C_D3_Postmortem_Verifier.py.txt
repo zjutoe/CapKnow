@@ -10,7 +10,7 @@ import re
 import stat
 import subprocess
 import sys
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 
 
 REPO_ROOT = Path("/home/mye/src/llm/CapKnow")
@@ -20,10 +20,12 @@ PYTHON = "/opt/anaconda3/bin/python"
 PYTHON_EXE = "/opt/anaconda3/bin/python3.13"
 SITE_PACKAGES = "/opt/anaconda3/lib/python3.13/site-packages"
 RUNNER_PATH = "scripts/phase8_sequence_feasibility.py"
+PROPOSAL_PATH = "phase8/Task_010C_D3_Feasibility_005_Postmortem_Proposal.md"
 ARTIFACT_PREFIX = PurePosixPath("artifacts/phase8_toy_lm_bridge")
 INPUT_ROOT = "artifacts/phase8_toy_lm_bridge/feasibility_005"
 OUTPUT_ROOT = "artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001"
 PROPOSAL_COMMIT = "06ee71d958eb1c4cb446ede3d120e99eb64bba97"
+PROPOSAL_BLOB = "5ea32f67d078408a6764adbb2d66518f713245d7"
 INITIAL_SYS_PATH = [
     "/opt/anaconda3/lib/python313.zip",
     "/opt/anaconda3/lib/python3.13",
@@ -570,6 +572,30 @@ def ignored_import_candidate(path: str) -> bool:
     return relative.name in IGNORED_IMPORT_HOOK_STEMS or relative.stem in IGNORED_IMPORT_HOOK_STEMS
 
 
+def require_regular_untracked_path(path: str) -> None:
+    relative = canonical_relative_path(path, "untracked path")
+    try:
+        metadata = (REPO_ROOT / relative).lstat()
+    except FileNotFoundError:
+        fail(f"untracked path disappeared during verification: {path}")
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        fail(f"untracked path is not a regular non-symlink file: {path}")
+
+
+def authenticate_proposal() -> tuple[str, str, str]:
+    if git_run("cat-file", "-t", PROPOSAL_COMMIT) != b"commit\n":
+        fail("accepted proposal object is not a commit")
+    proposal_tree = parse_tree(
+        git_run("ls-tree", "-rz", "--full-tree", PROPOSAL_COMMIT)
+    )
+    if proposal_tree.get(PROPOSAL_PATH) != ("100644", PROPOSAL_BLOB):
+        fail("accepted proposal commit does not bind the frozen proposal path/blob")
+    proposal_payload = git_run("cat-file", "blob", PROPOSAL_BLOB)
+    if git_blob_oid(proposal_payload) != PROPOSAL_BLOB:
+        fail("accepted proposal blob bytes do not match the frozen blob id")
+    return PROPOSAL_COMMIT, PROPOSAL_PATH, PROPOSAL_BLOB
+
+
 def authenticate_repository(
     accepted_commit: str,
 ) -> tuple[dict[str, bytes], dict[str, int], tuple[str, ...], tuple[str, ...]]:
@@ -609,6 +635,7 @@ def authenticate_repository(
         relative = PurePosixPath(path)
         if relative != ARTIFACT_PREFIX and ARTIFACT_PREFIX not in relative.parents:
             fail(f"untracked path lies outside the bound artifact parent: {path}")
+        require_regular_untracked_path(path)
 
     ignored = parse_path_list(
         git_run("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
@@ -634,16 +661,17 @@ def module_name_for_path(path: str) -> tuple[str, bool]:
 
 class ClosedRepositoryLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     def __init__(self, captured: dict[str, bytes]) -> None:
-        self.sources: dict[str, tuple[str, bytes, bool]] = {}
+        sources: dict[str, tuple[str, bytes, bool]] = {}
         for path, payload in captured.items():
             if not path.startswith("capability_certificate_lab/") or not path.endswith(".py"):
                 continue
             module_name, is_package = module_name_for_path(path)
-            if module_name in self.sources:
+            if module_name in sources:
                 fail(f"duplicate repository module name: {module_name}")
-            self.sources[module_name] = (path, payload, is_package)
-        if "capability_certificate_lab" not in self.sources:
+            sources[module_name] = (path, payload, is_package)
+        if "capability_certificate_lab" not in sources:
             fail("closed repository package root is absent")
+        self.sources = MappingProxyType(sources)
 
     def find_spec(
         self,
@@ -754,6 +782,7 @@ def main() -> None:
     captured, captured_modes, initial_untracked, initial_ignored = authenticate_repository(
         accepted_commit
     )
+    proposal_binding = authenticate_proposal()
     runner_payload = captured.get(runner_path)
     if runner_payload is None:
         fail("accepted runner bytes were not captured")
@@ -774,11 +803,14 @@ def main() -> None:
         )
         if current_captured != captured or current_modes != captured_modes:
             fail("captured repository sources or modes changed after verifier preflight")
+        if authenticate_proposal() != proposal_binding:
+            fail("accepted proposal binding changed after verifier preflight")
         return current_untracked, current_ignored
 
     if verify_repository_unchanged() != (initial_untracked, initial_ignored):
         fail("repository path status changed after verifier preflight")
 
+    authority_token = object()
     runner_globals = {
         "__name__": "__main__",
         "__file__": str(REPO_ROOT / runner_path),
@@ -787,11 +819,14 @@ def main() -> None:
         "__builtins__": __builtins__,
         "__phase8_verifier_sha256__": verifier_sha,
         "__phase8_accepted_implementation_commit__": accepted_commit,
+        "__phase8_runner_blob__": git_blob_oid(runner_payload),
+        "__phase8_proposal_binding__": proposal_binding,
+        "__phase8_authority_token__": authority_token,
         "__phase8_repository_loader__": loader,
         "__phase8_verify_repository_unchanged__": verify_repository_unchanged,
     }
     code = compile(runner_payload, str(REPO_ROOT / runner_path), "exec", dont_inherit=True)
     exec(code, runner_globals, runner_globals)
 
-
-main()
+if __name__ == "__main__":
+    main()
