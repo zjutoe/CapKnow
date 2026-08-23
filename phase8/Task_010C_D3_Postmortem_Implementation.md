@@ -41,6 +41,12 @@ lexical source, retained-file, and test-oracle repairs, but found that the loade
 attribute and raw function callback behavior were not sealed, ignored executable
 mode was omitted, and the final evacuation promise did not define persistent
 filesystem failure. This revision closes those remaining findings.
+Protocol repair commit `2650d8821dcb649393333cd603fea62d0cf1b61d` is likewise rejected
+and supplies no implementation or launch authority. Its review confirmed the sealed
+repository authority, executable-mode, and two-level evacuation repairs, but found
+that inherited import ABCs still supplied the loader with an instance dictionary and
+that terminal-marker demotion/absence-check failures were not themselves fail-stop.
+This revision removes those last two paths.
 
 After this handoff is accepted, `main` may delegate implementation to one
 fresh-context Codex subagent with model identifier exactly `gpt-5.5`,
@@ -112,7 +118,7 @@ argv:
   -c
   <exact UTF-8 bytes of phase8/Task_010C_D3_Postmortem_Verifier.py.txt>
   --verifier-sha256
-  ae37a62b4ac6ed9c2d3847d76d1af2d0c160d191b1b6f938959640d239555a8a
+  55c1e76086da332c9b7827980912f6ffe2bc1f38486c410be10c71e647b4e522
   --accepted-implementation-commit
   <later independently accepted implementation commit>
   --runner-path
@@ -131,9 +137,9 @@ argv:
   <same later independently accepted implementation commit>
 ```
 
-The verifier source is exactly `39,528` bytes, has Git blob
-`6497c05ecf9aad33aaa7f1f46ebf633fa8289290`, and has SHA-256
-`ae37a62b4ac6ed9c2d3847d76d1af2d0c160d191b1b6f938959640d239555a8a`. The
+The verifier source is exactly `39,455` bytes, has Git blob
+`8d1a305f9a28d995f53b26c22b24241da1f0d5fe`, and has SHA-256
+`55c1e76086da332c9b7827980912f6ffe2bc1f38486c410be10c71e647b4e522`. The
 implementation must embed and test that SHA and reject any byte difference. It must
 not execute the launch. This handoff supplies no supervisor identity and no accepted
 implementation commit, so it supplies no complete launch command and no execution
@@ -206,7 +212,8 @@ runner globals. The exact injected names are
 `__phase8_proposal_binding__`, `__phase8_verifier_sha256__`,
 `__phase8_authority_token__`, `__phase8_repository_loader__`, and
 `__phase8_verify_repository_unchanged__`; the proposal tuple is exactly
-`(commit,path,blob)` in that order. The loader has no instance dictionary, exposes its
+`(commit,path,blob)` in that order. The loader is a slots-only duck-typed finder/
+loader and must not inherit an ABC that supplies an instance dictionary. It exposes its
 captured source map only through a read-only property backed by a sealed slot, and
 rejects attribute rebinding. The repository-authority object likewise has no instance
 dictionary, stores immutable captured source/mode maps and exact helper/code
@@ -360,7 +367,10 @@ retained descriptors; a same-byte different-inode substitution or any chmod drif
 fatal. Do not accept a first whole-root fingerprint taken only after all writers have
 closed their descriptors.
 On any exception, remove or atomically demote both terminal names through the trusted
-directory descriptor without following a root or marker symlink; preserve a
+directory descriptor without following a root or marker symlink, then verify both
+names are absent. Attempt both demotions even if the first fails. If either demotion
+or the absence verification cannot complete, enter immediate `os._exit(74)` and do
+not raise or return through ordinary Python control flow. Otherwise preserve a
 non-terminal incomplete temp root and re-raise. On success, write summary, then
 manifest, then DONE; validate every schema, cardinality, path, hash, aggregate,
 binding, parameter snapshot, RNG state, source/runtime snapshot, identity, and
@@ -369,8 +379,10 @@ rename-no-replace and verify the same directory identity at the final path.
 
 If post-rename validation fails, first atomically demote both terminal names through
 the retained directory descriptor, before any collision or evacuation operation, so
-no subsequent filesystem error can leave a terminal-looking canonical root. Then
-preserve an unexpected occupant of the exact temp name under a unique noncanonical,
+no subsequent filesystem error can leave a terminal-looking canonical root. Attempt
+both demotions and verify both terminal names are absent; if either operation or that
+verification fails, enter immediate `os._exit(74)` without an ordinary raise or
+return. Only then preserve an unexpected occupant of the exact temp name under a unique noncanonical,
 non-terminal same-parent collision quarantine, then move the invalid final entry back
 to the exact temp path without overwrite,
 demote terminal names through its no-follow descriptor, and require the final path to
@@ -384,11 +396,10 @@ and final-to-quarantine evacuation fail, revalidate through the retained descrip
 that both terminal names are absent and enter immediate `os._exit(74)` fail-stop;
 this catastrophic path must not return or raise through ordinary Python
 control flow and permanently blocks acceptance or retry pending manual inspection.
-Thus every ordinary error return still has an absent canonical final as required by
-the accepted proposal, while an irrecoverable directory-operation failure cannot
+Thus every ordinary post-rename error return still has an absent canonical final as
+required by the accepted proposal, while an irrecoverable directory-operation failure cannot
 return a terminal-looking root as evidence. A quarantine is never an output, retry,
-fallback,
-or evidence root. Never follow/delete an external symlink target, overwrite, retry,
+fallback, or evidence root. Never follow/delete an external symlink target, overwrite, retry,
 or create `feasibility_postmortem_002`.
 
 ## Required tests
@@ -429,7 +440,9 @@ Add focused tests covering at least:
    same-signature replaced Git/source helper; mutate the retained authority's type
    call code, helper globals/code, and sealed slots plus the retained loader's source
    property/slot and method code without changing injected object identity, and
-   require rejection before any subsequent repository import or publication;
+   require rejection before any subsequent repository import or publication; assert
+   the loader has no `__dict__` and cannot shadow `find_spec`, `create_module`, or
+   `exec_module` through an instance attribute;
 4. a closed highest-priority in-memory loader test for package initializers, relative
    and transitive imports, missing-module rejection, no worktree path on `sys.path`,
    site-packages namespace shadowing, and post-capture worktree mutation. Only the
@@ -465,7 +478,9 @@ Add focused tests covering at least:
     extra/non-regular entries, marker FIFO/socket/directory/device forms, no-clobber,
     post-rename mismatch, occupied-temp collision preservation failure, first
     rollback-rename failure, quarantine fallback, and final quarantine-evacuation
-    failure in a child-process fail-stop test. Every ordinary failure leaves no
+    failure in a child-process fail-stop test; inject failure at each pre-rename and
+    post-rename DONE/FAILED demotion plus terminal-absence verification and require
+    the same fail-stop. Every ordinary failure leaves no
     terminal-looking marker and no canonical final root without following external
     targets;
 15. permanent rejection of selection use, feasibility verdict change, retry,

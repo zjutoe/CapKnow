@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import configparser
 import hashlib
-import importlib.abc
 import importlib.util
 import os
 from pathlib import Path, PurePosixPath
@@ -733,7 +732,7 @@ class RepositoryAuthority:
         return current_untracked, current_ignored
 
 
-class ClosedRepositoryLoader(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+class ClosedRepositoryLoader:
     __slots__ = ("_sources", "_sealed")
 
     def __init__(self, captured: dict[str, bytes]) -> None:
