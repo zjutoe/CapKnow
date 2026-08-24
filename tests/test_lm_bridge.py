@@ -5979,6 +5979,23 @@ def _d3_expected_publication_context(sf: object, output_root: Path) -> dict[str,
     }
 
 
+def _d3_minimal_publication_context(sf: object) -> dict[str, object]:
+    return {
+        "expected_input_binding": {},
+        "expected_proposal_binding": {},
+        "expected_implementation_binding": {},
+        "expected_source_snapshot": sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
+        "expected_teacher_rows": [],
+        "expected_cell_rows": [],
+        "expected_taxonomy_rows": [],
+    }
+
+
+def _d3_assert_no_canonical_postmortem_terminal_markers(root: Path) -> None:
+    assert not (root / "DONE.json").exists()
+    assert not (root / "FAILED.json").exists()
+
+
 def _d3_build_faithful_input_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -7392,6 +7409,30 @@ def test_d3_postmortem_forbidden_operation_guard_rejects_training_generation_rng
             model.greedy_decode(prefix)
 
 
+def test_d3_postmortem_forbidden_operation_guard_patches_exec_runner_globals_without_sys_modules() -> None:
+    runner_name = "json"
+    assert runner_name in sys.modules
+    namespace: dict[str, object] = {
+        "__name__": runner_name,
+        "__file__": str(REPO_ROOT / "scripts/phase8_sequence_feasibility.py"),
+        "__package__": "scripts",
+    }
+    assert sys.modules[runner_name].__dict__ is not namespace
+    source = (REPO_ROOT / "scripts/phase8_sequence_feasibility.py").read_text(encoding="utf-8")
+    exec(compile(source, str(REPO_ROOT / "scripts/phase8_sequence_feasibility.py"), "exec"), namespace)
+    assert sys.modules[runner_name].__dict__ is not namespace
+    guard_class = namespace["PostmortemForbiddenOperationGuard"]
+    original_make_optimizer = namespace["make_optimizer"]
+    original_sys_module_make_optimizer = getattr(sys.modules[runner_name], "make_optimizer", None)
+    with guard_class():  # type: ignore[operator]
+        assert namespace["make_optimizer"] is not original_make_optimizer
+        assert getattr(sys.modules[runner_name], "make_optimizer", None) is original_sys_module_make_optimizer
+        with pytest.raises(ValueError, match="forbidden training/generation"):
+            namespace["make_optimizer"]()
+    assert namespace["make_optimizer"] is original_make_optimizer
+    assert getattr(sys.modules[runner_name], "make_optimizer", None) is original_sys_module_make_optimizer
+
+
 def test_d3_postmortem_teacher_forcing_uses_response_labels_hex_and_full_batches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -7524,44 +7565,439 @@ def test_d3_postmortem_teacher_forcing_uses_response_labels_hex_and_full_batches
 
 def test_d3_postmortem_taxonomy_oracle_named_array_fields() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    tokenizer = ByteTokenizer()
-    records = sf.grouped_records()
-    named_record = records["named_value_json"]["eval"][0]
-    named_row = _generation_row(named_record, tokenizer, exact_match=True)
-    named_taxonomy = sf.postmortem_taxonomy_row(
-        named_record,
-        named_row,
-        family="named_value_json",
-        model_size="medium",
-        seed=0,
-        generation_path="named_value_json__medium__seed0/generations.jsonl",
-        generation_sha256="e" * 64,
-    )
-    assert named_taxonomy["named"]["surface_source"] == "held_surface"
-    assert named_taxonomy["named"]["operand_source"] == "held_operand"
-    assert named_taxonomy["named"]["target_prefix"] is True
-    assert named_taxonomy["named"]["suffix_positional_total"] == 4
-    assert named_taxonomy["array"] is None
+    schema = "phase8_feasibility_postmortem_v1"
+    invalid_utf8_error = "UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
 
-    array_record = records["array_json"]["eval"][0]
-    prompt_items = sf.ARRAY_ITEM_RE.findall(array_record.prompt)
-    generated_items = json.loads(array_record.answer)
-    assert generated_items and set(generated_items).issubset(set(prompt_items))
-    array_row = _generation_row(array_record, tokenizer, exact_match=True)
-    array_taxonomy = sf.postmortem_taxonomy_row(
-        array_record,
-        array_row,
-        family="array_json",
-        model_size="small",
-        seed=0,
-        generation_path="array_json__small__seed0/generations.jsonl",
-        generation_sha256="f" * 64,
+    named_record = sf.FeasibilityRecord(
+        "named_value_json",
+        "eval",
+        0,
+        "literal_named_template",
+        "literal_named_operand",
+        "Give JSON string for key red; fields red=red-ca54; blue=blue-e7fb; green=green-6e58; silver=silver-8c9e",
+        '"red-ca54"',
+        ("red-ca54", "blue-e7fb", "green-6e58", "silver-8c9e"),
     )
-    assert array_taxonomy["named"] is None
-    assert array_taxonomy["array"]["comparison_source"] == "feasibility_005_retained_eval"
-    assert array_taxonomy["array"]["all_items_copied"] is True
-    assert array_taxonomy["array"]["all_items_exact"] is True
-    assert array_taxonomy["array"]["first_wrong_item_position"] is None
+    array_record_1 = sf.FeasibilityRecord("array_json", "eval", 0, "literal_array_1", "literal_array_operand_1", "Output compact JSON array from chunks: qe38e", '["qe38e"]', ("qe38e", '["qe38e"]'))
+    array_record_2 = sf.FeasibilityRecord("array_json", "eval", 1, "literal_array_2", "literal_array_operand_2", "Print compact JSON array for pieces: qc663 | q410a", '["qc663","q410a"]', ("qc663", "q410a", '["qc663","q410a"]'))
+    array_record_3 = sf.FeasibilityRecord("array_json", "eval", 2, "literal_array_3", "literal_array_operand_3", "Make JSON array using these chunks: qa111 | qb222 | qc333", '["qa111","qb222","qc333"]', ("qa111", "qb222", "qc333", '["qa111","qb222","qc333"]'))
+    array_record_4 = sf.FeasibilityRecord("array_json", "eval", 3, "literal_array_4", "literal_array_operand_4", "Give JSON array only from chunks: qa101 | qb202 | qc303 | qd404", '["qa101","qb202","qc303","qd404"]', ("qa101", "qb202", "qc303", "qd404", '["qa101","qb202","qc303","qd404"]'))
+
+    def raw_ids(prompt_bytes: bytes, generated_bytes: bytes | None) -> list[int]:
+        if generated_bytes is None:
+            return [BOS_ID, *prompt_bytes, SEP_ID, 255, EOS_ID]
+        return [BOS_ID, *prompt_bytes, SEP_ID, *generated_bytes, EOS_ID]
+
+    named_prompt = b"Give JSON string for key red; fields red=red-ca54; blue=blue-e7fb; green=green-6e58; silver=silver-8c9e"
+    array_prompt_1 = b"Output compact JSON array from chunks: qe38e"
+    array_prompt_2 = b"Print compact JSON array for pieces: qc663 | q410a"
+    array_prompt_3 = b"Make JSON array using these chunks: qa111 | qb222 | qc333"
+    array_prompt_4 = b"Give JSON array only from chunks: qa101 | qb202 | qc303 | qd404"
+
+    named_common_exact = {
+        "prompt": named_record.prompt,
+        "expected_response": '"red-ca54"',
+        "generated_response": '"red-ca54"',
+        "raw_token_ids": raw_ids(named_prompt, b'"red-ca54"'),
+        "generation_error": None,
+        "greedy_exact": True,
+        "decode_valid": True,
+        "has_eos": True,
+        "hits_generation_cap": False,
+        "hits_context_cap": False,
+        "generation_token_count": 11,
+        "generation_utf8_bytes": 10,
+        "target_utf8_bytes": 10,
+        "length_matches": True,
+        "hamming_distance": 0,
+        "edit_distance": 0,
+        "first_error": None,
+    }
+    named_common_distractor = {
+        **named_common_exact,
+        "generated_response": '"blue-e7fb"',
+        "raw_token_ids": raw_ids(named_prompt, b'"blue-e7fb"'),
+        "greedy_exact": False,
+        "generation_token_count": 12,
+        "generation_utf8_bytes": 11,
+        "length_matches": False,
+        "hamming_distance": None,
+        "edit_distance": 8,
+        "first_error": 1,
+    }
+    named_common_wrong_suffix = {
+        **named_common_exact,
+        "generated_response": '"red-cXXX"',
+        "raw_token_ids": raw_ids(named_prompt, b'"red-cXXX"'),
+        "greedy_exact": False,
+        "hamming_distance": 3,
+        "edit_distance": 3,
+        "first_error": 6,
+    }
+    named_common_invalid_decode = {
+        **named_common_exact,
+        "generated_response": None,
+        "raw_token_ids": raw_ids(named_prompt, None),
+        "generation_error": invalid_utf8_error,
+        "greedy_exact": False,
+        "decode_valid": False,
+        "has_eos": False,
+        "generation_token_count": 2,
+        "generation_utf8_bytes": None,
+        "length_matches": False,
+        "hamming_distance": None,
+        "edit_distance": None,
+        "first_error": None,
+    }
+    named_exact = {
+        "surface_source": "held_surface",
+        "operand_source": "held_operand",
+        "valid_json_string": True,
+        "valid_named_grammar": True,
+        "target_prefix": True,
+        "occurs_in_prompt": True,
+        "exact_target_value": True,
+        "exact_distractor_value": False,
+        "suffix_positional_correct": 4,
+        "suffix_positional_total": 4,
+        "suffix_hamming_distance": 0,
+        "suffix_edit_distance": 0,
+        "suffix_first_error": None,
+    }
+    named_distractor = {
+        **named_exact,
+        "target_prefix": False,
+        "exact_target_value": False,
+        "exact_distractor_value": True,
+        "suffix_positional_correct": None,
+        "suffix_positional_total": None,
+        "suffix_hamming_distance": None,
+        "suffix_edit_distance": None,
+        "suffix_first_error": None,
+    }
+    named_wrong_suffix = {
+        **named_exact,
+        "valid_named_grammar": False,
+        "occurs_in_prompt": False,
+        "exact_target_value": False,
+        "suffix_positional_correct": 1,
+        "suffix_hamming_distance": 3,
+        "suffix_edit_distance": 3,
+        "suffix_first_error": 1,
+    }
+    named_invalid_decode = {
+        **named_distractor,
+        "valid_json_string": False,
+        "valid_named_grammar": False,
+        "occurs_in_prompt": False,
+        "exact_distractor_value": False,
+    }
+
+    def taxonomy_row(
+        *,
+        family: str,
+        model_size: str,
+        seed: int,
+        record_index: int,
+        generation_path: str,
+        generation_sha256: str,
+        common: dict[str, object],
+        named: dict[str, object] | None,
+        array: dict[str, object] | None,
+    ) -> dict[str, object]:
+        return {
+            "schema_version": schema,
+            "family": family,
+            "model_size": model_size,
+            "seed": seed,
+            "record_index": record_index,
+            "generation_path": generation_path,
+            "generation_sha256": generation_sha256,
+            "common": common,
+            "named": named,
+            "array": array,
+        }
+
+    named_path = "named_value_json__medium__seed0/generations.jsonl"
+    named_expected_rows = [
+        taxonomy_row(family="named_value_json", model_size="medium", seed=0, record_index=0, generation_path=named_path, generation_sha256="a" * 64, common=named_common_exact, named=named_exact, array=None),
+        taxonomy_row(family="named_value_json", model_size="medium", seed=0, record_index=0, generation_path=named_path, generation_sha256="a" * 64, common=named_common_distractor, named=named_distractor, array=None),
+        taxonomy_row(family="named_value_json", model_size="medium", seed=0, record_index=0, generation_path=named_path, generation_sha256="a" * 64, common=named_common_wrong_suffix, named=named_wrong_suffix, array=None),
+        taxonomy_row(family="named_value_json", model_size="medium", seed=0, record_index=0, generation_path=named_path, generation_sha256="a" * 64, common=named_common_invalid_decode, named=named_invalid_decode, array=None),
+    ]
+    named_retained = [
+        {"raw_token_ids": raw_ids(named_prompt, b'"red-ca54"'), "generated": '"red-ca54"', "generation_error": None, "exact_match": True},
+        {"raw_token_ids": raw_ids(named_prompt, b'"blue-e7fb"'), "generated": '"blue-e7fb"', "generation_error": None, "exact_match": False},
+        {"raw_token_ids": raw_ids(named_prompt, b'"red-cXXX"'), "generated": '"red-cXXX"', "generation_error": None, "exact_match": False},
+        {"raw_token_ids": raw_ids(named_prompt, None), "generated": None, "generation_error": invalid_utf8_error, "exact_match": False},
+    ]
+    for retained, expected in zip(named_retained, named_expected_rows, strict=True):
+        assert sf.postmortem_taxonomy_row(named_record, retained, family="named_value_json", model_size="medium", seed=0, generation_path=named_path, generation_sha256="a" * 64) == expected
+
+    array_common_1 = {
+        "prompt": array_record_1.prompt,
+        "expected_response": '["qe38e"]',
+        "generated_response": '["qe38e"]',
+        "raw_token_ids": raw_ids(array_prompt_1, b'["qe38e"]'),
+        "generation_error": None,
+        "greedy_exact": True,
+        "decode_valid": True,
+        "has_eos": True,
+        "hits_generation_cap": False,
+        "hits_context_cap": False,
+        "generation_token_count": 10,
+        "generation_utf8_bytes": 9,
+        "target_utf8_bytes": 9,
+        "length_matches": True,
+        "hamming_distance": 0,
+        "edit_distance": 0,
+        "first_error": None,
+    }
+    array_common_2 = {
+        "prompt": array_record_2.prompt,
+        "expected_response": '["qc663","q410a"]',
+        "generated_response": '["q410a","qc663"]',
+        "raw_token_ids": raw_ids(array_prompt_2, b'["q410a","qc663"]'),
+        "generation_error": None,
+        "greedy_exact": False,
+        "decode_valid": True,
+        "has_eos": True,
+        "hits_generation_cap": False,
+        "hits_context_cap": False,
+        "generation_token_count": 18,
+        "generation_utf8_bytes": 17,
+        "target_utf8_bytes": 17,
+        "length_matches": True,
+        "hamming_distance": 8,
+        "edit_distance": 8,
+        "first_error": 3,
+    }
+    array_common_3 = {
+        "prompt": array_record_3.prompt,
+        "expected_response": '["qa111","qb222","qc333"]',
+        "generated_response": None,
+        "raw_token_ids": raw_ids(array_prompt_3, None),
+        "generation_error": invalid_utf8_error,
+        "greedy_exact": False,
+        "decode_valid": False,
+        "has_eos": False,
+        "hits_generation_cap": False,
+        "hits_context_cap": False,
+        "generation_token_count": 2,
+        "generation_utf8_bytes": None,
+        "target_utf8_bytes": 25,
+        "length_matches": False,
+        "hamming_distance": None,
+        "edit_distance": None,
+        "first_error": None,
+    }
+    array_common_4 = {
+        "prompt": array_record_4.prompt,
+        "expected_response": '["qa101","qb202","qc303","qd404"]',
+        "generated_response": '["qa101","qb202","qc303"]',
+        "raw_token_ids": raw_ids(array_prompt_4, b'["qa101","qb202","qc303"]'),
+        "generation_error": None,
+        "greedy_exact": False,
+        "decode_valid": True,
+        "has_eos": True,
+        "hits_generation_cap": False,
+        "hits_context_cap": False,
+        "generation_token_count": 26,
+        "generation_utf8_bytes": 25,
+        "target_utf8_bytes": 33,
+        "length_matches": False,
+        "hamming_distance": None,
+        "edit_distance": 8,
+        "first_error": 24,
+    }
+    array_1 = {
+        "comparison_source": "feasibility_005_retained_eval",
+        "training_steps": 1500,
+        "target_item_count": 1,
+        "valid_json_syntax": True,
+        "valid_array_schema": True,
+        "correct_item_count": True,
+        "positional_exact_count": 1,
+        "positional_denominator": 1,
+        "missing_items": [],
+        "extra_items": [],
+        "all_items_copied": True,
+        "all_items_exact": True,
+        "first_wrong_item_position": None,
+    }
+    array_2 = {**array_1, "target_item_count": 2, "correct_item_count": True, "positional_exact_count": 0, "positional_denominator": 2, "all_items_exact": False, "first_wrong_item_position": 0}
+    array_3 = {**array_1, "target_item_count": 3, "valid_json_syntax": False, "valid_array_schema": False, "correct_item_count": False, "positional_exact_count": None, "positional_denominator": None, "missing_items": None, "extra_items": None, "all_items_copied": False, "all_items_exact": False, "first_wrong_item_position": None}
+    array_4 = {**array_1, "target_item_count": 4, "correct_item_count": False, "positional_exact_count": 3, "positional_denominator": 4, "missing_items": ["qd404"], "all_items_exact": False, "first_wrong_item_position": 3}
+    array_path = "array_json__small__seed1/generations.jsonl"
+    array_expected_rows = [
+        taxonomy_row(family="array_json", model_size="small", seed=1, record_index=0, generation_path=array_path, generation_sha256="1" * 64, common=array_common_1, named=None, array=array_1),
+        taxonomy_row(family="array_json", model_size="small", seed=1, record_index=1, generation_path=array_path, generation_sha256="1" * 64, common=array_common_2, named=None, array=array_2),
+        taxonomy_row(family="array_json", model_size="small", seed=1, record_index=2, generation_path=array_path, generation_sha256="1" * 64, common=array_common_3, named=None, array=array_3),
+        taxonomy_row(family="array_json", model_size="small", seed=1, record_index=3, generation_path=array_path, generation_sha256="1" * 64, common=array_common_4, named=None, array=array_4),
+    ]
+    array_retained = [
+        {"raw_token_ids": raw_ids(array_prompt_1, b'["qe38e"]'), "generated": '["qe38e"]', "generation_error": None, "exact_match": True},
+        {"raw_token_ids": raw_ids(array_prompt_2, b'["q410a","qc663"]'), "generated": '["q410a","qc663"]', "generation_error": None, "exact_match": False},
+        {"raw_token_ids": raw_ids(array_prompt_3, None), "generated": None, "generation_error": invalid_utf8_error, "exact_match": False},
+        {"raw_token_ids": raw_ids(array_prompt_4, b'["qa101","qb202","qc303"]'), "generated": '["qa101","qb202","qc303"]', "generation_error": None, "exact_match": False},
+    ]
+    for record, retained, expected in zip((array_record_1, array_record_2, array_record_3, array_record_4), array_retained, array_expected_rows, strict=True):
+        assert sf.postmortem_taxonomy_row(record, retained, family="array_json", model_size="small", seed=1, generation_path=array_path, generation_sha256="1" * 64) == expected
+
+    taxonomy_rows: list[dict[str, object]] = []
+    for model_size in ("small", "medium"):
+        for seed in (0, 1, 2):
+            for prototype in named_expected_rows * 16:
+                taxonomy_rows.append({**prototype, "model_size": model_size, "seed": seed, "generation_path": f"named_value_json__{model_size}__seed{seed}/generations.jsonl", "generation_sha256": (str(seed) if seed else "a") * 64})
+            for prototype in array_expected_rows * 16:
+                taxonomy_rows.append({**prototype, "model_size": model_size, "seed": seed, "generation_path": f"array_json__{model_size}__seed{seed}/generations.jsonl", "generation_sha256": (str(seed) if seed else "a") * 64})
+
+    expected_named_aggregates = [
+        {
+            "model_size": model_size,
+            "seed": seed,
+            "denominator": 64,
+            "valid_json_string_count": 48,
+            "valid_named_grammar_count": 32,
+            "target_prefix_count": 32,
+            "occurs_in_prompt_count": 32,
+            "exact_target_value_count": 16,
+            "exact_distractor_value_count": 16,
+            "suffix_positional_correct": 80,
+            "suffix_positional_denominator": 128,
+            "suffix_first_error_histogram": {"1": 16},
+            "suffix_first_error_observation_count": 16,
+            "eos_present_count": 48,
+            "generation_cap_count": 0,
+            "target_length_match_count": 32,
+            "first_error_histogram": {"1": 16, "6": 16},
+            "first_error_observation_count": 32,
+            "generation_token_count_histogram": {"2": 16, "11": 32, "12": 16},
+            "generation_utf8_bytes_histogram": {"10": 32, "11": 16},
+        }
+        for model_size in ("small", "medium")
+        for seed in (0, 1, 2)
+    ]
+    expected_array_base = {
+        1: {
+            "denominator": 16,
+            "valid_json_syntax_count": 16,
+            "valid_array_schema_count": 16,
+            "correct_item_count_count": 16,
+            "positional_exact_count": 16,
+            "positional_denominator": 16,
+            "all_items_copied_count": 16,
+            "all_items_exact_count": 16,
+            "missing_item_count": 0,
+            "extra_item_count": 0,
+            "first_wrong_histogram": {},
+            "first_wrong_observation_count": 0,
+            "greedy_exact_count": 16,
+            "eos_present_count": 16,
+            "generation_cap_count": 0,
+            "target_length_match_count": 16,
+            "first_error_histogram": {},
+            "first_error_observation_count": 0,
+            "generation_token_count_histogram": {"10": 16},
+            "generation_utf8_bytes_histogram": {"9": 16},
+        },
+        2: {
+            "denominator": 16,
+            "valid_json_syntax_count": 16,
+            "valid_array_schema_count": 16,
+            "correct_item_count_count": 16,
+            "positional_exact_count": 0,
+            "positional_denominator": 32,
+            "all_items_copied_count": 16,
+            "all_items_exact_count": 0,
+            "missing_item_count": 0,
+            "extra_item_count": 0,
+            "first_wrong_histogram": {"0": 16},
+            "first_wrong_observation_count": 16,
+            "greedy_exact_count": 0,
+            "eos_present_count": 16,
+            "generation_cap_count": 0,
+            "target_length_match_count": 16,
+            "first_error_histogram": {"3": 16},
+            "first_error_observation_count": 16,
+            "generation_token_count_histogram": {"18": 16},
+            "generation_utf8_bytes_histogram": {"17": 16},
+        },
+        3: {
+            "denominator": 16,
+            "valid_json_syntax_count": 0,
+            "valid_array_schema_count": 0,
+            "correct_item_count_count": 0,
+            "positional_exact_count": 0,
+            "positional_denominator": 0,
+            "all_items_copied_count": 0,
+            "all_items_exact_count": 0,
+            "missing_item_count": 0,
+            "extra_item_count": 0,
+            "first_wrong_histogram": {},
+            "first_wrong_observation_count": 0,
+            "greedy_exact_count": 0,
+            "eos_present_count": 0,
+            "generation_cap_count": 0,
+            "target_length_match_count": 0,
+            "first_error_histogram": {},
+            "first_error_observation_count": 0,
+            "generation_token_count_histogram": {"2": 16},
+            "generation_utf8_bytes_histogram": {},
+        },
+        4: {
+            "denominator": 16,
+            "valid_json_syntax_count": 16,
+            "valid_array_schema_count": 16,
+            "correct_item_count_count": 0,
+            "positional_exact_count": 48,
+            "positional_denominator": 64,
+            "all_items_copied_count": 16,
+            "all_items_exact_count": 0,
+            "missing_item_count": 16,
+            "extra_item_count": 0,
+            "first_wrong_histogram": {"3": 16},
+            "first_wrong_observation_count": 16,
+            "greedy_exact_count": 0,
+            "eos_present_count": 16,
+            "generation_cap_count": 0,
+            "target_length_match_count": 0,
+            "first_error_histogram": {"24": 16},
+            "first_error_observation_count": 16,
+            "generation_token_count_histogram": {"26": 16},
+            "generation_utf8_bytes_histogram": {"25": 16},
+        },
+    }
+    expected_array_aggregates = [
+        {"model_size": model_size, "seed": seed, "target_item_count": item_count, **expected_array_base[item_count]}
+        for model_size in ("small", "medium")
+        for seed in (0, 1, 2)
+        for item_count in (1, 2, 3, 4)
+    ]
+    assert sf.postmortem_named_aggregates(taxonomy_rows) == expected_named_aggregates
+    assert sf.postmortem_array_aggregates(taxonomy_rows) == expected_array_aggregates
+    summary = sf.build_postmortem_summary(
+        input_binding={"configuration": {}},
+        proposal_binding={},
+        implementation_binding={},
+        cell_rows=[],
+        taxonomy_rows=taxonomy_rows,
+    )
+    assert summary["named_aggregates"] == expected_named_aggregates
+    assert summary["array_aggregates"] == expected_array_aggregates
+    assert len(summary["named_aggregates"]) == 6
+    assert len(summary["array_aggregates"]) == 24
+
+    teacher_rows = [{"sequence_exact": value} for value in ([True, True, False, False] * 16)]
+    generation_rows = [{"exact_match": value} for value in ([True, False, True, False] * 16)]
+    assert sf.postmortem_paired_eval_exact(teacher_rows, generation_rows) == {
+        "both_exact": 16,
+        "tf_only": 16,
+        "greedy_only": 16,
+        "neither_exact": 16,
+        "denominator": 64,
+        "count_difference": 0,
+    }
 
 
 def test_d3_postmortem_done_publication_schema_aggregates_and_mutation_rejection(
@@ -7889,6 +8325,80 @@ def test_d3_postmortem_guarded_publication_binds_fd_across_transient_same_byte_p
     assert not (replacement / "FAILED.json").exists()
 
 
+def test_d3_postmortem_publication_rejects_parent_and_temp_chmod_drift_across_callbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for drift_target in ("parent", "temp"):
+        sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / drift_target, monkeypatch)
+        context = _d3_expected_publication_context(sf, output_root)
+        temp_root = output_root.with_name(output_root.name + ".tmp")
+        output_root.rename(temp_root)
+        parent = temp_root.parent
+        original_parent_mode = stat.S_IMODE(parent.stat().st_mode)
+        original_temp_mode = stat.S_IMODE(temp_root.stat().st_mode)
+        callback_ran = False
+
+        def chmod_after_validation() -> None:
+            nonlocal callback_ran
+            if callback_ran:
+                return
+            callback_ran = True
+            target = parent if drift_target == "parent" else temp_root
+            mode = stat.S_IMODE(target.stat().st_mode)
+            target.chmod(mode ^ stat.S_IRGRP)
+
+        try:
+            with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+                sf.publish_postmortem_root_or_leave_incomplete(
+                    temp_root,
+                    output_root,
+                    **context,
+                    final_callback=chmod_after_validation,
+                )
+        finally:
+            parent.chmod(original_parent_mode)
+            if temp_root.exists() and not temp_root.is_symlink():
+                temp_root.chmod(original_temp_mode)
+        assert callback_ran is True
+        assert not output_root.exists()
+        assert not (temp_root / "DONE.json").exists()
+        assert not (temp_root / "FAILED.json").exists()
+
+
+def test_d3_postmortem_publication_rejects_output_chmod_drift_after_atomic_rename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
+    context = _d3_expected_publication_context(sf, output_root)
+    temp_root = output_root.with_name(output_root.name + ".tmp")
+    output_root.rename(temp_root)
+    real_rename_at = sf.atomic_rename_noreplace_at
+    rename_calls: list[tuple[str, str]] = []
+
+    def chmod_output_after_publish_rename(
+        source_dir_fd: int,
+        source_name: str,
+        destination_dir_fd: int,
+        destination_name: str,
+        destination_label: object,
+    ) -> None:
+        real_rename_at(source_dir_fd, source_name, destination_dir_fd, destination_name, destination_label)
+        rename_calls.append((source_name, destination_name))
+        if (source_name, destination_name) == (temp_root.name, output_root.name):
+            output_root.chmod(stat.S_IMODE(output_root.stat().st_mode) ^ stat.S_IRGRP)
+
+    monkeypatch.setattr(sf, "atomic_rename_noreplace_at", chmod_output_after_publish_rename)
+    with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+        sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **context)
+    assert rename_calls[0] == (temp_root.name, output_root.name)
+    assert not output_root.exists()
+    assert temp_root.is_dir()
+    assert not (temp_root / "DONE.json").exists()
+    assert not (temp_root / "FAILED.json").exists()
+
+
 def test_d3_postmortem_fd_writer_does_not_follow_swapped_temp_root_path(
     tmp_path: Path,
 ) -> None:
@@ -8081,6 +8591,188 @@ def test_d3_postmortem_publication_rolls_back_final_identity_mismatch_without_fi
     assert not (temp_root / "DONE.json").exists()
     assert not (temp_root / "FAILED.json").exists()
     assert any(path.name.startswith(".DONE.json.demoted.") for path in temp_root.iterdir())
+
+
+def test_d3_postmortem_publication_preserves_occupied_temp_collision_failure_without_final_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    temp_root = tmp_path / "feasibility_postmortem_001.tmp"
+    output_root = tmp_path / "feasibility_postmortem_001"
+    temp_root.mkdir()
+    (temp_root / "DONE.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_inventory_snapshot_at", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "postmortem_terminal_fingerprint_at", lambda *args, **kwargs: ())
+    real_rename_at = sf.atomic_rename_noreplace_at
+
+    def validator_that_creates_collision(guard: object, _output_root: Path, **_kwargs: object) -> None:
+        if output_root.exists() and not temp_root.exists():
+            temp_root.mkdir()
+            raise ValueError("forced post-rename validation failure")
+
+    def fail_collision_preserve(
+        source_dir_fd: int,
+        source_name: str,
+        destination_dir_fd: int,
+        destination_name: str,
+        destination_label: object,
+    ) -> None:
+        if source_name == temp_root.name and destination_name.startswith(f".{temp_root.name}.collision."):
+            raise sf.FeasibilityPublicationError("forced collision preservation failure")
+        real_rename_at(source_dir_fd, source_name, destination_dir_fd, destination_name, destination_label)
+
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_root_at", validator_that_creates_collision)
+    monkeypatch.setattr(sf, "atomic_rename_noreplace_at", fail_collision_preserve)
+    with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+        sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **_d3_minimal_publication_context(sf))
+    assert not output_root.exists()
+    assert temp_root.is_dir()
+    _d3_assert_no_canonical_postmortem_terminal_markers(temp_root)
+
+
+def test_d3_postmortem_publication_uses_quarantine_when_first_rollback_rename_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    temp_root = tmp_path / "feasibility_postmortem_001.tmp"
+    output_root = tmp_path / "feasibility_postmortem_001"
+    temp_root.mkdir()
+    for name in ("DONE.json", "FAILED.json"):
+        (temp_root / name).write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_inventory_snapshot_at", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sf, "postmortem_terminal_fingerprint_at", lambda *args, **kwargs: ())
+    monkeypatch.setattr(
+        sf,
+        "validate_postmortem_terminal_root_at",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("forced post-rename validation failure")) if output_root.exists() else None,
+    )
+    real_rename_at = sf.atomic_rename_noreplace_at
+
+    def fail_first_rollback_rename(
+        source_dir_fd: int,
+        source_name: str,
+        destination_dir_fd: int,
+        destination_name: str,
+        destination_label: object,
+    ) -> None:
+        if (source_name, destination_name) == (output_root.name, temp_root.name):
+            raise OSError("forced first rollback rename failure")
+        real_rename_at(source_dir_fd, source_name, destination_dir_fd, destination_name, destination_label)
+
+    monkeypatch.setattr(sf, "atomic_rename_noreplace_at", fail_first_rollback_rename)
+    with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
+        sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **_d3_minimal_publication_context(sf))
+    quarantines = [path for path in tmp_path.iterdir() if path.name.startswith(".feasibility_postmortem_001.evacuated.")]
+    assert len(quarantines) == 1
+    assert not output_root.exists()
+    assert not temp_root.exists()
+    _d3_assert_no_canonical_postmortem_terminal_markers(quarantines[0])
+
+
+def test_d3_postmortem_publication_irrecoverable_failure_injection_matrix_exits_74(
+    tmp_path: Path,
+) -> None:
+    scenarios = (
+        "pre_done_demote_fail",
+        "pre_failed_demote_fail",
+        "post_done_demote_fail",
+        "post_failed_demote_fail",
+        "pre_done_absence_fail",
+        "pre_failed_absence_fail",
+        "post_done_absence_fail",
+        "post_failed_absence_fail",
+        "rollback_final_absence_fail",
+        "quarantine_final_absence_fail",
+        "final_quarantine_evacuation_fail",
+    )
+    child_template = r'''
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, {repo_root!r})
+import scripts.phase8_sequence_feasibility as sf
+
+scenario = {scenario!r}
+base = Path({base!r})
+temp_root = base / "feasibility_postmortem_001.tmp"
+output_root = base / "feasibility_postmortem_001"
+temp_root.mkdir(parents=True)
+for name in ("DONE.json", "FAILED.json"):
+    (temp_root / name).write_text("{{}}\n", encoding="utf-8")
+context = {{
+    "expected_input_binding": {{}},
+    "expected_proposal_binding": {{}},
+    "expected_implementation_binding": {{}},
+    "expected_source_snapshot": sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
+    "expected_teacher_rows": [],
+    "expected_cell_rows": [],
+    "expected_taxonomy_rows": [],
+}}
+sf.validate_postmortem_terminal_inventory_snapshot_at = lambda *args, **kwargs: None
+sf.postmortem_terminal_fingerprint_at = lambda *args, **kwargs: ()
+
+def validate(*args, **kwargs):
+    if scenario.startswith("post") or scenario in ("quarantine_final_absence_fail", "rollback_final_absence_fail", "final_quarantine_evacuation_fail"):
+        if output_root.exists():
+            raise ValueError("forced post-rename validation failure")
+    return None
+
+sf.validate_postmortem_terminal_root_at = validate
+real_rename_at = sf.atomic_rename_noreplace_at
+real_stat = sf.os.stat
+demoted_markers = set()
+
+def rename_probe(source_dir_fd, source_name, destination_dir_fd, destination_name, destination_label):
+    if scenario.endswith("done_demote_fail") and source_name == "DONE.json":
+        raise sf.FeasibilityPublicationError("forced DONE demotion failure")
+    if scenario.endswith("failed_demote_fail") and source_name == "FAILED.json":
+        raise sf.FeasibilityPublicationError("forced FAILED demotion failure")
+    real_rename_at(source_dir_fd, source_name, destination_dir_fd, destination_name, destination_label)
+    if source_name in ("DONE.json", "FAILED.json") and destination_name.startswith("." + source_name + ".demoted."):
+        demoted_markers.add(source_name)
+
+def rename_probe_with_rollback_failures(source_dir_fd, source_name, destination_dir_fd, destination_name, destination_label):
+    if scenario in ("quarantine_final_absence_fail", "final_quarantine_evacuation_fail") and (source_name, destination_name) == (output_root.name, temp_root.name):
+        raise OSError("forced rollback rename failure")
+    if scenario == "final_quarantine_evacuation_fail" and source_name == output_root.name and destination_name.startswith("." + output_root.name + ".evacuated."):
+        raise OSError("forced final quarantine evacuation failure")
+    rename_probe(source_dir_fd, source_name, destination_dir_fd, destination_name, destination_label)
+
+def stat_probe(path, *args, **kwargs):
+    target = None
+    if scenario.endswith("done_absence_fail"):
+        target = "DONE.json"
+    if scenario.endswith("failed_absence_fail"):
+        target = "FAILED.json"
+    if target is not None and path == target and kwargs.get("dir_fd") is not None and target in demoted_markers:
+        return real_stat(base)
+    return real_stat(path, *args, **kwargs)
+
+sf.atomic_rename_noreplace_at = rename_probe_with_rollback_failures
+sf.os.stat = stat_probe
+
+if scenario in ("rollback_final_absence_fail", "quarantine_final_absence_fail"):
+    def fail_absence(_guard):
+        sf.postmortem_fail_stop_74("forced final-root absence verification failure")
+    sf.require_postmortem_output_absent_or_fail_stop = fail_absence
+
+callback = (lambda: (_ for _ in ()).throw(RuntimeError("forced pre-rename failure"))) if scenario.startswith("pre_") else None
+sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, final_callback=callback, **context)
+raise SystemExit(99)
+'''
+    for scenario in scenarios:
+        completed = subprocess.run(
+            [sys.executable, "-c", child_template.format(repo_root=str(REPO_ROOT), scenario=scenario, base=str(tmp_path / scenario))],
+            cwd=REPO_ROOT,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        assert completed.returncode == 74, (scenario, completed.stdout, completed.stderr)
 
 
 def test_d3_postmortem_publication_guard_covers_callbacks_and_no_clobber(

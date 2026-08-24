@@ -8485,6 +8485,13 @@ class PostmortemForbiddenOperationGuard:
         setattr(owner, name, replacement)
         self._restore_callbacks.append(lambda owner=owner, name=name, original=original: setattr(owner, name, original))
 
+    def _patch_global(self, namespace: dict[str, object], name: str, replacement: object) -> None:
+        if name not in namespace:
+            raise ValueError(f"Postmortem read-only guard cannot find runner global {name}.")
+        original = namespace[name]
+        namespace[name] = replacement
+        self._restore_callbacks.append(lambda namespace=namespace, name=name, original=original: namespace.__setitem__(name, original))
+
     def __enter__(self) -> "PostmortemForbiddenOperationGuard":
         def forbidden(*_args: object, **_kwargs: object) -> object:
             raise ValueError("Postmortem read-only guard rejected a forbidden training/generation/mutation/RNG operation.")
@@ -8502,6 +8509,7 @@ class PostmortemForbiddenOperationGuard:
             return inner
 
         original_set_grad_enabled = torch.set_grad_enabled
+        runner_globals = self.__enter__.__globals__
         try:
             self._patch(random, "seed", forbidden)
             self._patch(random, "setstate", forbidden)
@@ -8521,13 +8529,13 @@ class PostmortemForbiddenOperationGuard:
                 self._patch(torch.cuda, "set_rng_state", guarded_rng_restore(torch.cuda.set_rng_state))
             if hasattr(torch.cuda, "set_rng_state_all"):
                 self._patch(torch.cuda, "set_rng_state_all", guarded_rng_restore(torch.cuda.set_rng_state_all))
-            self._patch(sys.modules[__name__], "make_optimizer", forbidden)
-            self._patch(sys.modules[__name__], "train_text_records", forbidden)
-            self._patch(sys.modules[__name__], "save_checkpoint", forbidden)
-            self._patch(sys.modules[__name__], "evaluate_model", forbidden)
-            self._patch(sys.modules[__name__], "generate_named_diagnostic_rows", forbidden)
-            self._patch(sys.modules[__name__], "generate_array_rows", forbidden)
-            self._patch(ToyCausalTransformer, "greedy_decode", forbidden)
+            self._patch_global(runner_globals, "make_optimizer", forbidden)
+            self._patch_global(runner_globals, "train_text_records", forbidden)
+            self._patch_global(runner_globals, "save_checkpoint", forbidden)
+            self._patch_global(runner_globals, "evaluate_model", forbidden)
+            self._patch_global(runner_globals, "generate_named_diagnostic_rows", forbidden)
+            self._patch_global(runner_globals, "generate_array_rows", forbidden)
+            self._patch(runner_globals["ToyCausalTransformer"], "greedy_decode", forbidden)
             return self
         except Exception:
             self.__exit__(None, None, None)
@@ -9815,7 +9823,6 @@ def postmortem_path_identity(path: Path, *, field_name: str, directory: bool) ->
         metadata = path.lstat()
     except FileNotFoundError as exc:
         raise ValueError(f"{field_name} must exist for postmortem publication.") from exc
-    file_type = stat.S_IFMT(metadata.st_mode)
     if stat.S_ISLNK(metadata.st_mode):
         raise ValueError(f"{field_name} must be a real non-symlink path.")
     if directory:
@@ -9823,11 +9830,11 @@ def postmortem_path_identity(path: Path, *, field_name: str, directory: bool) ->
             raise ValueError(f"{field_name} must be a real non-symlink directory.")
     elif not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"{field_name} must be a regular non-symlink file.")
-    return (int(metadata.st_dev), int(metadata.st_ino), int(file_type))
+    return (int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_mode))
 
 
 def postmortem_metadata_identity(metadata: os.stat_result) -> tuple[int, int, int]:
-    return (int(metadata.st_dev), int(metadata.st_ino), int(stat.S_IFMT(metadata.st_mode)))
+    return (int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_mode))
 
 
 def postmortem_directory_open_flags() -> int:
@@ -9840,13 +9847,12 @@ def postmortem_file_open_flags() -> int:
 
 def postmortem_fd_identity(fd: int, *, field_name: str, directory: bool) -> tuple[int, int, int]:
     metadata = os.fstat(fd)
-    file_type = stat.S_IFMT(metadata.st_mode)
     if directory:
         if not stat.S_ISDIR(metadata.st_mode):
             raise ValueError(f"{field_name} descriptor must be a real directory.")
     elif not stat.S_ISREG(metadata.st_mode):
         raise ValueError(f"{field_name} descriptor must be a regular file.")
-    return (int(metadata.st_dev), int(metadata.st_ino), int(file_type))
+    return (int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_mode))
 
 
 def postmortem_dir_entry_exists(parent_fd: int, name: str) -> bool:
@@ -10131,10 +10137,10 @@ def postmortem_terminal_file_identity(path: Path) -> tuple[int, int, int, str, i
         raise ValueError("Postmortem terminal root entries must be regular non-symlink files.")
     digest = sha256_regular_file_no_follow(path, metadata)
     observed = path.lstat()
-    if (observed.st_dev, observed.st_ino, stat.S_IFMT(observed.st_mode), observed.st_size) != (
+    if (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_size) != (
         metadata.st_dev,
         metadata.st_ino,
-        stat.S_IFMT(metadata.st_mode),
+        metadata.st_mode,
         metadata.st_size,
     ):
         raise ValueError("Postmortem terminal file identity changed while fingerprinting.")
