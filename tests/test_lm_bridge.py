@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import replace
 from hashlib import sha256
 import importlib
@@ -17,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import MappingProxyType
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -5656,6 +5658,90 @@ def _d3_env(sf: object) -> dict[str, str]:
     return dict(sf.POSTMORTEM_EXECVE_ENVIRONMENT)
 
 
+class _D3FakeClosedRepositoryLoader:
+    __slots__ = ("_sources", "_sealed")
+
+    def __init__(self) -> None:
+        object.__setattr__(self, "_sources", MappingProxyType({"capability_certificate_lab": ("capability_certificate_lab/__init__.py", b"", True)}))
+        object.__setattr__(self, "_sealed", True)
+
+    @property
+    def sources(self) -> MappingProxyType:
+        return self._sources
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise RuntimeError("sealed")
+        object.__setattr__(self, name, value)
+
+    def find_spec(self, fullname: str, path: object = None, target: object = None) -> object:
+        return None
+
+    def create_module(self, spec: object) -> object:
+        return None
+
+    def exec_module(self, module: object) -> None:
+        return None
+
+
+class _D3FakeRepositoryAuthority:
+    __slots__ = ("_accepted_commit", "_runner_blob", "_untracked", "_ignored", "_proposal_binding", "_sealed")
+
+    def __init__(
+        self,
+        *,
+        accepted_commit: str,
+        runner_blob: str,
+        untracked: tuple[str, ...],
+        ignored: tuple[str, ...],
+        proposal_binding: tuple[str, str, str],
+    ) -> None:
+        object.__setattr__(self, "_accepted_commit", accepted_commit)
+        object.__setattr__(self, "_runner_blob", runner_blob)
+        object.__setattr__(self, "_untracked", untracked)
+        object.__setattr__(self, "_ignored", ignored)
+        object.__setattr__(self, "_proposal_binding", proposal_binding)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise RuntimeError("sealed")
+        object.__setattr__(self, name, value)
+
+    def __call__(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        return self._untracked, self._ignored
+
+
+def _d3_install_fake_verifier(
+    sf: object,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    accepted_commit: str = "d" * 40,
+    runner_blob: str = "e" * 40,
+    untracked: tuple[str, ...] = (),
+    ignored: tuple[str, ...] = (),
+    authority: object | None = None,
+    loader: object | None = None,
+) -> object:
+    proposal_binding = (sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT, sf.POSTMORTEM_PROPOSAL_PATH, sf.POSTMORTEM_PROPOSAL_BLOB)
+    fake_authority = authority or _D3FakeRepositoryAuthority(
+        accepted_commit=accepted_commit,
+        runner_blob=runner_blob,
+        untracked=untracked,
+        ignored=ignored,
+        proposal_binding=proposal_binding,
+    )
+    monkeypatch.setattr(sf, "_POSTMORTEM_RETAINED_VERIFIER_BINDING", None)
+    monkeypatch.setitem(sf.__dict__, "__phase8_verifier_sha256__", sf.POSTMORTEM_VERIFIER_SHA256)
+    monkeypatch.setitem(sf.__dict__, "__phase8_accepted_implementation_commit__", accepted_commit)
+    monkeypatch.setitem(sf.__dict__, "__phase8_repository_loader__", loader or _D3FakeClosedRepositoryLoader())
+    monkeypatch.setitem(sf.__dict__, "__phase8_verify_repository_unchanged__", fake_authority)
+    monkeypatch.setitem(sf.__dict__, "__phase8_runner_blob__", runner_blob)
+    monkeypatch.setitem(sf.__dict__, "__phase8_proposal_binding__", proposal_binding)
+    monkeypatch.setitem(sf.__dict__, "__phase8_authority_token__", object())
+    return fake_authority
+
+
 def _d3_synthetic_teacher_rows(
     sf: object,
     records: tuple[object, ...],
@@ -5996,7 +6082,7 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
     verifier_source = sf.postmortem_verifier_source_text()
     verifier_path = REPO_ROOT / sf.POSTMORTEM_VERIFIER_PATH
     verifier_bytes = verifier_path.read_bytes()
-    assert len(verifier_bytes) == sf.POSTMORTEM_VERIFIER_BYTE_COUNT == 34156
+    assert len(verifier_bytes) == sf.POSTMORTEM_VERIFIER_BYTE_COUNT == 39455
     assert sha256(verifier_bytes).hexdigest() == sf.POSTMORTEM_VERIFIER_SHA256
     assert subprocess.run(
         ["git", "hash-object", sf.POSTMORTEM_VERIFIER_PATH],
@@ -6137,6 +6223,358 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
         )
 
 
+def _d3_exact_verifier_namespace(sf: object) -> dict[str, object]:
+    verifier_path = REPO_ROOT / sf.POSTMORTEM_VERIFIER_PATH
+    verifier_bytes = verifier_path.read_bytes()
+    assert len(verifier_bytes) == 39455
+    assert sha256(verifier_bytes).hexdigest() == sf.POSTMORTEM_VERIFIER_SHA256
+    namespace: dict[str, object] = {"__name__": "phase8_verifier_non_main_harness"}
+    exec(compile(verifier_bytes, str(verifier_path), "exec"), namespace, namespace)
+    assert "PinnedGitContext" in namespace
+    assert "main" in namespace
+    return namespace
+
+
+def _d3_git(repo: Path, *args: str) -> str:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["LC_ALL"] = "C"
+    return subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        env=env,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+
+
+def _d3_build_exact_verifier_repo(repo: Path, sf: object) -> tuple[Path, str, str]:
+    repo.mkdir()
+    _d3_git(repo, "init")
+    _d3_git(repo, "remote", "add", "origin", "git@github.com:johnxye/CapKnow.git")
+    (repo / "scripts").mkdir()
+    (repo / "scripts/phase8_sequence_feasibility.py").write_text("RUNNER_SENTINEL = 'captured'\n", encoding="utf-8")
+    package_root = repo / "capability_certificate_lab"
+    package_root.mkdir()
+    (package_root / "__init__.py").write_text("VALUE = 'captured-package'\n", encoding="utf-8")
+    (package_root / "child.py").write_text("from . import VALUE\nCHILD = VALUE\n", encoding="utf-8")
+    proposal_path = repo / sf.POSTMORTEM_PROPOSAL_PATH
+    proposal_path.parent.mkdir(parents=True)
+    proposal_path.write_text("accepted proposal\n", encoding="utf-8")
+    _d3_git(repo, "add", ".")
+    _d3_git(repo, "-c", "user.name=Phase8 Test", "-c", "user.email=phase8@example.invalid", "commit", "-m", "fixture")
+    (repo / ".git/packed-refs").touch()
+    head = _d3_git(repo, "rev-parse", "HEAD")
+    proposal_blob = _d3_git(repo, "rev-parse", f"HEAD:{sf.POSTMORTEM_PROPOSAL_PATH}")
+    return repo, head, proposal_blob
+
+
+def _d3_pin_exact_verifier_repo(
+    namespace: dict[str, object],
+    repo: Path,
+    head: str,
+    proposal_blob: str,
+    sf: object,
+) -> object:
+    namespace["REPO_ROOT"] = repo
+    namespace["GIT_DIR"] = repo / ".git"
+    namespace["RUNNER_PATH"] = "scripts/phase8_sequence_feasibility.py"
+    namespace["PROPOSAL_COMMIT"] = head
+    namespace["PROPOSAL_BLOB"] = proposal_blob
+    namespace["PINNED_GIT"] = None
+    pinned = namespace["PinnedGitContext"]()
+    namespace["PINNED_GIT"] = pinned
+    return pinned
+
+
+def _d3_close_exact_pinned(pinned: object) -> None:
+    for attr in ("repo_fd", "git_fd", "objects_fd", "refs_fd", "info_fd", "head_fd", "index_fd", "config_fd", "exclude_fd", "packed_refs_fd"):
+        fd = getattr(pinned, attr, None)
+        if isinstance(fd, int):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def test_d3_postmortem_exact_verifier_bytes_real_git_authority_and_closed_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    namespace = _d3_exact_verifier_namespace(sf)
+
+    repo = tmp_path / "repo"
+    repo, head, proposal_blob = _d3_build_exact_verifier_repo(repo, sf)
+    package_root = repo / "capability_certificate_lab"
+    pinned = _d3_pin_exact_verifier_repo(namespace, repo, head, proposal_blob, sf)
+    try:
+        captured, modes, untracked, ignored = namespace["authenticate_repository"](head)
+        assert untracked == ()
+        assert ignored == ()
+        assert captured["scripts/phase8_sequence_feasibility.py"] == b"RUNNER_SENTINEL = 'captured'\n"
+        assert namespace["authenticate_proposal"]() == (head, sf.POSTMORTEM_PROPOSAL_PATH, proposal_blob)
+        for bad_args in (
+            ("cat-file", "--filters", proposal_blob),
+            ("cat-file", "--textconv", proposal_blob),
+            ("cat-file", "blob", "--batch"),
+            ("status", "--porcelain"),
+        ):
+            with pytest.raises(SystemExit, match="outside the exact allowlist"):
+                namespace["git_run"](*bad_args)
+
+        authority = namespace["RepositoryAuthority"](
+            head,
+            MappingProxyType(dict(captured)),
+            MappingProxyType(dict(modes)),
+            (head, sf.POSTMORTEM_PROPOSAL_PATH, proposal_blob),
+        )
+        assert authority() == ((), ())
+
+        loader = namespace["ClosedRepositoryLoader"](captured)
+        assert not hasattr(loader, "__dict__")
+        with pytest.raises(SystemExit, match="sealed"):
+            loader.find_spec = lambda *_args, **_kwargs: None
+
+        saved_modules = {name: module for name, module in sys.modules.items() if name == "capability_certificate_lab" or name.startswith("capability_certificate_lab.")}
+        for name in list(saved_modules):
+            sys.modules.pop(name, None)
+        shadow_dir = tmp_path / "shadow_site"
+        (shadow_dir / "capability_certificate_lab").mkdir(parents=True)
+        (shadow_dir / "capability_certificate_lab/__init__.py").write_text("VALUE = 'shadow'\n", encoding="utf-8")
+        (shadow_dir / "capability_certificate_lab/child.py").write_text("CHILD = 'shadow'\n", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(shadow_dir))
+        sys.meta_path.insert(0, loader)
+        try:
+            imported_child = importlib.import_module("capability_certificate_lab.child")
+            assert imported_child.CHILD == "captured-package"
+            (package_root / "child.py").write_text("CHILD = 'mutated-worktree'\n", encoding="utf-8")
+            sys.modules.pop("capability_certificate_lab.child", None)
+            imported_child = importlib.import_module("capability_certificate_lab.child")
+            assert imported_child.CHILD == "captured-package"
+            with pytest.raises(ImportError, match="outside the closed verifier set"):
+                importlib.import_module("capability_certificate_lab.missing")
+        finally:
+            sys.meta_path.remove(loader)
+            for name in list(sys.modules):
+                if name == "capability_certificate_lab" or name.startswith("capability_certificate_lab."):
+                    sys.modules.pop(name, None)
+            sys.modules.update(saved_modules)
+
+        with pytest.raises(SystemExit, match="worktree bytes|captured repository sources"):
+            authority()
+    finally:
+        _d3_close_exact_pinned(pinned)
+
+
+def test_d3_postmortem_exact_verifier_rejects_git_env_loader_attack_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    namespace = _d3_exact_verifier_namespace(sf)
+    base_repo, head, proposal_blob = _d3_build_exact_verifier_repo(tmp_path / "base_repo", sf)
+    sentinel = tmp_path / "sentinel_touched"
+    sentinel_script = tmp_path / "sentinel.sh"
+    sentinel_script.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 0\n", encoding="utf-8")
+    sentinel_script.chmod(0o755)
+    global_config = tmp_path / "global_gitconfig"
+    global_config.write_text(
+        "\n".join(
+            (
+                "[core]",
+                f"\tfsmonitor = {sentinel_script}",
+                f"\thooksPath = {tmp_path / 'global-hooks'}",
+                f"\tpager = {sentinel_script}",
+                '[diff "evil"]',
+                f"\ttextconv = {sentinel_script}",
+                '[filter "evil"]',
+                f"\tsmudge = {sentinel_script}",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "inherited-git-dir"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(tmp_path / "inherited-worktree"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(tmp_path / "inherited-common-dir"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / "inherited-index"))
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(tmp_path / "inherited-objects"))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_EXTERNAL_DIFF", str(sentinel_script))
+    monkeypatch.setenv("GIT_PAGER", str(sentinel_script))
+    monkeypatch.setenv("GIT_NO_LAZY_FETCH", "0")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "shadow-site"))
+    monkeypatch.setenv("PYTHONSTARTUP", str(tmp_path / "startup.py"))
+    pinned = _d3_pin_exact_verifier_repo(namespace, base_repo, head, proposal_blob, sf)
+    try:
+        captured, modes, untracked, ignored = namespace["authenticate_repository"](head)
+        assert untracked == ()
+        assert ignored == ()
+        authority = namespace["RepositoryAuthority"](
+            head,
+            MappingProxyType(dict(captured)),
+            MappingProxyType(dict(modes)),
+            namespace["authenticate_proposal"](),
+        )
+        assert authority() == ((), ())
+    finally:
+        _d3_close_exact_pinned(pinned)
+        namespace["PINNED_GIT"] = None
+    assert not sentinel.exists()
+
+    def config_payload(repo: Path) -> str:
+        return (repo / ".git/config").read_text(encoding="utf-8")
+
+    def replace_config(repo: Path, payload: str) -> None:
+        (repo / ".git/config").write_text(payload, encoding="utf-8")
+
+    def add_core_config(repo: Path, *lines: str) -> None:
+        payload = config_payload(repo)
+        insertion = "".join(f"\t{line}\n" for line in lines)
+        marker = "\tlogallrefupdates = true\n"
+        assert marker in payload
+        replace_config(repo, payload.replace(marker, marker + insertion, 1))
+
+    def add_remote_config(repo: Path, *lines: str) -> None:
+        payload = config_payload(repo)
+        marker = "\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+        assert marker in payload
+        replace_config(repo, payload.replace(marker, marker + "".join(f"\t{line}\n" for line in lines), 1))
+
+    def expect_repository_reject(name: str, mutator: Callable[[Path], None], match: str) -> None:
+        attack_repo = tmp_path / f"attack_{name}"
+        shutil.copytree(base_repo, attack_repo, symlinks=True)
+        mutator(attack_repo)
+        attack_pinned: object | None = None
+        try:
+            with pytest.raises(SystemExit, match=match):
+                attack_pinned = _d3_pin_exact_verifier_repo(namespace, attack_repo, head, proposal_blob, sf)
+                namespace["authenticate_repository"](head)
+        finally:
+            if attack_pinned is not None:
+                _d3_close_exact_pinned(attack_pinned)
+            namespace["PINNED_GIT"] = None
+        assert not sentinel.exists()
+
+    expect_repository_reject(
+        "local_fsmonitor_hooks_pager",
+        lambda repo: add_core_config(repo, f"fsmonitor = {sentinel_script}", f"hooksPath = {tmp_path / 'hooks'}", f"pager = {sentinel_script}"),
+        "exact inert allowlist",
+    )
+    expect_repository_reject(
+        "local_diff_textconv_filter",
+        lambda repo: replace_config(
+            repo,
+            config_payload(repo)
+            + f'\n[diff "evil"]\n\ttextconv = {sentinel_script}\n[filter "evil"]\n\tsmudge = {sentinel_script}\n',
+        ),
+        "exact inert allowlist",
+    )
+    expect_repository_reject(
+        "config_section_case_variant",
+        lambda repo: replace_config(repo, config_payload(repo).replace("[core]", "[Core]", 1)),
+        "exact inert allowlist",
+    )
+    expect_repository_reject(
+        "config_extra_key_spelling_variant",
+        lambda repo: add_core_config(repo, "baree = false"),
+        "exact inert allowlist",
+    )
+    expect_repository_reject(
+        "partial_clone_promisor_config",
+        lambda repo: add_remote_config(repo, "promisor = true", "partialclonefilter = blob:none"),
+        "exact inert allowlist",
+    )
+    expect_repository_reject(
+        "assume_unchanged",
+        lambda repo: _d3_git(repo, "update-index", "--assume-unchanged", "scripts/phase8_sequence_feasibility.py"),
+        "assume-unchanged|skip-worktree",
+    )
+    expect_repository_reject(
+        "skip_worktree",
+        lambda repo: _d3_git(repo, "update-index", "--skip-worktree", "scripts/phase8_sequence_feasibility.py"),
+        "assume-unchanged|skip-worktree",
+    )
+    expect_repository_reject(
+        "replacement_refs",
+        lambda repo: ((repo / ".git/refs/replace").mkdir(parents=True), (repo / f".git/refs/replace/{head}").write_text(f"{head}\n", encoding="ascii")),
+        "replacement refs",
+    )
+    expect_repository_reject(
+        "alternates",
+        lambda repo: (repo / ".git/objects/info/alternates").write_text("/tmp/nonexistent-objects\n", encoding="utf-8"),
+        "alternate|redirected",
+    )
+    expect_repository_reject(
+        "grafts",
+        lambda repo: (repo / ".git/info/grafts").write_text(f"{head}\n", encoding="ascii"),
+        "alternate|grafted|redirected",
+    )
+    expect_repository_reject(
+        "promisor_pack",
+        lambda repo: (repo / ".git/objects/pack/pack-deadbeef.promisor").write_text("", encoding="utf-8"),
+        "promisor",
+    )
+
+    option_pinned = _d3_pin_exact_verifier_repo(namespace, base_repo, head, proposal_blob, sf)
+    try:
+        for bad_args in (
+            ("--config-env=core.fsmonitor=EVIL", "rev-parse", "--show-object-format"),
+            ("-c", "core.fsmonitor=true", "rev-parse", "--show-object-format"),
+            ("cat-file", "blob", proposal_blob, "--"),
+        ):
+            with pytest.raises(SystemExit, match="outside the exact allowlist"):
+                namespace["git_run"](*bad_args)
+    finally:
+        _d3_close_exact_pinned(option_pinned)
+        namespace["PINNED_GIT"] = None
+
+    def expect_plumbing_mutation_reject(name: str, mutator: Callable[[Path], None], match: str) -> None:
+        attack_repo = tmp_path / f"race_{name}"
+        shutil.copytree(base_repo, attack_repo, symlinks=True)
+        attack_pinned = _d3_pin_exact_verifier_repo(namespace, attack_repo, head, proposal_blob, sf)
+        subprocess_module = namespace["subprocess"]
+        original_run = subprocess_module.run
+
+        def mutating_run(*args: object, **kwargs: object) -> object:
+            mutator(attack_repo)
+            return original_run(*args, **kwargs)
+
+        try:
+            subprocess_module.run = mutating_run
+            with pytest.raises(SystemExit, match=match):
+                namespace["git_run"]("rev-parse", "--show-object-format")
+        finally:
+            subprocess_module.run = original_run
+            _d3_close_exact_pinned(attack_pinned)
+            namespace["PINNED_GIT"] = None
+        assert not sentinel.exists()
+
+    def mutate_head_same_size(repo: Path) -> None:
+        head_path = repo / ".git/HEAD"
+        payload = bytearray(head_path.read_bytes())
+        payload[-2] = ord("x") if payload[-2] != ord("x") else ord("y")
+        head_path.write_bytes(bytes(payload))
+
+    expect_plumbing_mutation_reject(
+        "same_size_head",
+        mutate_head_same_size,
+        "pinned Git file content changed|Git plumbing failed",
+    )
+    expect_plumbing_mutation_reject(
+        "commondir",
+        lambda repo: (repo / ".git/commondir").write_text(".git\n", encoding="utf-8"),
+        "redirectable Git control input appeared|directory content changed|pinned Git descriptor identity changed",
+    )
+    expect_plumbing_mutation_reject(
+        "info_attributes",
+        lambda repo: (repo / ".git/info/attributes").write_text("* diff=evil\n", encoding="utf-8"),
+        "redirectable Git info input appeared|directory content changed|pinned Git descriptor identity changed",
+    )
+
+
 def test_d3_postmortem_permanent_no_selection_no_retry_no_006_no_010d_boundaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -6241,6 +6679,7 @@ def test_d3_postmortem_cli_rejects_non_repo_cwd_before_shallow_or_output(
 
 
 def test_d3_postmortem_source_cleanliness_uses_only_injected_no_argument_callback(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
@@ -6248,21 +6687,36 @@ def test_d3_postmortem_source_cleanliness_uses_only_injected_no_argument_callbac
     runner_blob = "e" * 40
     input_root = Path(sf.POSTMORTEM_REQUIRED_INPUT_ROOT)
     output_root = Path(sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT)
+    repo_root = tmp_path / "repo"
     allowed_relative = "artifacts/phase8_toy_lm_bridge/feasibility_005/manifest.json"
-    allowed_paths = {(REPO_ROOT / allowed_relative).resolve()}
+    allowed = repo_root / allowed_relative
+    allowed.parent.mkdir(parents=True)
+    allowed.write_text("{}", encoding="utf-8")
+    (repo_root / ".pytest_cache/v/cache").mkdir(parents=True)
+    (repo_root / ".pytest_cache/v/cache/nodeids").write_text("[]", encoding="utf-8")
+    (repo_root / "backup").mkdir()
+    (repo_root / "backup/phase8-note.txt").write_text("benign", encoding="utf-8")
+    allowed_paths = {allowed.resolve()}
+    monkeypatch.setattr(sf, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(sf, "ARTIFACT_PARENT", repo_root / "artifacts" / "phase8_toy_lm_bridge")
     benign_ignored = (".pytest_cache/v/cache/nodeids", "backup/phase8-note.txt")
     ignored_paths_state = {"paths": benign_ignored}
     calls: list[str] = []
 
-    def verify_repository_unchanged() -> tuple[tuple[str, ...], tuple[str, ...]]:
-        calls.append("callback")
-        return ((allowed_relative,), ignored_paths_state["paths"])
+    class DynamicAuthority:
+        __slots__ = ()
 
-    monkeypatch.setitem(sf.__dict__, "__phase8_verifier_sha256__", sf.POSTMORTEM_VERIFIER_SHA256)
-    monkeypatch.setitem(sf.__dict__, "__phase8_accepted_implementation_commit__", accepted_implementation_commit)
-    monkeypatch.setitem(sf.__dict__, "__phase8_repository_loader__", object())
-    monkeypatch.setitem(sf.__dict__, "__phase8_verify_repository_unchanged__", verify_repository_unchanged)
-    monkeypatch.setitem(sf.__dict__, "__phase8_runner_blob__", runner_blob)
+        def __call__(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+            calls.append("callback")
+            return ((allowed_relative,), ignored_paths_state["paths"])
+
+    authority = _d3_install_fake_verifier(
+        sf,
+        monkeypatch,
+        accepted_commit=accepted_implementation_commit,
+        runner_blob=runner_blob,
+        authority=DynamicAuthority(),
+    )
     monkeypatch.setattr(sf, "git_output", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ambient git_output used")))
     monkeypatch.setattr(sf, "current_source_commit", lambda: (_ for _ in ()).throw(AssertionError("ambient HEAD lookup used")))
     monkeypatch.setattr(sf, "ignored_source_inputs", lambda: (_ for _ in ()).throw(AssertionError("ambient ignored-source scan used")))
@@ -6273,11 +6727,13 @@ def test_d3_postmortem_source_cleanliness_uses_only_injected_no_argument_callbac
         status_lines=(f"?? {allowed_relative}",),
         ignored_inputs=benign_ignored,
         runner_blob=runner_blob,
+        verifier_binding=sf._POSTMORTEM_RETAINED_VERIFIER_BINDING,
     )
     sf.verify_postmortem_source_unchanged(snapshot, active_output_root=output_root.with_name(output_root.name + ".tmp"))
     assert calls == ["callback", "callback"]
 
     ignored_paths_state["paths"] = (*benign_ignored, "backup/another-benign-note.txt")
+    (repo_root / "backup/another-benign-note.txt").write_text("another benign note", encoding="utf-8")
     with pytest.raises(sf.SourceChangedError, match="ignored executable source inputs changed"):
         sf.verify_postmortem_source_unchanged(snapshot, active_output_root=output_root.with_name(output_root.name + ".tmp"))
     ignored_paths_state["paths"] = benign_ignored
@@ -6291,21 +6747,293 @@ def test_d3_postmortem_source_cleanliness_uses_only_injected_no_argument_callbac
         ((), ("not//canonical",)),
     )
     for malformed in malformed_returns:
-        monkeypatch.setitem(sf.__dict__, "__phase8_verify_repository_unchanged__", lambda malformed=malformed: malformed)
+        class MalformedAuthority:
+            __slots__ = ()
+
+            def __call__(self) -> object:
+                return malformed
+
+        _d3_install_fake_verifier(
+            sf,
+            monkeypatch,
+            accepted_commit=accepted_implementation_commit,
+            runner_blob=runner_blob,
+            authority=MalformedAuthority(),
+        )
         with pytest.raises(ValueError, match="verifier source callback"):
             sf.call_postmortem_verify_callback()
 
-    monkeypatch.setitem(
-        sf.__dict__,
-        "__phase8_verify_repository_unchanged__",
-        lambda: ((), ("scripts/__pycache__/phase8_sequence_feasibility.cpython-313.pyc",)),
+    dangerous_pyc = repo_root / "scripts/__pycache__/phase8_sequence_feasibility.cpython-313.pyc"
+    dangerous_pyc.parent.mkdir(parents=True)
+    dangerous_pyc.write_bytes(b"pyc")
+    _d3_install_fake_verifier(
+        sf,
+        monkeypatch,
+        accepted_commit=accepted_implementation_commit,
+        runner_blob=runner_blob,
+        ignored=("scripts/__pycache__/phase8_sequence_feasibility.cpython-313.pyc",),
     )
     with pytest.raises(RuntimeError, match="dangerous ignored import surface"):
         sf.capture_postmortem_source_provenance(input_root, output_root, allowed_paths=set())
 
-    monkeypatch.setitem(sf.__dict__, "__phase8_verify_repository_unchanged__", lambda _path: ((), ()))
+    class ArgumentAuthority:
+        __slots__ = ()
+
+        def __call__(self, _path: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
+            return (), ()
+
+    _d3_install_fake_verifier(
+        sf,
+        monkeypatch,
+        accepted_commit=accepted_implementation_commit,
+        runner_blob=runner_blob,
+        authority=ArgumentAuthority(),
+    )
     with pytest.raises(ValueError, match="no arguments"):
         sf.postmortem_verify_callback()
+
+    alias = repo_root / "artifacts/phase8_toy_lm_bridge/feasibility_005/alias_manifest.json"
+    alias.symlink_to(allowed)
+    _d3_install_fake_verifier(
+        sf,
+        monkeypatch,
+        accepted_commit=accepted_implementation_commit,
+        runner_blob=runner_blob,
+        untracked=(str(alias.relative_to(repo_root)),),
+    )
+    with pytest.raises(RuntimeError, match="non-symlink"):
+        sf.capture_postmortem_source_provenance(input_root, output_root, allowed_paths={allowed.resolve()})
+
+    ignored_exec = repo_root / "artifacts/phase8_toy_lm_bridge/ignored_executable"
+    ignored_exec.write_text("x", encoding="utf-8")
+    ignored_exec.chmod(0o755)
+    _d3_install_fake_verifier(
+        sf,
+        monkeypatch,
+        accepted_commit=accepted_implementation_commit,
+        runner_blob=runner_blob,
+        ignored=(str(ignored_exec.relative_to(repo_root)),),
+    )
+    with pytest.raises(RuntimeError, match="ignored executable"):
+        sf.capture_postmortem_source_provenance(input_root, output_root, allowed_paths=set())
+
+
+def test_d3_postmortem_retained_verifier_binding_rejects_global_replacement_and_same_object_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    loader = _D3FakeClosedRepositoryLoader()
+    authority = _d3_install_fake_verifier(sf, monkeypatch, loader=loader)
+    binding = sf.retained_postmortem_verifier_binding()
+    assert not hasattr(loader, "__dict__")
+    with pytest.raises(RuntimeError, match="sealed"):
+        loader.find_spec = lambda *_args, **_kwargs: None
+    monkeypatch.setitem(
+        sf.__dict__,
+        "__phase8_verify_repository_unchanged__",
+        _D3FakeRepositoryAuthority(
+            accepted_commit="d" * 40,
+            runner_blob="e" * 40,
+            untracked=(),
+            ignored=(),
+            proposal_binding=(sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT, sf.POSTMORTEM_PROPOSAL_PATH, sf.POSTMORTEM_PROPOSAL_BLOB),
+        ),
+    )
+    with pytest.raises(ValueError, match="global|authority changed"):
+        sf.verify_postmortem_verifier_binding(binding)
+
+    loader = _D3FakeClosedRepositoryLoader()
+    _d3_install_fake_verifier(sf, monkeypatch, loader=loader)
+    binding = sf.retained_postmortem_verifier_binding()
+    object.__setattr__(loader, "_sources", MappingProxyType({}))
+    with pytest.raises(ValueError, match="loader binding|source map"):
+        sf.verify_postmortem_verifier_binding(binding)
+
+    authority = _d3_install_fake_verifier(sf, monkeypatch)
+    binding = sf.retained_postmortem_verifier_binding()
+    object.__setattr__(authority, "_ignored", ("backup/phase8-note.txt",))
+    with pytest.raises(ValueError, match="authority binding|sealed state"):
+        sf.verify_postmortem_verifier_binding(binding)
+
+    authority = _d3_install_fake_verifier(sf, monkeypatch)
+    binding = sf.retained_postmortem_verifier_binding()
+    original_call = type(authority).__call__
+
+    def replacement_call(self: object) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        return (), ()
+
+    monkeypatch.setattr(type(authority), "__call__", replacement_call)
+    with pytest.raises(ValueError, match="authority binding|code"):
+        sf.verify_postmortem_verifier_binding(binding)
+    monkeypatch.setattr(type(authority), "__call__", original_call)
+
+    loader = _D3FakeClosedRepositoryLoader()
+    _d3_install_fake_verifier(sf, monkeypatch, loader=loader)
+    binding = sf.retained_postmortem_verifier_binding()
+
+    def replacement_find_spec(self: object, fullname: str, path: object = None, target: object = None) -> object:
+        return None
+
+    monkeypatch.setattr(type(loader), "find_spec", replacement_find_spec)
+    with pytest.raises(ValueError, match="loader binding|method"):
+        sf.verify_postmortem_verifier_binding(binding)
+
+
+def test_d3_postmortem_retained_real_verifier_binding_rejects_transitive_helper_state_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    namespace = _d3_exact_verifier_namespace(sf)
+    repo, head, proposal_blob = _d3_build_exact_verifier_repo(tmp_path / "repo", sf)
+    pinned = _d3_pin_exact_verifier_repo(namespace, repo, head, proposal_blob, sf)
+    try:
+        captured, modes, untracked, ignored = namespace["authenticate_repository"](head)
+        assert untracked == ()
+        assert ignored == ()
+        proposal_binding = namespace["authenticate_proposal"]()
+        authority = namespace["RepositoryAuthority"](
+            head,
+            MappingProxyType(dict(captured)),
+            MappingProxyType(dict(modes)),
+            proposal_binding,
+        )
+        loader = namespace["ClosedRepositoryLoader"](captured)
+        runner_blob = namespace["git_blob_oid"](captured["scripts/phase8_sequence_feasibility.py"])
+        monkeypatch.setattr(sf, "_POSTMORTEM_RETAINED_VERIFIER_BINDING", None)
+        monkeypatch.setattr(sf, "POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT", head)
+        monkeypatch.setattr(sf, "POSTMORTEM_PROPOSAL_BLOB", proposal_blob)
+        monkeypatch.setitem(sf.__dict__, "__phase8_verifier_sha256__", sf.POSTMORTEM_VERIFIER_SHA256)
+        monkeypatch.setitem(sf.__dict__, "__phase8_accepted_implementation_commit__", head)
+        monkeypatch.setitem(sf.__dict__, "__phase8_repository_loader__", loader)
+        monkeypatch.setitem(sf.__dict__, "__phase8_verify_repository_unchanged__", authority)
+        monkeypatch.setitem(sf.__dict__, "__phase8_runner_blob__", runner_blob)
+        monkeypatch.setitem(sf.__dict__, "__phase8_proposal_binding__", proposal_binding)
+        monkeypatch.setitem(sf.__dict__, "__phase8_authority_token__", object())
+        binding = sf.retained_postmortem_verifier_binding()
+
+        original_directory_snapshots = namespace["PINNED_GIT"].directory_snapshots
+        namespace["PINNED_GIT"].directory_snapshots = {}
+        with pytest.raises(ValueError, match="authority binding|helper|sealed state"):
+            sf.verify_postmortem_verifier_binding(binding)
+        namespace["PINNED_GIT"].directory_snapshots = original_directory_snapshots
+        sf.verify_postmortem_verifier_binding(binding)
+
+        pinned_type = namespace["PinnedGitContext"]
+        for method_name in ("revalidate", "git_prefix", "git_environment"):
+            original_method = getattr(pinned_type, method_name)
+
+            def replacement_method(self: object, _name: str = method_name) -> object:
+                return None
+
+            setattr(pinned_type, method_name, replacement_method)
+            try:
+                with pytest.raises(ValueError, match="authority binding|helper|code"):
+                    sf.verify_postmortem_verifier_binding(binding)
+            finally:
+                setattr(pinned_type, method_name, original_method)
+            sf.verify_postmortem_verifier_binding(binding)
+
+        subprocess_module = namespace["subprocess"]
+        original_run = subprocess_module.run
+
+        def replacement_run(*args: object, **kwargs: object) -> object:
+            return original_run(*args, **kwargs)
+
+        subprocess_module.run = replacement_run
+        try:
+            with pytest.raises(ValueError, match="authority binding|helper|code"):
+                sf.verify_postmortem_verifier_binding(binding)
+        finally:
+            subprocess_module.run = original_run
+        sf.verify_postmortem_verifier_binding(binding)
+    finally:
+        _d3_close_exact_pinned(pinned)
+        namespace["PINNED_GIT"] = None
+
+
+def test_d3_postmortem_top_level_prepublication_exception_demote_failure_exits_74(
+    tmp_path: Path,
+) -> None:
+    child = r'''
+import sys
+from pathlib import Path
+sys.path.insert(0, %r)
+import scripts.phase8_sequence_feasibility as sf
+
+base = Path(%r)
+input_root = base / "input"
+output_root = base / "postmortem"
+output_root.parent.mkdir(parents=True, exist_ok=True)
+input_root.mkdir(parents=True, exist_ok=True)
+cell = {
+    "family": "hex_copy",
+    "model_size": "small",
+    "seed": 0,
+    "checkpoint_path": "cell/checkpoint.pt",
+    "generations_path": "cell/generations.jsonl",
+}
+key = ("hex_copy", "small", 0)
+input_binding = {name: None for name in sf.POSTMORTEM_INPUT_BINDING_KEYS}
+input_binding["root"] = str(input_root)
+input_binding["cells"] = [cell]
+shallow = {
+    "allowed_source_paths": set(),
+    "manifest_data": {"environment": dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)},
+}
+deep = {
+    "input_binding": input_binding,
+    "generation_rows": {key: []},
+    "checkpoint_payloads": {key: {}},
+    "cells": [cell],
+}
+sf.validate_postmortem_argument_contract = lambda **kwargs: None
+sf.validate_postmortem_cli_contract = lambda **kwargs: None
+sf.validate_postmortem_input_shallow = lambda root: shallow
+sf.capture_postmortem_source_provenance = lambda *args, **kwargs: sf.SourceSnapshot(
+    commit="d" * 40,
+    status_lines=(),
+    ignored_inputs=(),
+    runner_blob="e" * 40,
+)
+sf.configure_postmortem_deterministic_backend = lambda: None
+sf.validate_postmortem_runtime_against_input = lambda manifest: ({}, {})
+sf.postmortem_proposal_binding = lambda commit: {}
+sf.postmortem_implementation_binding = lambda snapshot: {}
+sf.validate_postmortem_input_deep = lambda root, shallow_binding: deep
+sf.postmortem_record_sets_rng_neutral = lambda: ({"hex_copy": {"train": (), "eval": ()}}, {"record_reconstruction_global_state_unchanged": True})
+sf.snapshot_rng_states = lambda: ("rng",)
+sf.require_rng_states_equal = lambda *args, **kwargs: None
+sf.validate_new_postmortem_root = lambda output: None
+sf.validate_postmortem_current_cells_shallow = lambda cells: list(cells)
+sf.postmortem_file_sha_from_input_binding = lambda binding, path: "a" * 64
+sf.construct_postmortem_model_from_checkpoint = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("forced model construction failure"))
+
+def fail_demote(root_fd):
+    raise sf.FeasibilityPublicationError("forced demotion failure")
+
+sf.demote_postmortem_terminal_markers_at_fd = fail_demote
+sf.run_postmortem_failure(
+    device="cpu",
+    input_root=input_root,
+    output_root=output_root,
+    accepted_proposal_commit="a" * 40,
+    accepted_implementation_commit="b" * 40,
+    environ={},
+)
+raise SystemExit(99)
+''' % (str(REPO_ROOT), str(tmp_path / "child_fail_stop"))
+    completed = subprocess.run(
+        [sys.executable, "-c", child],
+        cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 74, completed.stderr
+    assert "Postmortem terminal demotion failed" in completed.stderr
 
 
 def test_d3_postmortem_preflight_order_stops_before_source_clean_output_or_model(
@@ -7345,7 +8073,9 @@ def test_d3_postmortem_publication_rolls_back_final_identity_mismatch_without_fi
     monkeypatch.setattr(sf, "postmortem_terminal_fingerprint_at", fingerprint_mismatch_after_rename)
     with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
         sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **context)
-    assert rename_calls[:2] == [(temp_root.name, output_root.name), (output_root.name, temp_root.name)]
+    assert rename_calls[0] == (temp_root.name, output_root.name)
+    assert rename_calls[1][0] == "DONE.json"
+    assert (output_root.name, temp_root.name) in rename_calls
     assert not output_root.exists()
     assert temp_root.is_dir()
     assert not (temp_root / "DONE.json").exists()
