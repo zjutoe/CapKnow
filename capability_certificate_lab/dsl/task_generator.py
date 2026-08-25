@@ -84,23 +84,6 @@ def _validate_composition_rules(
         pair_results[pair] = rule.result
 
 
-def _effective_composition_rules(
-    program_map: Mapping[str, Program],
-    composition_rules: Sequence[CompositionRule],
-) -> tuple[CompositionRule, ...]:
-    return tuple(
-        rule
-        for rule in composition_rules
-        if rule.left in program_map and rule.right in program_map and rule.result in program_map
-    )
-
-
-def _build_composition_constraints(
-    composition_rules: Sequence[CompositionRule],
-) -> tuple[dict[str, str], ...]:
-    return tuple(rule.to_dict() for rule in composition_rules)
-
-
 def _build_composition_constraints_checks(
     composition_rules: Sequence[CompositionRule],
 ) -> tuple[Callable[[KnowledgeState], bool], ...]:
@@ -135,11 +118,8 @@ def generate_dsl_world(
     composition_constraint_checks: tuple[Callable[[KnowledgeState], bool], ...] = ()
     if include_composite:
         program_map = _build_composite_rules(program_map, composition_rules)
-        active_composition_rules = _effective_composition_rules(
-            program_map,
-            composition_rules,
-        )
-        composition_constraints = _build_composition_constraints(active_composition_rules)
+        active_composition_rules = tuple(composition_rules)
+        composition_constraints = _to_dicts(active_composition_rules)
         composition_constraint_checks = _build_composition_constraints_checks(active_composition_rules)
 
     all_task_ids = list(program_map.keys())

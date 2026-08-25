@@ -364,7 +364,7 @@ def context_for_payload(task_id: str, split: str, record_index: int) -> Mapping[
     raise AssertionError("unreachable")
 
 
-def _template_id(task_id: str, split: str, record_index: int, *, evaluation_pack: bool) -> tuple[str, str]:
+def _template_id(task_id: str, split: str, record_index: int) -> tuple[str, str]:
     if split == _TRAINING_SPLIT:
         return f"{task_id.lower()}__{_TRAIN_TEMPLATES[record_index % len(_TRAIN_TEMPLATES)]}", "train"
     if split != _EVALUATION_SPLIT:
@@ -619,7 +619,7 @@ def leak_check_model_text(text: str) -> None:
 def _record(split: str, task_id: str, record_index: int) -> SplitRecord:
     task_index = TASK_ORDER.index(task_id)
     context = context_for_payload(task_id, split, record_index)
-    template_id, style = _template_id(task_id, split, record_index, evaluation_pack=split == _EVALUATION_SPLIT)
+    template_id, style = _template_id(task_id, split, record_index)
     payload_id = f"{split}-payload-{task_index:02d}-{record_index:03d}"
     prompt = render_prompt(task_id, context, template_id, style)
     answer = canonical_answer(task_id, context)
@@ -663,16 +663,13 @@ def build_training_corpus(
         control_labels = _randomized_control_labels(seed, count)
     else:
         control_labels = None
-    records: list[SplitRecord] = []
-    for task_id in TRAINING_TASK_ORDER:
-        for record_index in range(count):
-            label = None
-            if control_labels is not None and task_id in SEEN_COMPOSITION_TASKS:
-                label = control_labels[(state_mask, task_id, record_index)]
-            records.append(_training_record(condition, state_mask, task_id, record_index, label))
-    corpus = tuple(records)
-    _validate_training_corpus(corpus, condition, seed, state_mask, corpus_size, control_labels)
-    return corpus
+    return _build_training_corpus_with_labels(
+        condition,
+        seed,
+        state_mask,
+        corpus_size,
+        control_labels,
+    )
 
 
 def build_training_corpora(

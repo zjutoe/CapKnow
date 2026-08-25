@@ -4195,7 +4195,6 @@ def test_diagnostic_failed_terminal_inventory_fields_and_checkpoint_metadata(tmp
 def test_diagnostic_publish_done_requires_exact_paths_and_no_clobber(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
-    monkeypatch.setattr(sf, "validate_diagnostic_done_artifacts", lambda root: None)
 
     def make_done_root(root: Path) -> None:
         root.mkdir(parents=True)
@@ -6176,8 +6175,13 @@ def test_d3_postmortem_cli_contract_and_import_refusal(monkeypatch: pytest.Monke
         assert kwargs["accepted_implementation_commit"] == accepted_implementation_commit
         assert kwargs["environ"] == _d3_env(sf)
 
+    def assert_expected_new_root(candidate: Path) -> None:
+        assert candidate == output_root
+        assert candidate.as_posix() == sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT
+
     original_verifier_context = sf.require_postmortem_verifier_context
     monkeypatch.setattr(sf, "require_postmortem_verifier_context", fake_verifier_context)
+    monkeypatch.setattr(sf, "validate_new_postmortem_root", assert_expected_new_root)
     sf.validate_postmortem_cli_contract(
         device="cuda:0",
         input_root=input_root,

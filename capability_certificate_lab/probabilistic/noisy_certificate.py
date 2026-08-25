@@ -119,13 +119,6 @@ def _state_ids(states: Sequence[KnowledgeState], task_ids: Sequence[str]) -> lis
     return [stable_state_id(state, task_ids) for state in states]
 
 
-def _flatten_query_records(records: list[tuple[str, Sequence[int]]]) -> list[tuple[str, int]]:
-    expanded: list[tuple[str, int]] = []
-    for task_id, values in records:
-        expanded.extend((task_id, _as_binary(value)) for value in values)
-    return expanded
-
-
 def _validate_delta(delta: float) -> None:
     if not isfinite(delta) or not (0.0 <= delta <= 1.0):
         raise ValueError("delta must be a finite number in [0.0, 1.0].")

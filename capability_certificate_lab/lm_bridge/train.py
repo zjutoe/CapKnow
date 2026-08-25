@@ -16,8 +16,6 @@ from capability_certificate_lab.lm_bridge.model import (
     build_model,
 )
 from capability_certificate_lab.lm_bridge.tokenizer import (
-    BOS_ID,
-    EOS_ID,
     MAX_SEQUENCE_LENGTH,
     PAD_ID,
     SEP_ID,
@@ -127,14 +125,8 @@ def response_only_labels(input_ids: torch.Tensor) -> torch.Tensor:
             unpadded_length -= 1
         unpadded = row[:unpadded_length]
         tokenizer.validate_special_token_placement(unpadded, mode="training")
-        if not unpadded or unpadded[0] != BOS_ID:
-            raise ValueError("Training sequences must start with BOS.")
-        if unpadded.count(SEP_ID) != 1 or unpadded[-1] != EOS_ID:
-            raise ValueError("Training sequences must contain one SEP and final EOS before padding.")
         sep_index = unpadded.index(SEP_ID)
         eos_index = len(unpadded) - 1
-        if eos_index <= sep_index:
-            raise ValueError("EOS must follow SEP.")
         for source_position in range(sep_index, eos_index):
             labels[row_index, source_position] = input_ids[row_index, source_position + 1]
     return labels

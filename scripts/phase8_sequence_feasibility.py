@@ -1782,10 +1782,6 @@ def validate_named_diagnostic_matrix(matrix: dict[str, list[dict[str, object]]])
             raise ValueError("Named diagnostic template×target-key balance must be exactly four in every cell.")
 
 
-def utf8_bytes_or_none(value: str | None) -> bytes | None:
-    return None if value is None else value.encode("utf-8")
-
-
 def byte_hamming_distance(left: str, right: str) -> int | None:
     left_bytes = left.encode("utf-8")
     right_bytes = right.encode("utf-8")
@@ -3373,14 +3369,6 @@ def validate_diagnostic_completed_scope_semantics(root: Path, completed_scope: o
             validate_diagnostic_new_array_scope_semantics(root, row, input_root)
 
 
-def validate_diagnostic_done_artifacts(root: Path) -> None:
-    manifest_data = json.loads((root / "manifest.json").read_text())
-    input_root = validate_diagnostic_input_binding(manifest_data.get("input_root"))
-    completed_scope = manifest_data.get("completed_scope")
-    validate_diagnostic_completed_scope(completed_scope, terminal_status="DONE")
-    validate_diagnostic_completed_scope_semantics(root, completed_scope, input_root)
-
-
 def validate_diagnostic_common_semantics(
     root: Path,
     *,
@@ -3597,21 +3585,6 @@ def load_diagnostic_terminal_binding(root: Path) -> tuple[Path, dict[str, object
     if len(lineage_paths) != len(set(lineage_paths)):
         raise ValueError("Diagnostic lineage contains duplicate roots.")
     return terminal, terminal_data, manifest, manifest_sha
-
-
-def flattened_diagnostic_lineage(predecessor_diagnostic_roots: Sequence[Path]) -> list[dict[str, object]]:
-    lineage: list[dict[str, object]] = []
-    for predecessor in predecessor_diagnostic_roots:
-        binding = diagnostic_terminal_binding(predecessor)
-        expected_prior = lineage.copy()
-        if binding.get("diagnostic_lineage") != expected_prior:
-            raise ValueError("Diagnostic predecessor lineage is broken or forged.")
-        binding_without_nested = {key: value for key, value in binding.items() if key != "diagnostic_lineage"}
-        lineage.append(binding_without_nested)
-    paths = [str(binding["path"]) for binding in lineage]
-    if len(paths) != len(set(paths)):
-        raise ValueError("Diagnostic lineage contains a cycle.")
-    return lineage
 
 
 def validate_diagnostic_repair_diff_confined(superseded_source_commit: str, repaired_source_commit: str) -> None:
@@ -5271,10 +5244,6 @@ def run_diagnostic_failure(
             remove_diagnostic_terminal_markers(temp_root)
             raise DiagnosticPublicationError("Diagnostic FAILED terminal failed post-construction validation; temporary root is incomplete.") from post_terminal_exc
         raise
-
-
-def run_suite(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> None:
-    raise TypeError("run_suite requires an explicit device and decision_diagnostic_root under the D2 protocol.")
 
 
 def run_current_suite(
@@ -7205,19 +7174,6 @@ def postmortem_jsonl_bytes(rows: Iterable[dict[str, object]]) -> bytes:
     return ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
 
 
-def require_decimal_histogram(value: object, field_name: str) -> dict[str, int]:
-    if not isinstance(value, dict):
-        raise ValueError(f"{field_name} must be a JSON object histogram.")
-    result: dict[str, int] = {}
-    for key, count in value.items():
-        if not isinstance(key, str) or re.fullmatch(r"(0|[1-9][0-9]*)", key) is None:
-            raise ValueError(f"{field_name} keys must be canonical non-negative decimal integers.")
-        if type(count) is not int or count <= 0:
-            raise ValueError(f"{field_name} values must be positive JSON integers.")
-        result[key] = count
-    return result
-
-
 def sparse_decimal_histogram(values: Iterable[object]) -> dict[str, int]:
     observed: list[int] = []
     for value in values:
@@ -7362,39 +7318,6 @@ def postmortem_exact_argv(
     ]
 
 
-def postmortem_runner_argv(
-    input_root: Path,
-    output_root: Path,
-    accepted_proposal_commit: str,
-    accepted_implementation_commit: str,
-) -> list[str]:
-    full = postmortem_exact_argv(
-        input_root,
-        output_root,
-        accepted_proposal_commit,
-        accepted_implementation_commit,
-        verifier_source=postmortem_verifier_source_from_orig_argv_or_file(),
-    )
-    return full[13:]
-
-
-def postmortem_expected_sys_argv(
-    input_root: Path,
-    output_root: Path,
-    accepted_proposal_commit: str,
-    accepted_implementation_commit: str,
-    *,
-    verifier_source: str,
-) -> list[str]:
-    return ["-c", *postmortem_exact_argv(
-        input_root,
-        output_root,
-        accepted_proposal_commit,
-        accepted_implementation_commit,
-        verifier_source=verifier_source,
-    )[6:]]
-
-
 def postmortem_exact_command(
     input_root: Path,
     output_root: Path,
@@ -7434,13 +7357,6 @@ def postmortem_verifier_source_text() -> str:
     if sha256(raw).hexdigest() != POSTMORTEM_VERIFIER_SHA256:
         raise ValueError("Postmortem verifier source SHA-256 mismatch.")
     return raw.decode("utf-8")
-
-
-def postmortem_verifier_source_from_orig_argv_or_file() -> str:
-    orig = getattr(sys, "orig_argv", None)
-    if isinstance(orig, list) and len(orig) == 24 and all(isinstance(arg, str) for arg in orig):
-        return orig[5]
-    return postmortem_verifier_source_text()
 
 
 def postmortem_kernel_argv() -> list[str]:
