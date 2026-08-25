@@ -547,5 +547,3 @@ def test_frozen_small_medium_model_constants_and_recorded_parameter_counts() -> 
     assert small.parameter_count == sf.FROZEN_PARAMETER_COUNTS["small"] == 133120
     assert medium.parameter_count == sf.FROZEN_PARAMETER_COUNTS["medium"] == 859392
     assert medium.parameter_count > small.parameter_count
-
-
