@@ -9317,80 +9317,6 @@ def postmortem_cell_rows_from_outputs(
     return expected
 
 
-def postmortem_output_inventory(root: Path) -> list[dict[str, object]]:
-    rows = inventory(root)
-    expected_paths = {"cell_metrics.jsonl", "error_taxonomy.jsonl", "summary.json", "teacher_forced_rows.jsonl"}
-    observed_paths = {require_canonical_relative_path(row.get("path"), "postmortem.file_inventory.path") for row in rows}
-    if observed_paths != expected_paths:
-        raise ValueError("Postmortem manifest inventory must bind exactly the four non-manifest, non-terminal files.")
-    return rows
-
-
-def read_all_from_fd(fd: int) -> bytes:
-    chunks: list[bytes] = []
-    while True:
-        chunk = os.read(fd, 1024 * 1024)
-        if not chunk:
-            break
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def postmortem_regular_file_bytes_at(root_fd: int, name: str, field_name: str) -> tuple[bytes, os.stat_result]:
-    try:
-        metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-    except FileNotFoundError as exc:
-        raise ValueError(f"{field_name} must exist.") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ValueError(f"{field_name} must be a regular non-symlink file.")
-    file_fd = os.open(name, postmortem_file_open_flags(), dir_fd=root_fd)
-    try:
-        opened = os.fstat(file_fd)
-        if (
-            opened.st_dev,
-            opened.st_ino,
-            opened.st_mode,
-            opened.st_size,
-        ) != (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_mode,
-            metadata.st_size,
-        ):
-            raise ValueError(f"{field_name} identity changed while opening descriptor.")
-        raw = read_all_from_fd(file_fd)
-        observed = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-        if (
-            observed.st_dev,
-            observed.st_ino,
-            observed.st_mode,
-            observed.st_size,
-        ) != (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_mode,
-            metadata.st_size,
-        ):
-            raise ValueError(f"{field_name} identity changed while reading descriptor.")
-        return raw, metadata
-    finally:
-        os.close(file_fd)
-
-
-def postmortem_file_sha256_at(root_fd: int, name: str) -> str:
-    raw, _metadata = postmortem_regular_file_bytes_at(root_fd, name, f"postmortem.{name}")
-    return sha256(raw).hexdigest()
-
-
-def postmortem_output_inventory_at(root_fd: int) -> list[dict[str, object]]:
-    expected_paths = ("cell_metrics.jsonl", "error_taxonomy.jsonl", "summary.json", "teacher_forced_rows.jsonl")
-    rows: list[dict[str, object]] = []
-    for relative_path in expected_paths:
-        raw, metadata = postmortem_regular_file_bytes_at(root_fd, relative_path, f"postmortem.file_inventory.{relative_path}")
-        rows.append({"path": relative_path, "sha256": sha256(raw).hexdigest(), "bytes": int(metadata.st_size)})
-    return rows
-
-
 def postmortem_output_inventory_guard(guard: PostmortemPublicationGuard) -> list[dict[str, object]]:
     expected_paths = ("cell_metrics.jsonl", "error_taxonomy.jsonl", "summary.json", "teacher_forced_rows.jsonl")
     rows: list[dict[str, object]] = []
@@ -9399,36 +9325,6 @@ def postmortem_output_inventory_guard(guard: PostmortemPublicationGuard) -> list
         _dev, _ino, _mode, byte_count, digest = binding.identity
         rows.append({"path": relative_path, "sha256": digest, "bytes": byte_count})
     return rows
-
-
-def write_postmortem_bytes_at(root_fd: int, name: str, payload: bytes) -> None:
-    if name not in POSTMORTEM_TERMINAL_FILE_NAMES:
-        raise ValueError("Postmortem fd-relative writer only accepts declared terminal file names.")
-    temp_name = f".{name}.tmp.{os.getpid()}.{time.time_ns()}"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    file_fd = os.open(temp_name, flags, 0o644, dir_fd=root_fd)
-    try:
-        view = memoryview(payload)
-        while view:
-            written = os.write(file_fd, view)
-            view = view[written:]
-        os.fsync(file_fd)
-    except Exception:
-        try:
-            os.unlink(temp_name, dir_fd=root_fd)
-        except FileNotFoundError:
-            pass
-        raise
-    finally:
-        os.close(file_fd)
-    try:
-        atomic_rename_noreplace_at(root_fd, temp_name, root_fd, name, name)
-    except Exception:
-        try:
-            os.unlink(temp_name, dir_fd=root_fd)
-        except FileNotFoundError:
-            pass
-        raise
 
 
 def write_postmortem_bytes_under_guard(guard: PostmortemPublicationGuard, name: str, payload: bytes) -> None:
@@ -9494,18 +9390,6 @@ def write_postmortem_jsonl_at(guard: PostmortemPublicationGuard, name: str, rows
     require_postmortem_retained_file_binding(guard, name)
 
 
-def write_postmortem_json(path: Path, value: object) -> None:
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_bytes(postmortem_json_bytes(value))
-    os.replace(temp, path)
-
-
-def write_postmortem_jsonl(path: Path, rows: Iterable[dict[str, object]]) -> None:
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_bytes(postmortem_jsonl_bytes(rows))
-    os.replace(temp, path)
-
-
 def read_canonical_postmortem_json_bytes(raw: bytes, field_name: str) -> dict[str, object]:
     try:
         text = raw.decode("utf-8")
@@ -9517,15 +9401,6 @@ def read_canonical_postmortem_json_bytes(raw: bytes, field_name: str) -> dict[st
     if raw != postmortem_json_bytes(value):
         raise ValueError(f"{field_name} canonical JSON bytes mismatch.")
     return value
-
-
-def read_canonical_postmortem_json(path: Path, field_name: str) -> dict[str, object]:
-    return read_canonical_postmortem_json_bytes(path.read_bytes(), field_name)
-
-
-def read_canonical_postmortem_json_at(root_fd: int, name: str, field_name: str) -> dict[str, object]:
-    raw, _metadata = postmortem_regular_file_bytes_at(root_fd, name, field_name)
-    return read_canonical_postmortem_json_bytes(raw, field_name)
 
 
 def read_canonical_postmortem_json_guard(guard: PostmortemPublicationGuard, name: str, field_name: str) -> dict[str, object]:
@@ -9546,15 +9421,6 @@ def read_canonical_postmortem_jsonl_bytes(raw: bytes, field_name: str) -> list[d
     if raw != postmortem_jsonl_bytes(rows):
         raise ValueError(f"{field_name} canonical JSONL bytes mismatch.")
     return rows
-
-
-def read_canonical_postmortem_jsonl(path: Path, field_name: str) -> list[dict[str, object]]:
-    return read_canonical_postmortem_jsonl_bytes(path.read_bytes(), field_name)
-
-
-def read_canonical_postmortem_jsonl_at(root_fd: int, name: str, field_name: str) -> list[dict[str, object]]:
-    raw, _metadata = postmortem_regular_file_bytes_at(root_fd, name, field_name)
-    return read_canonical_postmortem_jsonl_bytes(raw, field_name)
 
 
 def read_canonical_postmortem_jsonl_guard(guard: PostmortemPublicationGuard, name: str, field_name: str) -> list[dict[str, object]]:
@@ -9591,7 +9457,6 @@ def build_postmortem_summary(
 
 
 def build_postmortem_manifest(
-    root: Path,
     *,
     input_binding: dict[str, object],
     proposal_binding: dict[str, object],
@@ -9600,7 +9465,7 @@ def build_postmortem_manifest(
     environment: dict[str, object],
     deterministic_flags: dict[str, object],
     rng_state_contract: dict[str, bool],
-    file_inventory: list[dict[str, object]] | None = None,
+    file_inventory: list[dict[str, object]],
 ) -> dict[str, object]:
     return {
         "schema_version": POSTMORTEM_SCHEMA_VERSION,
@@ -9615,24 +9480,9 @@ def build_postmortem_manifest(
         "rng_state_contract": rng_state_contract,
         "configuration": input_binding["configuration"],
         "row_counts": dict(POSTMORTEM_ROW_COUNTS),
-        "file_inventory": postmortem_output_inventory(root) if file_inventory is None else file_inventory,
+        "file_inventory": file_inventory,
         "terminal_status": "DONE",
     }
-
-
-def write_postmortem_done(root: Path, *, input_binding: dict[str, object]) -> None:
-    manifest_path = root / "manifest.json"
-    write_postmortem_json(
-        root / "DONE.json",
-        {
-            "schema_version": POSTMORTEM_SCHEMA_VERSION,
-            "status": "DONE",
-            "manifest_path": "manifest.json",
-            "manifest_sha256": file_sha256(manifest_path),
-            "input_manifest_sha256": input_binding["manifest_sha256"],
-            "row_counts": dict(POSTMORTEM_ROW_COUNTS),
-        },
-    )
 
 
 def write_postmortem_done_at(guard: PostmortemPublicationGuard, *, input_binding: dict[str, object]) -> None:
@@ -9832,14 +9682,6 @@ def postmortem_file_full_identity_from_fd(fd: int) -> tuple[int, int, int, int, 
     return (int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_mode), int(metadata.st_size), digest)
 
 
-def postmortem_file_full_identity_from_dir_entry(root_fd: int, name: str) -> tuple[int, int, int, int, str]:
-    file_fd = os.open(name, postmortem_file_open_flags(), dir_fd=root_fd)
-    try:
-        return postmortem_file_full_identity_from_fd(file_fd)
-    finally:
-        os.close(file_fd)
-
-
 def require_postmortem_retained_file_binding(guard: PostmortemPublicationGuard, name: str) -> PostmortemOutputFileBinding:
     require_postmortem_guard_open(guard)
     try:
@@ -10034,111 +9876,6 @@ def require_postmortem_output_path_identity(guard: PostmortemPublicationGuard, s
         raise ValueError(f"Postmortem output root identity changed {stage}.")
 
 
-def postmortem_terminal_root_identity(root: Path) -> tuple[int, int, int]:
-    return postmortem_path_identity(root, field_name="postmortem terminal root", directory=True)
-
-
-def require_postmortem_terminal_root_identity(root: Path, expected: tuple[int, int, int], stage: str) -> None:
-    observed = postmortem_terminal_root_identity(root)
-    if observed != expected:
-        raise ValueError(f"Postmortem terminal root identity changed {stage}.")
-
-
-def postmortem_terminal_file_identity(path: Path) -> tuple[int, int, int, str, int]:
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError as exc:
-        raise ValueError("Postmortem terminal root must contain exactly the six required files.") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("Postmortem terminal root entries must be regular non-symlink files.")
-    digest = sha256_regular_file_no_follow(path, metadata)
-    observed = path.lstat()
-    if (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_size) != (
-        metadata.st_dev,
-        metadata.st_ino,
-        metadata.st_mode,
-        metadata.st_size,
-    ):
-        raise ValueError("Postmortem terminal file identity changed while fingerprinting.")
-    return (int(metadata.st_dev), int(metadata.st_ino), int(metadata.st_mode), digest, int(metadata.st_size))
-
-
-def postmortem_terminal_file_identity_at(root_fd: int, name: str) -> tuple[int, int, int, str, int]:
-    try:
-        metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-    except FileNotFoundError as exc:
-        raise ValueError("Postmortem terminal root must contain exactly the six required files.") from exc
-    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
-        raise ValueError("Postmortem terminal root entries must be regular non-symlink files.")
-    file_fd = os.open(name, postmortem_file_open_flags(), dir_fd=root_fd)
-    try:
-        opened = os.fstat(file_fd)
-        if (
-            opened.st_dev,
-            opened.st_ino,
-            opened.st_mode,
-            opened.st_size,
-        ) != (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_mode,
-            metadata.st_size,
-        ):
-            raise ValueError("Postmortem terminal file identity changed while opening descriptor.")
-        digest = postmortem_file_sha256_from_fd(file_fd)
-        observed = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
-        if (
-            observed.st_dev,
-            observed.st_ino,
-            observed.st_mode,
-            observed.st_size,
-        ) != (
-            metadata.st_dev,
-            metadata.st_ino,
-            metadata.st_mode,
-            metadata.st_size,
-        ):
-            raise ValueError("Postmortem terminal file identity changed while fingerprinting.")
-        return (
-            int(metadata.st_dev),
-            int(metadata.st_ino),
-            int(metadata.st_mode),
-            digest,
-            int(metadata.st_size),
-        )
-    finally:
-        os.close(file_fd)
-
-
-def validate_postmortem_terminal_root_entries(root: Path) -> tuple[tuple[str, int, int, int, str, int], ...]:
-    postmortem_terminal_root_identity(root)
-    try:
-        entry_names = sorted(entry.name for entry in os.scandir(root))
-    except FileNotFoundError as exc:
-        raise ValueError("Postmortem terminal root must exist before publication.") from exc
-    if entry_names != sorted(POSTMORTEM_TERMINAL_FILE_NAMES):
-        raise ValueError("Postmortem terminal root must contain exactly six root-level entries with the required names.")
-    rows: list[tuple[str, int, int, int, str, int]] = []
-    for relative_path in POSTMORTEM_TERMINAL_FILE_NAMES:
-        device, inode, file_type, digest, byte_count = postmortem_terminal_file_identity(root / relative_path)
-        rows.append((relative_path, device, inode, file_type, digest, byte_count))
-    return tuple(rows)
-
-
-def validate_postmortem_terminal_root_entries_at(root_fd: int) -> tuple[tuple[str, int, int, int, str, int], ...]:
-    try:
-        entry_names = sorted(os.listdir(root_fd))
-    except FileNotFoundError as exc:
-        raise ValueError("Postmortem terminal root must exist before publication.") from exc
-    if entry_names != sorted(POSTMORTEM_TERMINAL_FILE_NAMES):
-        raise ValueError("Postmortem terminal root must contain exactly six root-level entries with the required names.")
-    rows: list[tuple[str, int, int, int, str, int]] = []
-    for relative_path in POSTMORTEM_TERMINAL_FILE_NAMES:
-        device, inode, file_type, digest, byte_count = postmortem_terminal_file_identity_at(root_fd, relative_path)
-        rows.append((relative_path, device, inode, file_type, digest, byte_count))
-    return tuple(rows)
-
-
 def validate_postmortem_terminal_root_entries_guard(guard: PostmortemPublicationGuard) -> tuple[tuple[str, int, int, int, str, int], ...]:
     try:
         entry_names = sorted(os.listdir(guard.temp_fd))
@@ -10154,12 +9891,6 @@ def validate_postmortem_terminal_root_entries_guard(guard: PostmortemPublication
     return tuple(rows)
 
 
-def postmortem_terminal_fingerprint(root: Path) -> tuple[tuple[object, ...], ...]:
-    root_device, root_inode, root_type = postmortem_terminal_root_identity(root)
-    file_rows = validate_postmortem_terminal_root_entries(root)
-    return (("__root__", root_device, root_inode, root_type), *file_rows)
-
-
 def postmortem_terminal_fingerprint_at(guard: PostmortemPublicationGuard) -> tuple[tuple[object, ...], ...]:
     require_postmortem_temp_fd_identity(guard, "while fingerprinting")
     root_device, root_inode, root_type = postmortem_fd_identity(
@@ -10169,124 +9900,6 @@ def postmortem_terminal_fingerprint_at(guard: PostmortemPublicationGuard) -> tup
     )
     file_rows = validate_postmortem_terminal_root_entries_guard(guard)
     return (("__root__", root_device, root_inode, root_type), *file_rows)
-
-
-def validate_postmortem_terminal_root(
-    root: Path,
-    output_root: Path,
-    *,
-    expected_input_binding: dict[str, object] | None = None,
-    expected_proposal_binding: dict[str, object] | None = None,
-    expected_implementation_binding: dict[str, object] | None = None,
-    expected_source_snapshot: SourceSnapshot | None = None,
-    expected_teacher_rows: Sequence[dict[str, object]] | None = None,
-    expected_cell_rows: Sequence[dict[str, object]] | None = None,
-    expected_taxonomy_rows: Sequence[dict[str, object]] | None = None,
-) -> None:
-    validate_postmortem_terminal_root_entries(root)
-    terminals = [path.name for path in (root / "DONE.json", root / "FAILED.json") if path.exists()]
-    if terminals != ["DONE.json"]:
-        raise ValueError("Postmortem root must contain DONE.json only; finalized FAILED roots are forbidden.")
-    manifest_path = root / "manifest.json"
-    summary_path = root / "summary.json"
-    if not manifest_path.is_file() or not summary_path.is_file():
-        raise ValueError("Postmortem root must contain manifest.json and summary.json before publication.")
-    manifest = read_canonical_postmortem_json(manifest_path, "postmortem.manifest")
-    summary = read_canonical_postmortem_json(summary_path, "postmortem.summary")
-    done = read_canonical_postmortem_json(root / "DONE.json", "postmortem.done")
-    require_exact_mapping(manifest, POSTMORTEM_MANIFEST_KEYS, "postmortem.manifest")
-    require_exact_mapping(summary, POSTMORTEM_SUMMARY_KEYS, "postmortem.summary")
-    require_exact_mapping(done, POSTMORTEM_DONE_KEYS, "postmortem.done")
-    for record_name, record in (("manifest", manifest), ("summary", summary), ("done", done)):
-        if record.get("schema_version") != POSTMORTEM_SCHEMA_VERSION:
-            raise ValueError(f"Postmortem {record_name} schema_version mismatch.")
-    if manifest["artifact_class"] != POSTMORTEM_ARTIFACT_CLASS or summary["artifact_class"] != POSTMORTEM_ARTIFACT_CLASS:
-        raise ValueError("Postmortem artifact_class mismatch.")
-    if manifest["terminal_status"] != "DONE" or summary["terminal_status"] != "DONE" or done["status"] != "DONE":
-        raise ValueError("Postmortem terminal status mismatch.")
-    input_binding, proposal_binding, implementation_binding = validate_postmortem_bindings(
-        input_binding=manifest["input_binding"],
-        proposal_binding=manifest["proposal_binding"],
-        implementation_binding=manifest["implementation_binding"],
-    )
-    if expected_input_binding is not None and input_binding != expected_input_binding:
-        raise ValueError("Postmortem manifest input_binding does not match the frozen in-memory preflight binding.")
-    if expected_proposal_binding is not None and proposal_binding != expected_proposal_binding:
-        raise ValueError("Postmortem manifest proposal_binding does not match the frozen in-memory proposal binding.")
-    if expected_implementation_binding is not None and implementation_binding != expected_implementation_binding:
-        differing_keys = sorted(
-            key
-            for key in POSTMORTEM_IMPLEMENTATION_BINDING_KEYS
-            if implementation_binding.get(key) != expected_implementation_binding.get(key)
-        )
-        raise ValueError(
-            "Postmortem manifest implementation_binding does not match the frozen in-memory implementation binding"
-            f" for {','.join(differing_keys)}."
-        )
-    if expected_source_snapshot is not None and postmortem_implementation_binding(expected_source_snapshot) != implementation_binding:
-        raise ValueError("Postmortem implementation binding does not match the frozen source snapshot.")
-    if expected_input_binding is None:
-        expected_input_binding = expected_postmortem_input_binding_for_posthoc_validation()
-    if input_binding != expected_input_binding:
-        raise ValueError("Postmortem manifest input_binding does not match the canonical input binding.")
-    if summary["input_binding"] != input_binding or summary["proposal_binding"] != proposal_binding or summary["implementation_binding"] != implementation_binding:
-        raise ValueError("Postmortem summary/manifest binding mismatch.")
-    if manifest["runner_path"] != implementation_binding["runner_path"]:
-        raise ValueError("Postmortem runner_path must equal implementation_binding.runner_path.")
-    if manifest["configuration"] != input_binding["configuration"] or summary["configuration"] != input_binding["configuration"]:
-        raise ValueError("Postmortem configuration must be copied from input_binding.")
-    if manifest["row_counts"] != POSTMORTEM_ROW_COUNTS or summary["row_counts"] != POSTMORTEM_ROW_COUNTS or done["row_counts"] != POSTMORTEM_ROW_COUNTS:
-        raise ValueError("Postmortem row_counts mismatch.")
-    if manifest["environment"] != FEASIBILITY_REQUIRED_RUNTIME_ENV:
-        raise ValueError("Postmortem manifest environment mismatch.")
-    validate_postmortem_exact_command_object(
-        manifest["exact_command"],
-        input_root=Path(POSTMORTEM_REQUIRED_INPUT_ROOT),
-        output_root=output_root,
-        accepted_proposal_commit=POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
-        accepted_implementation_commit=require_exact_str(implementation_binding["commit"], "postmortem.implementation.commit"),
-        runtime_environment=manifest["environment"],
-    )
-    validate_current_deterministic_flags(manifest["deterministic_flags"])
-    rng_contract = require_exact_mapping(manifest["rng_state_contract"], POSTMORTEM_RNG_CONTRACT_KEYS, "postmortem.rng_state_contract")
-    if any(value is not True for value in rng_contract.values()):
-        raise ValueError("Postmortem RNG state contract must contain only true values.")
-    if summary["interpretation_limits"] != {
-        "non_evidence": True,
-        "no_causal_weight_tying_claim": True,
-        "no_verdict_change": True,
-        "no_010d_authority": True,
-    }:
-        raise ValueError("Postmortem interpretation_limits mismatch.")
-    if done["manifest_path"] != "manifest.json" or done["manifest_sha256"] != file_sha256(manifest_path):
-        raise ValueError("Postmortem DONE manifest checksum mismatch.")
-    if done["input_manifest_sha256"] != input_binding["manifest_sha256"]:
-        raise ValueError("Postmortem DONE input manifest checksum mismatch.")
-    if manifest["file_inventory"] != postmortem_output_inventory(root):
-        raise ValueError("Postmortem manifest file_inventory mismatch.")
-    actual_files = {str(path.relative_to(root)) for path in root.rglob("*") if path.is_file()}
-    expected_files = {"teacher_forced_rows.jsonl", "cell_metrics.jsonl", "error_taxonomy.jsonl", "summary.json", "manifest.json", "DONE.json"}
-    if actual_files != expected_files:
-        raise ValueError("Postmortem root contains incomplete or extra files.")
-    teacher_rows = read_canonical_postmortem_jsonl(root / "teacher_forced_rows.jsonl", "postmortem.teacher_forced_rows")
-    cell_rows = read_canonical_postmortem_jsonl(root / "cell_metrics.jsonl", "postmortem.cell_metrics")
-    taxonomy_rows = read_canonical_postmortem_jsonl(root / "error_taxonomy.jsonl", "postmortem.error_taxonomy")
-    records = grouped_records()
-    validate_postmortem_teacher_rows(teacher_rows, input_binding=input_binding, records=records)
-    validate_postmortem_taxonomy_rows(taxonomy_rows, input_binding=input_binding, records=records)
-    rebuilt_cells = postmortem_cell_rows_from_outputs(cell_rows, teacher_rows, taxonomy_rows, input_binding=input_binding)
-    if expected_teacher_rows is not None and teacher_rows != list(expected_teacher_rows):
-        raise ValueError("Postmortem teacher_forced_rows changed after construction.")
-    if expected_cell_rows is not None and rebuilt_cells != list(expected_cell_rows):
-        raise ValueError("Postmortem cell metrics changed after construction.")
-    if expected_taxonomy_rows is not None and taxonomy_rows != list(expected_taxonomy_rows):
-        raise ValueError("Postmortem error_taxonomy rows changed after construction.")
-    if summary["cells"] != rebuilt_cells:
-        raise ValueError("Postmortem summary cells do not match cell_metrics rows.")
-    if summary["named_aggregates"] != postmortem_named_aggregates(taxonomy_rows):
-        raise ValueError("Postmortem Named aggregates do not rebuild from taxonomy rows.")
-    if summary["array_aggregates"] != postmortem_array_aggregates(taxonomy_rows):
-        raise ValueError("Postmortem Array aggregates do not rebuild from taxonomy rows.")
 
 
 def validate_postmortem_terminal_root_at(
@@ -10397,25 +10010,6 @@ def validate_postmortem_terminal_root_at(
         raise ValueError("Postmortem Named aggregates do not rebuild from taxonomy rows.")
     if summary["array_aggregates"] != postmortem_array_aggregates(taxonomy_rows):
         raise ValueError("Postmortem Array aggregates do not rebuild from taxonomy rows.")
-
-
-def validate_postmortem_terminal_inventory_snapshot(root: Path) -> None:
-    validate_postmortem_terminal_root_entries(root)
-    manifest_path = root / "manifest.json"
-    done_path = root / "DONE.json"
-    if not manifest_path.is_file() or not done_path.is_file():
-        raise ValueError("Postmortem root lacks terminal inventory files.")
-    manifest = read_canonical_postmortem_json(manifest_path, "postmortem.final_manifest")
-    done = read_canonical_postmortem_json(done_path, "postmortem.final_done")
-    expected_inventory = postmortem_output_inventory(root)
-    if manifest.get("file_inventory") != expected_inventory:
-        raise ValueError("Postmortem final manifest inventory changed.")
-    if done.get("manifest_sha256") != file_sha256(manifest_path):
-        raise ValueError("Postmortem final DONE manifest checksum changed.")
-    for row in expected_inventory:
-        path = root / require_canonical_relative_path(row.get("path"), "postmortem.final_inventory.path")
-        if row.get("sha256") != file_sha256(path) or row.get("bytes") != path.stat().st_size:
-            raise ValueError("Postmortem final inventory checksum or byte count mismatch.")
 
 
 def validate_postmortem_terminal_inventory_snapshot_at(guard: PostmortemPublicationGuard) -> None:
@@ -10854,7 +10448,6 @@ def finalize_postmortem_outputs_under_guard(
         publication_guard,
         "manifest.json",
         build_postmortem_manifest(
-            temp_root,
             input_binding=input_binding,
             proposal_binding=proposal_binding,
             implementation_binding=implementation_binding,

@@ -5387,67 +5387,109 @@ def _d3_build_synthetic_postmortem_root(
                 generation_rows=generation_rows,
             )
         )
-    output_root.mkdir()
-    sf.write_postmortem_jsonl(output_root / "teacher_forced_rows.jsonl", teacher_rows)
-    sf.write_postmortem_jsonl(output_root / "cell_metrics.jsonl", cell_rows)
-    sf.write_postmortem_jsonl(output_root / "error_taxonomy.jsonl", taxonomy_rows)
-    sf.write_postmortem_json(
-        output_root / "summary.json",
-        sf.build_postmortem_summary(
-            input_binding=input_binding,
-            proposal_binding=proposal_binding,
-            implementation_binding=implementation_binding,
-            cell_rows=cell_rows,
-            taxonomy_rows=taxonomy_rows,
-        ),
-    )
-    sf.write_postmortem_json(
-        output_root / "manifest.json",
-        sf.build_postmortem_manifest(
-            output_root,
-            input_binding=input_binding,
-            proposal_binding=proposal_binding,
-            implementation_binding=implementation_binding,
-            exact_command=sf.postmortem_exact_command(
-                input_root,
-                output_root,
-                sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
-                accepted_implementation_commit,
+    with sf.create_postmortem_publication_guard(output_root) as guard:
+        sf.write_postmortem_jsonl_at(guard, "teacher_forced_rows.jsonl", teacher_rows)
+        sf.write_postmortem_jsonl_at(guard, "cell_metrics.jsonl", cell_rows)
+        sf.write_postmortem_jsonl_at(guard, "error_taxonomy.jsonl", taxonomy_rows)
+        sf.write_postmortem_json_at(
+            guard,
+            "summary.json",
+            sf.build_postmortem_summary(
+                input_binding=input_binding,
+                proposal_binding=proposal_binding,
+                implementation_binding=implementation_binding,
+                cell_rows=cell_rows,
+                taxonomy_rows=taxonomy_rows,
             ),
-            environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
-            deterministic_flags=_current_deterministic_flags(),
-            rng_state_contract={key: True for key in sf.POSTMORTEM_RNG_CONTRACT_KEYS},
-        ),
-    )
-    sf.write_postmortem_done(output_root, input_binding=input_binding)
+        )
+        sf.write_postmortem_json_at(
+            guard,
+            "manifest.json",
+            sf.build_postmortem_manifest(
+                input_binding=input_binding,
+                proposal_binding=proposal_binding,
+                implementation_binding=implementation_binding,
+                exact_command=sf.postmortem_exact_command(
+                    input_root,
+                    output_root,
+                    sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+                    accepted_implementation_commit,
+                ),
+                environment=dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV),
+                deterministic_flags=_current_deterministic_flags(),
+                rng_state_contract={key: True for key in sf.POSTMORTEM_RNG_CONTRACT_KEYS},
+                file_inventory=sf.postmortem_output_inventory_guard(guard),
+            ),
+        )
+        sf.write_postmortem_done_at(guard, input_binding=input_binding)
+    assert not output_root.exists()
+    assert output_root.with_name(output_root.name + ".tmp").is_dir()
     return sf, input_root, output_root
 
 
+def _d3_postmortem_candidate(output_root: Path) -> Path:
+    return output_root.with_name(output_root.name + ".tmp")
+
+
+def _d3_open_postmortem_candidate(sf: object, output_root: Path) -> object:
+    return sf.open_postmortem_publication_guard(_d3_postmortem_candidate(output_root), output_root)
+
+
 def _d3_rebuild_postmortem_manifest_done(sf: object, output_root: Path) -> None:
-    summary = json.loads((output_root / "summary.json").read_text(encoding="utf-8"))
-    manifest_path = output_root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["file_inventory"] = sf.postmortem_output_inventory(output_root)
-    sf.write_postmortem_json(manifest_path, manifest)
-    sf.write_postmortem_done(output_root, input_binding=summary["input_binding"])
+    candidate = _d3_postmortem_candidate(output_root)
+    with _d3_open_postmortem_candidate(sf, output_root) as guard:
+        summary = sf.read_canonical_postmortem_json_guard(guard, "summary.json", "test.summary")
+        manifest = sf.read_canonical_postmortem_json_guard(guard, "manifest.json", "test.manifest")
+        manifest["file_inventory"] = sf.postmortem_output_inventory_guard(guard)
+    manifest_payload = sf.postmortem_json_bytes(manifest)
+    (candidate / "manifest.json").write_bytes(manifest_payload)
+    (candidate / "DONE.json").write_bytes(
+        sf.postmortem_json_bytes(
+            {
+                "schema_version": sf.POSTMORTEM_SCHEMA_VERSION,
+                "status": "DONE",
+                "manifest_path": "manifest.json",
+                "manifest_sha256": sha256(manifest_payload).hexdigest(),
+                "input_manifest_sha256": summary["input_binding"]["manifest_sha256"],
+                "row_counts": dict(sf.POSTMORTEM_ROW_COUNTS),
+            }
+        )
+    )
 
 
 def _d3_expected_publication_context(sf: object, output_root: Path) -> dict[str, object]:
-    manifest = json.loads((output_root / "manifest.json").read_text(encoding="utf-8"))
-    return {
-        "expected_input_binding": manifest["input_binding"],
-        "expected_proposal_binding": manifest["proposal_binding"],
-        "expected_implementation_binding": manifest["implementation_binding"],
-        "expected_source_snapshot": sf.SourceSnapshot(
-            commit=manifest["implementation_binding"]["commit"],
-            status_lines=(),
-            ignored_inputs=(),
-            runner_blob=manifest["implementation_binding"]["runner_blob"],
-        ),
-        "expected_teacher_rows": sf.read_canonical_postmortem_jsonl(output_root / "teacher_forced_rows.jsonl", "test.teacher"),
-        "expected_cell_rows": sf.read_canonical_postmortem_jsonl(output_root / "cell_metrics.jsonl", "test.cells"),
-        "expected_taxonomy_rows": sf.read_canonical_postmortem_jsonl(output_root / "error_taxonomy.jsonl", "test.taxonomy"),
-    }
+    with _d3_open_postmortem_candidate(sf, output_root) as guard:
+        manifest = sf.read_canonical_postmortem_json_guard(guard, "manifest.json", "test.manifest")
+        return {
+            "expected_input_binding": manifest["input_binding"],
+            "expected_proposal_binding": manifest["proposal_binding"],
+            "expected_implementation_binding": manifest["implementation_binding"],
+            "expected_source_snapshot": sf.SourceSnapshot(
+                commit=manifest["implementation_binding"]["commit"],
+                status_lines=(),
+                ignored_inputs=(),
+                runner_blob=manifest["implementation_binding"]["runner_blob"],
+            ),
+            "expected_teacher_rows": sf.read_canonical_postmortem_jsonl_guard(guard, "teacher_forced_rows.jsonl", "test.teacher"),
+            "expected_cell_rows": sf.read_canonical_postmortem_jsonl_guard(guard, "cell_metrics.jsonl", "test.cells"),
+            "expected_taxonomy_rows": sf.read_canonical_postmortem_jsonl_guard(guard, "error_taxonomy.jsonl", "test.taxonomy"),
+        }
+
+
+def _d3_validate_postmortem_candidate(
+    sf: object,
+    output_root: Path,
+    *,
+    validation_output_root: Path | None = None,
+    **context: object,
+) -> None:
+    with _d3_open_postmortem_candidate(sf, output_root) as guard:
+        sf.validate_postmortem_terminal_root_at(
+            guard,
+            output_root if validation_output_root is None else validation_output_root,
+            **context,
+        )
+        sf.validate_postmortem_terminal_inventory_snapshot_at(guard)
 
 
 def _d3_minimal_publication_context(sf: object) -> dict[str, object]:
@@ -6129,13 +6171,13 @@ def test_d3_postmortem_permanent_no_selection_no_retry_no_006_no_010d_boundaries
     for field in ("no_verdict_change", "no_010d_authority"):
         sf, _input_root, synthetic_output_root = _d3_build_synthetic_postmortem_root(tmp_path / field, monkeypatch)
         context = _d3_expected_publication_context(sf, synthetic_output_root)
-        summary_path = synthetic_output_root / "summary.json"
+        summary_path = _d3_postmortem_candidate(synthetic_output_root) / "summary.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         summary["interpretation_limits"][field] = False
-        sf.write_postmortem_json(summary_path, summary)
+        summary_path.write_bytes(sf.postmortem_json_bytes(summary))
         _d3_rebuild_postmortem_manifest_done(sf, synthetic_output_root)
         with pytest.raises(ValueError, match="interpretation_limits"):
-            sf.validate_postmortem_terminal_root(synthetic_output_root, synthetic_output_root, **context)
+            _d3_validate_postmortem_candidate(sf, synthetic_output_root, **context)
 
 
 def test_d3_postmortem_cli_rejects_non_repo_cwd_before_shallow_or_output(
@@ -6562,7 +6604,8 @@ def test_d3_postmortem_preflight_order_stops_before_source_clean_output_or_model
         "validate_postmortem_input_deep",
         "postmortem_record_sets_rng_neutral",
         "construct_postmortem_model_from_checkpoint",
-        "write_postmortem_jsonl",
+        "create_postmortem_publication_guard",
+        "write_postmortem_jsonl_at",
     ):
         monkeypatch.setattr(sf, name, lambda *args, _name=name, **kwargs: (_ for _ in ()).throw(AssertionError(f"{_name} ran before source cleanliness")))
 
@@ -6828,7 +6871,6 @@ def test_d3_postmortem_constructor_inference_callbacks_and_publication_preserve_
 
         monkeypatch.setattr(sf, "BATCH_SIZE", original_batch_size)
         monkeypatch.setattr(sf, "TRAIN_RECORDS_PER_FAMILY", original_train_records_per_family)
-        output_root.rename(temp_root)
         callback_count = 0
 
         def assert_rng_unchanged_callback() -> None:
@@ -7482,8 +7524,8 @@ def test_d3_postmortem_done_publication_schema_aggregates_and_mutation_rejection
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    sf.validate_postmortem_terminal_root(output_root, output_root, **context)
-    summary_path = output_root / "summary.json"
+    _d3_validate_postmortem_candidate(sf, output_root, **context)
+    summary_path = _d3_postmortem_candidate(output_root) / "summary.json"
     summary = json.loads(summary_path.read_text())
     assert summary["interpretation_limits"] == {
         "non_evidence": True,
@@ -7495,14 +7537,10 @@ def test_d3_postmortem_done_publication_schema_aggregates_and_mutation_rejection
     assert len(summary["named_aggregates"]) == 6
     assert len(summary["array_aggregates"]) == 24
     summary["named_aggregates"][0]["denominator"] = 63
-    sf.write_postmortem_json(summary_path, summary)
-    manifest_path = output_root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["file_inventory"] = sf.postmortem_output_inventory(output_root)
-    sf.write_postmortem_json(manifest_path, manifest)
-    sf.write_postmortem_done(output_root, input_binding=summary["input_binding"])
+    summary_path.write_bytes(sf.postmortem_json_bytes(summary))
+    _d3_rebuild_postmortem_manifest_done(sf, output_root)
     with pytest.raises(ValueError, match="Named aggregates"):
-        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+        _d3_validate_postmortem_candidate(sf, output_root, **context)
 
 
 def test_d3_postmortem_terminal_rejects_forged_composite_bindings(
@@ -7518,9 +7556,10 @@ def test_d3_postmortem_terminal_rejects_forged_composite_bindings(
     for index, (binding_name, mutate, match) in enumerate(cases):
         sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / f"case_{index}", monkeypatch)
         context = _d3_expected_publication_context(sf, output_root)
-        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
-        summary_path = output_root / "summary.json"
-        manifest_path = output_root / "manifest.json"
+        _d3_validate_postmortem_candidate(sf, output_root, **context)
+        candidate = _d3_postmortem_candidate(output_root)
+        summary_path = candidate / "summary.json"
+        manifest_path = candidate / "manifest.json"
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         replacement = mutate(json.loads(json.dumps(manifest[binding_name])))
@@ -7529,11 +7568,11 @@ def test_d3_postmortem_terminal_rejects_forged_composite_bindings(
         if binding_name == "input_binding":
             summary["configuration"] = replacement["configuration"]
             manifest["configuration"] = replacement["configuration"]
-        sf.write_postmortem_json(summary_path, summary)
-        sf.write_postmortem_json(manifest_path, manifest)
+        summary_path.write_bytes(sf.postmortem_json_bytes(summary))
+        manifest_path.write_bytes(sf.postmortem_json_bytes(manifest))
         _d3_rebuild_postmortem_manifest_done(sf, output_root)
         with pytest.raises(ValueError, match=match):
-            sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+            _d3_validate_postmortem_candidate(sf, output_root, **context)
 
 
 def test_d3_postmortem_terminal_rejects_canonical_byte_and_teacher_row_bypass(
@@ -7542,27 +7581,27 @@ def test_d3_postmortem_terminal_rejects_canonical_byte_and_teacher_row_bypass(
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "canonical_json", monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    sf.validate_postmortem_terminal_root(output_root, output_root, **context)
-    summary_path = output_root / "summary.json"
+    _d3_validate_postmortem_candidate(sf, output_root, **context)
+    summary_path = _d3_postmortem_candidate(output_root) / "summary.json"
     summary_path.write_bytes(summary_path.read_bytes().replace(b"\n", b" \n", 1))
     with pytest.raises(ValueError, match="canonical JSON bytes"):
-        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+        _d3_validate_postmortem_candidate(sf, output_root, **context)
 
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "canonical_jsonl", monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    teacher_path = output_root / "teacher_forced_rows.jsonl"
+    teacher_path = _d3_postmortem_candidate(output_root) / "teacher_forced_rows.jsonl"
     first_line, rest = teacher_path.read_bytes().split(b"\n", 1)
     teacher_path.write_bytes(first_line + b" \n" + rest)
     _d3_rebuild_postmortem_manifest_done(sf, output_root)
     with pytest.raises(ValueError, match="canonical JSONL bytes"):
-        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+        _d3_validate_postmortem_candidate(sf, output_root, **context)
 
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "negative_zero", monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    summary_path = output_root / "summary.json"
+    summary_path = _d3_postmortem_candidate(output_root) / "summary.json"
     summary_path.write_bytes(summary_path.read_bytes().replace(b'"training_accuracy": 0.5', b'"training_accuracy": -0.0', 1))
     with pytest.raises(ValueError, match="negative zero"):
-        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+        _d3_validate_postmortem_candidate(sf, output_root, **context)
 
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "teacher_expected", monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
@@ -7571,7 +7610,7 @@ def test_d3_postmortem_terminal_rejects_canonical_byte_and_teacher_row_bypass(
     bad_teacher_rows[0]["operand_id"] = "synthetic-forged-operand"
     bad_context["expected_teacher_rows"] = bad_teacher_rows
     with pytest.raises(ValueError, match="teacher_forced_rows changed"):
-        sf.validate_postmortem_terminal_root(output_root, output_root, **bad_context)
+        _d3_validate_postmortem_candidate(sf, output_root, **bad_context)
 
 
 def test_d3_postmortem_terminal_rejects_schema_type_null_order_cardinality_runtime_and_terminal_mutations(
@@ -7580,104 +7619,118 @@ def test_d3_postmortem_terminal_rejects_schema_type_null_order_cardinality_runti
 ) -> None:
     sf, _input_root, base_output_root = _d3_build_synthetic_postmortem_root(tmp_path / "base", monkeypatch)
     context = _d3_expected_publication_context(sf, base_output_root)
-    sf.validate_postmortem_terminal_root(base_output_root, base_output_root, **context)
+    _d3_validate_postmortem_candidate(sf, base_output_root, **context)
 
     def fresh_root(name: str) -> Path:
-        candidate = tmp_path / f"{name}_root"
-        shutil.copytree(base_output_root, candidate)
-        return candidate
+        output_root = tmp_path / f"{name}_root"
+        shutil.copytree(_d3_postmortem_candidate(base_output_root), _d3_postmortem_candidate(output_root))
+        assert not output_root.exists()
+        return output_root
 
     def rewrite_rows(root: Path, relative_path: str, rows: list[dict[str, object]]) -> None:
-        sf.write_postmortem_jsonl(root / relative_path, rows)
+        (_d3_postmortem_candidate(root) / relative_path).write_bytes(sf.postmortem_jsonl_bytes(rows))
         _d3_rebuild_postmortem_manifest_done(sf, root)
 
     root = fresh_root("teacher_closed_schema")
-    rows = sf.read_canonical_postmortem_jsonl(root / "teacher_forced_rows.jsonl", "teacher")
+    rows = sf.read_canonical_postmortem_jsonl_bytes(
+        (_d3_postmortem_candidate(root) / "teacher_forced_rows.jsonl").read_bytes(),
+        "teacher",
+    )
     rows[0]["unexpected"] = True
     rewrite_rows(root, "teacher_forced_rows.jsonl", rows)
     with pytest.raises(ValueError, match="closed schema|teacher_forced_rows changed"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("teacher_order")
-    rows = sf.read_canonical_postmortem_jsonl(root / "teacher_forced_rows.jsonl", "teacher")
+    rows = sf.read_canonical_postmortem_jsonl_bytes(
+        (_d3_postmortem_candidate(root) / "teacher_forced_rows.jsonl").read_bytes(),
+        "teacher",
+    )
     rows[0], rows[1] = rows[1], rows[0]
     rewrite_rows(root, "teacher_forced_rows.jsonl", rows)
     with pytest.raises(ValueError, match="record_index|teacher_forced_rows changed|mismatch"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("teacher_cardinality")
-    rows = sf.read_canonical_postmortem_jsonl(root / "teacher_forced_rows.jsonl", "teacher")
+    rows = sf.read_canonical_postmortem_jsonl_bytes(
+        (_d3_postmortem_candidate(root) / "teacher_forced_rows.jsonl").read_bytes(),
+        "teacher",
+    )
     rewrite_rows(root, "teacher_forced_rows.jsonl", rows[:-1])
     with pytest.raises(ValueError, match="cardinality|teacher_forced_rows changed"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("cell_type")
-    rows = sf.read_canonical_postmortem_jsonl(root / "cell_metrics.jsonl", "cell")
+    rows = sf.read_canonical_postmortem_jsonl_bytes(
+        (_d3_postmortem_candidate(root) / "cell_metrics.jsonl").read_bytes(),
+        "cell",
+    )
     rows[0]["seed"] = "0"
     rewrite_rows(root, "cell_metrics.jsonl", rows)
     with pytest.raises(ValueError, match="seed.*integer|cell metrics changed|closed schema"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("taxonomy_null")
-    rows = sf.read_canonical_postmortem_jsonl(root / "error_taxonomy.jsonl", "taxonomy")
+    rows = sf.read_canonical_postmortem_jsonl_bytes(
+        (_d3_postmortem_candidate(root) / "error_taxonomy.jsonl").read_bytes(),
+        "taxonomy",
+    )
     rows[0]["named"] = {}
     rewrite_rows(root, "error_taxonomy.jsonl", rows)
     with pytest.raises(ValueError, match="taxonomy row|error_taxonomy rows changed"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("summary_schema")
-    summary_path = root / "summary.json"
+    summary_path = _d3_postmortem_candidate(root) / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     summary["unexpected"] = True
-    sf.write_postmortem_json(summary_path, summary)
+    summary_path.write_bytes(sf.postmortem_json_bytes(summary))
     _d3_rebuild_postmortem_manifest_done(sf, root)
     with pytest.raises(ValueError, match="summary.*closed schema"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("summary_null_boundary")
-    summary_path = root / "summary.json"
+    summary_path = _d3_postmortem_candidate(root) / "summary.json"
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
     summary["interpretation_limits"]["no_010d_authority"] = None
-    sf.write_postmortem_json(summary_path, summary)
+    summary_path.write_bytes(sf.postmortem_json_bytes(summary))
     _d3_rebuild_postmortem_manifest_done(sf, root)
     with pytest.raises(ValueError, match="interpretation_limits"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("manifest_schema")
-    manifest_path = root / "manifest.json"
+    manifest_path = _d3_postmortem_candidate(root) / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["unexpected"] = True
-    manifest["file_inventory"] = sf.postmortem_output_inventory(root)
-    sf.write_postmortem_json(manifest_path, manifest)
-    sf.write_postmortem_done(root, input_binding=manifest["input_binding"])
+    manifest_path.write_bytes(sf.postmortem_json_bytes(manifest))
+    _d3_rebuild_postmortem_manifest_done(sf, root)
     with pytest.raises(ValueError, match="manifest.*closed schema"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("runtime_environment")
-    manifest_path = root / "manifest.json"
+    manifest_path = _d3_postmortem_candidate(root) / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["environment"] = {**manifest["environment"], "forged_runtime": "present"}
-    manifest["file_inventory"] = sf.postmortem_output_inventory(root)
-    sf.write_postmortem_json(manifest_path, manifest)
-    sf.write_postmortem_done(root, input_binding=manifest["input_binding"])
+    manifest_path.write_bytes(sf.postmortem_json_bytes(manifest))
+    _d3_rebuild_postmortem_manifest_done(sf, root)
     with pytest.raises(ValueError, match="environment mismatch"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("done_schema")
-    done_path = root / "DONE.json"
+    done_path = _d3_postmortem_candidate(root) / "DONE.json"
     done = json.loads(done_path.read_text(encoding="utf-8"))
     done["unexpected"] = True
-    sf.write_postmortem_json(done_path, done)
+    done_path.write_bytes(sf.postmortem_json_bytes(done))
     with pytest.raises(ValueError, match="done.*closed schema"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
     root = fresh_root("done_null_row_count")
-    done_path = root / "DONE.json"
+    done_path = _d3_postmortem_candidate(root) / "DONE.json"
     done = json.loads(done_path.read_text(encoding="utf-8"))
     done["row_counts"]["cell_metrics"] = None
-    sf.write_postmortem_json(done_path, done)
+    done_path.write_bytes(sf.postmortem_json_bytes(done))
     with pytest.raises(ValueError, match="row_counts mismatch"):
-        sf.validate_postmortem_terminal_root(root, base_output_root, **context)
+        _d3_validate_postmortem_candidate(sf, root, validation_output_root=base_output_root, **context)
 
 
 def test_d3_postmortem_publication_rejects_coherent_callback_output_rewrite_without_rename_or_terminal_marker(
@@ -7686,20 +7739,15 @@ def test_d3_postmortem_publication_rejects_coherent_callback_output_rewrite_with
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    temp_root = output_root.with_name(output_root.name + ".tmp")
-    output_root.rename(temp_root)
+    temp_root = _d3_postmortem_candidate(output_root)
     assert not output_root.exists()
 
     def mutate_teacher_rows_after_validation() -> None:
         teacher_path = temp_root / "teacher_forced_rows.jsonl"
-        rows = sf.read_canonical_postmortem_jsonl(teacher_path, "callback.teacher")
+        rows = sf.read_canonical_postmortem_jsonl_bytes(teacher_path.read_bytes(), "callback.teacher")
         rows[0]["operand_id"] = "forged-with-aggregate-preserved"
-        sf.write_postmortem_jsonl(teacher_path, rows)
-        manifest_path = temp_root / "manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["file_inventory"] = sf.postmortem_output_inventory(temp_root)
-        sf.write_postmortem_json(manifest_path, manifest)
-        sf.write_postmortem_done(temp_root, input_binding=manifest["input_binding"])
+        teacher_path.write_bytes(sf.postmortem_jsonl_bytes(rows))
+        _d3_rebuild_postmortem_manifest_done(sf, output_root)
 
     with pytest.raises(sf.FeasibilityPublicationError, match="temporary root is incomplete"):
         sf.publish_postmortem_root_or_leave_incomplete(
@@ -7720,16 +7768,17 @@ def test_d3_postmortem_terminal_root_rejects_extra_directory_and_non_file_entrie
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "extra_dir", monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    (output_root / "empty_extra_dir").mkdir()
+    (_d3_postmortem_candidate(output_root) / "empty_extra_dir").mkdir()
     with pytest.raises(ValueError, match="exactly six root-level entries"):
-        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+        _d3_validate_postmortem_candidate(sf, output_root, **context)
 
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / "non_file", monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    (output_root / "DONE.json").unlink()
-    (output_root / "DONE.json").mkdir()
-    with pytest.raises(ValueError, match="regular non-symlink files"):
-        sf.validate_postmortem_terminal_root(output_root, output_root, **context)
+    done_path = _d3_postmortem_candidate(output_root) / "DONE.json"
+    done_path.unlink()
+    done_path.mkdir()
+    with pytest.raises(ValueError, match="regular non-symlink files|retained output binding is absent"):
+        _d3_validate_postmortem_candidate(sf, output_root, **context)
 
 
 def test_d3_postmortem_guarded_publication_never_calls_path_based_terminal_validators(
@@ -7738,19 +7787,23 @@ def test_d3_postmortem_guarded_publication_never_calls_path_based_terminal_valid
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    temp_root = output_root.with_name(output_root.name + ".tmp")
-    output_root.rename(temp_root)
-    monkeypatch.setattr(
-        sf,
-        "validate_postmortem_terminal_root",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("path terminal validator used by guarded publish")),
-    )
-    monkeypatch.setattr(
-        sf,
-        "validate_postmortem_terminal_inventory_snapshot",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("path inventory validator used by guarded publish")),
-    )
+    temp_root = _d3_postmortem_candidate(output_root)
+    validation_calls = Counter()
+    real_validate_root_at = sf.validate_postmortem_terminal_root_at
+    real_validate_inventory_at = sf.validate_postmortem_terminal_inventory_snapshot_at
+
+    def count_validate_root_at(*args: object, **kwargs: object) -> None:
+        validation_calls["root_at"] += 1
+        real_validate_root_at(*args, **kwargs)
+
+    def count_validate_inventory_at(*args: object, **kwargs: object) -> None:
+        validation_calls["inventory_at"] += 1
+        real_validate_inventory_at(*args, **kwargs)
+
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_root_at", count_validate_root_at)
+    monkeypatch.setattr(sf, "validate_postmortem_terminal_inventory_snapshot_at", count_validate_inventory_at)
     sf.publish_postmortem_root_or_leave_incomplete(temp_root, output_root, **context)
+    assert validation_calls == {"root_at": 4, "inventory_at": 2}
     assert output_root.is_dir()
     assert not temp_root.exists()
     assert (output_root / "DONE.json").is_file()
@@ -7762,8 +7815,7 @@ def test_d3_postmortem_guarded_publication_binds_fd_across_transient_same_byte_p
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    temp_root = output_root.with_name(output_root.name + ".tmp")
-    output_root.rename(temp_root)
+    temp_root = _d3_postmortem_candidate(output_root)
     original_temp = tmp_path / "trusted_original_temp"
     replacement = tmp_path / "same_byte_replacement"
     shutil.copytree(temp_root, replacement)
@@ -7779,16 +7831,6 @@ def test_d3_postmortem_guarded_publication_binds_fd_across_transient_same_byte_p
         temp_root.rename(replacement)
         original_temp.rename(temp_root)
 
-    monkeypatch.setattr(
-        sf,
-        "validate_postmortem_terminal_root",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("path terminal validator used during transient swap test")),
-    )
-    monkeypatch.setattr(
-        sf,
-        "validate_postmortem_terminal_inventory_snapshot",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("path inventory validator used during transient swap test")),
-    )
     sf.publish_postmortem_root_or_leave_incomplete(
         temp_root,
         output_root,
@@ -7808,8 +7850,7 @@ def test_d3_postmortem_publication_rejects_parent_and_temp_chmod_drift_across_ca
     for drift_target in ("parent", "temp"):
         sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path / drift_target, monkeypatch)
         context = _d3_expected_publication_context(sf, output_root)
-        temp_root = output_root.with_name(output_root.name + ".tmp")
-        output_root.rename(temp_root)
+        temp_root = _d3_postmortem_candidate(output_root)
         parent = temp_root.parent
         original_parent_mode = stat.S_IMODE(parent.stat().st_mode)
         original_temp_mode = stat.S_IMODE(temp_root.stat().st_mode)
@@ -7848,8 +7889,7 @@ def test_d3_postmortem_publication_rejects_output_chmod_drift_after_atomic_renam
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    temp_root = output_root.with_name(output_root.name + ".tmp")
-    output_root.rename(temp_root)
+    temp_root = _d3_postmortem_candidate(output_root)
     real_rename_at = sf.atomic_rename_noreplace_at
     rename_calls: list[tuple[str, str]] = []
 
@@ -7909,8 +7949,7 @@ def test_d3_postmortem_publication_demotes_nonregular_done_marker_forms_without_
     try:
         sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(base_root, monkeypatch)
         context = _d3_expected_publication_context(sf, output_root)
-        temp_root = output_root.with_name(output_root.name + ".tmp")
-        output_root.rename(temp_root)
+        temp_root = _d3_postmortem_candidate(output_root)
         done_path = temp_root / "DONE.json"
         done_path.unlink()
         external_target = base_root / f"{marker_kind}_external_done_target"
@@ -7960,8 +7999,7 @@ def test_d3_postmortem_publication_rejects_temp_root_symlink_swap_without_follow
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    temp_root = output_root.with_name(output_root.name + ".tmp")
-    output_root.rename(temp_root)
+    temp_root = _d3_postmortem_candidate(output_root)
     external_copy = tmp_path / "external_copy"
     original_temp = tmp_path / "original_temp"
     shutil.copytree(temp_root, external_copy)
@@ -7997,8 +8035,7 @@ def test_d3_postmortem_publication_rejects_same_byte_temp_directory_inode_swap_a
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    temp_root = output_root.with_name(output_root.name + ".tmp")
-    output_root.rename(temp_root)
+    temp_root = _d3_postmortem_candidate(output_root)
     replacement = tmp_path / "same_byte_replacement"
     callback_ran = False
 
@@ -8032,8 +8069,7 @@ def test_d3_postmortem_publication_rolls_back_final_identity_mismatch_without_fi
 ) -> None:
     sf, _input_root, output_root = _d3_build_synthetic_postmortem_root(tmp_path, monkeypatch)
     context = _d3_expected_publication_context(sf, output_root)
-    temp_root = output_root.with_name(output_root.name + ".tmp")
-    output_root.rename(temp_root)
+    temp_root = _d3_postmortem_candidate(output_root)
     rename_calls: list[tuple[str, str]] = []
     real_rename_at = sf.atomic_rename_noreplace_at
 
