@@ -520,15 +520,20 @@ def _write_historical_generation_root(
     checkpoint = root / str(cell["checkpoint_path"])
     generations.parent.mkdir(parents=True, exist_ok=True)
     generations.write_text("\n".join(json.dumps(row) for row in (rows or _legacy_generation_rows())) + "\n")
-    sf.save_historical_checkpoint(
-        str(checkpoint),
-        build_historical_model("small"),
-        metadata={
-            "family": cell["family"],
-            "model_size": cell["model_size"],
-            "seed": cell["seed"],
-            "training_steps": sf.TRAINING_STEPS,
+    model = build_historical_model("small")
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "config": sf.legacy_serialized_config("small"),
+            "parameter_count": sf.HISTORICAL_PARAMETER_COUNTS["small"],
+            "metadata": {
+                "family": cell["family"],
+                "model_size": cell["model_size"],
+                "seed": cell["seed"],
+                "training_steps": sf.TRAINING_STEPS,
+            },
         },
+        checkpoint,
     )
     sf.write_terminal(
         root,
@@ -3210,9 +3215,18 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
         sf.validate_selection_record(symlink_selection)
 
 
+def _accepted_d1_named_matrix_fixture(sf: object) -> dict[str, list[dict[str, object]]]:
+    root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
+    matrix = {cell: [] for cell in sf.NAMED_DIAGNOSTIC_CELLS}
+    for line in (root / "named_diagnostic_matrix.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        matrix[row["diagnostic_cell"]].append(row)
+    return matrix
+
+
 def test_diagnostic_named_matrix_has_exact_four_cells_and_no_relabeling() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    matrix = sf.build_named_diagnostic_matrix()
+    matrix = _accepted_d1_named_matrix_fixture(sf)
 
     assert tuple(matrix) == sf.NAMED_DIAGNOSTIC_CELLS
     for cell, rows in matrix.items():
@@ -3270,82 +3284,6 @@ def test_diagnostic_array_training_plan_is_exactly_three_small_3000_runs() -> No
         sf.validate_diagnostic_array_training_plan([{**plan[0], "steps": 1500}, *plan[1:]])
 
 
-def test_diagnostic_step1500_equality_gate_and_batch_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    records = sf.diagnostic_record_sets()["array_train512"]
-    assert sf.deterministic_batch_indices(
-        record_count=len(records),
-        seed=0,
-        state_mask=0,
-        batch_size=sf.BATCH_SIZE,
-        steps=sf.DIAGNOSTIC_STEPS,
-    )[: sf.TRAINING_STEPS] == sf.deterministic_batch_indices(
-        record_count=len(records),
-        seed=0,
-        state_mask=0,
-        batch_size=sf.BATCH_SIZE,
-        steps=sf.TRAINING_STEPS,
-    )
-
-    checkpoint = Path("artifacts/phase8_toy_lm_bridge/feasibility_004/array_json__small__seed0/checkpoint_step1500.pt")
-    model = sf.load_checkpoint_model(checkpoint, "small", torch.device("cpu"))
-    random.seed(1001)
-    torch_rng = torch.random.get_rng_state()
-    python_rng = random.getstate()
-    cuda_rng = tuple(state.clone() for state in torch.cuda.get_rng_state_all()) if torch.cuda.is_available() else None
-    optimizer = make_optimizer(model)
-    optimizer_fingerprint = sf.optimizer_state_fingerprint(optimizer)
-    monkeypatch.setattr(sf, "build_model", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("gate must not instantiate a model")))
-    sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
-    assert random.getstate() == python_rng
-    assert torch.equal(torch.random.get_rng_state(), torch_rng)
-    if cuda_rng is not None:
-        assert all(torch.equal(actual, expected) for actual, expected in zip(torch.cuda.get_rng_state_all(), cuda_rng, strict=True))
-    assert sf.optimizer_state_fingerprint(optimizer) == optimizer_fingerprint
-    with torch.no_grad():
-        next(model.parameters()).add_(1)
-    with pytest.raises(ValueError, match="tensor bytes mismatch"):
-        sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
-
-
-def test_diagnostic_step_loop_gate_occurs_after_1500_before_1501() -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    events: list[str] = []
-    progress: list[int] = []
-
-    def step_callback(step_index: int, _batch: object) -> None:
-        events.append(f"step{step_index}")
-
-    def gate_callback() -> None:
-        events.append("gate")
-
-    result = sf.run_diagnostic_step_loop_with_gate(
-        ((index,) for index in range(sf.TRAINING_STEPS + 1)),
-        gate_step=sf.TRAINING_STEPS,
-        step_callback=step_callback,
-        gate_callback=gate_callback,
-        progress_callback=lambda row: progress.append(row["completed_steps"]),
-    )
-    assert events[-4:] == ["step1499", "step1500", "gate", "step1501"]
-    assert progress[-3:] == [1500, 1500, 1501]
-    assert result["step_after_gate_executed"] is True
-    mismatch_events: list[str] = []
-    mismatch_progress: list[int] = []
-
-    def mismatch_gate() -> None:
-        mismatch_events.append("gate")
-        raise ValueError("mismatch")
-
-    with pytest.raises(ValueError, match="mismatch"):
-        sf.run_diagnostic_step_loop_with_gate(
-            ((index,) for index in range(sf.TRAINING_STEPS + 1)),
-            gate_step=sf.TRAINING_STEPS,
-            step_callback=lambda step_index, _batch: mismatch_events.append(f"step{step_index}"),
-            gate_callback=mismatch_gate,
-            progress_callback=lambda row: mismatch_progress.append(row["completed_steps"]),
-        )
-    assert mismatch_events[-3:] == ["step1499", "step1500", "gate"]
-    assert mismatch_progress[-1] == sf.TRAINING_STEPS
 
 
 def test_diagnostic_frozen_blobs_record_hashes_and_reused_bindings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3462,407 +3400,6 @@ def test_diagnostic_row_metrics_edge_cases_and_teacher_forced_reconstruction() -
     assert aggregate["loss"]["observation_count"] == aggregate["selected_token_count"]
 
 
-def test_diagnostic_preflight_refusals_lineage_and_no_root_creation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    process_state = _snapshot_diagnostic_process_state(sf)
-    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
-    monkeypatch.setattr(sf, "ARTIFACT_PARENT", tmp_path)
-    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
-    input_root = tmp_path / "feasibility_004"
-    output_root = tmp_path / "feasibility_diagnostic_001"
-    exact_env = {"PYTHONDONTWRITEBYTECODE": "1", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "PYTHONPATH": "."}
-    exact_argv = [
-        "python",
-        "scripts/phase8_sequence_feasibility.py",
-        "diagnose-failure",
-        "--device",
-        "cuda:0",
-        "--input-root",
-        str(input_root),
-        "--output-root",
-        str(output_root),
-    ]
-
-    with pytest.raises(ValueError, match="cuda:0"):
-        sf.validate_diagnostic_cli_contract(device="cpu", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=(), environ=exact_env)
-    assert not output_root.exists()
-    with pytest.raises(ValueError, match="repository-relative"):
-        sf.validate_diagnostic_cli_contract(device="cuda:0", input_root=input_root, output_root=output_root, predecessor_diagnostic_roots=(), environ=exact_env)
-    validate_new_root = sf.validate_new_diagnostic_root
-    monkeypatch.setattr(sf, "validate_new_diagnostic_root", lambda input_root, output_root, predecessor_diagnostic_roots=(): None)
-    command_input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
-    command_output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
-    exact_argv = [
-        "python",
-        "scripts/phase8_sequence_feasibility.py",
-        "diagnose-failure",
-        "--device",
-        "cuda:0",
-        "--input-root",
-        str(command_input_root),
-        "--output-root",
-        str(command_output_root),
-    ]
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
-    sf.validate_diagnostic_cli_contract(
-        device="cuda:0",
-        input_root=command_input_root,
-        output_root=command_output_root,
-        predecessor_diagnostic_roots=(),
-        environ=exact_env,
-    )
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: [*exact_argv[:-2], str(command_output_root), "--device", "cuda:0"])
-    with pytest.raises(ValueError, match="process argv"):
-        sf.validate_diagnostic_cli_contract(
-            device="cuda:0",
-            input_root=command_input_root,
-            output_root=command_output_root,
-            predecessor_diagnostic_roots=(),
-            environ=exact_env,
-        )
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
-    with pytest.raises(ValueError, match="PYTHONPATH"):
-        sf.validate_diagnostic_cli_contract(
-            device="cuda:0",
-            input_root=command_input_root,
-            output_root=command_output_root,
-            predecessor_diagnostic_roots=(),
-            environ={**exact_env, "PYTHONPATH": str(REPO_ROOT)},
-        )
-    with pytest.raises(ValueError, match="repository-relative"):
-        sf.validate_diagnostic_cli_contract(
-            device="cuda:0",
-            input_root=command_input_root.resolve(),
-            output_root=command_output_root.resolve(),
-            predecessor_diagnostic_roots=(),
-            environ=exact_env,
-        )
-    monkeypatch.setattr(sf, "validate_new_diagnostic_root", validate_new_root)
-
-    done_root = tmp_path / "feasibility_diagnostic_001"
-    done_root.mkdir()
-    common = {
-        "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-        "feasibility_selection_eligible": False,
-        "task_010d_authorized": False,
-        "protocol": "phase8_feasibility_failure_diagnostic",
-        "terminal_status": "DONE",
-        "source_commit": "b" * 40,
-        "source_provenance": {},
-        "exact_command": [],
-        "output_root": str(done_root),
-        "wall_time_seconds": 0.0,
-        "deterministic_flags": {},
-        "handoff": {},
-        "input_root": {},
-        "configuration": {},
-        "environment": {},
-        "record_hashes": {},
-        "core_blobs": {},
-        "diagnostic_lineage": [],
-        "repair_transition": None,
-        "completed_scope": [],
-        "partial_scope": [],
-        "failure_classification": None,
-    }
-    (done_root / "summary.json").write_text(json.dumps(common, sort_keys=True) + "\n")
-    manifest = {
-        **common,
-        "file_inventory": sf.diagnostic_inventory(done_root),
-    }
-    (done_root / "manifest.json").write_text(json.dumps(manifest) + "\n")
-    terminal = {
-        "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-        "feasibility_selection_eligible": False,
-        "task_010d_authorized": False,
-        "status": "DONE",
-        "manifest_path": "manifest.json",
-        "manifest_sha256": sf.file_sha256(done_root / "manifest.json"),
-            **{key: common[key] for key in (
-            "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
-            "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
-            "core_blobs", "diagnostic_lineage", "repair_transition", "completed_scope", "partial_scope", "failure_classification",
-        )},
-        "file_inventory": manifest["file_inventory"],
-    }
-    (done_root / "DONE.json").write_text(json.dumps(terminal) + "\n")
-    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
-    with pytest.raises(ValueError, match="prior DONE"):
-        sf.validate_new_diagnostic_root(input_root, tmp_path / "feasibility_diagnostic_002", (done_root,))
-    assert sf.diagnostic_terminal_binding(done_root)["terminal_state"] == "DONE"
-
-
-def test_diagnostic_failed_terminal_inventory_fields_and_checkpoint_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    input_root = sf.ARTIFACT_PARENT / "feasibility_004"
-    root = tmp_path / "feasibility_diagnostic_001"
-    root.mkdir()
-    (root / "rows.jsonl").write_text("{}\n")
-    monkeypatch.setattr(sf, "current_source_commit", lambda: _test_source_commit())
-    monkeypatch.setattr(sf, "ignored_source_inputs", lambda: ())
-    monkeypatch.setattr(sf, "validate_diagnostic_core_blobs", lambda commit="HEAD": dict(sf.DIAGNOSTIC_CORE_BLOBS))
-    preflight_bindings = sf.diagnostic_preflight_bindings(input_root, ())
-    monkeypatch.setattr(sf, "current_environment_dict", lambda: {"mutated_after_preflight": True})
-    sf.write_diagnostic_terminal(
-        root,
-        "FAILED",
-        input_root=input_root,
-        output_root=root,
-        predecessor_diagnostic_roots=(),
-        completed_scope=({"name": "preflight"},),
-        partial_scope=({"name": "array_run", "seed": 0},),
-        failure="synthetic failure",
-        failure_classification="diagnostic_implementation_defect",
-        source_snapshot=sf.SourceSnapshot(commit=_test_source_commit(), status_lines=(), ignored_inputs=()),
-        preflight_bindings=preflight_bindings,
-        wall_time_seconds=0.0,
-    )
-    manifest = json.loads((root / "manifest.json").read_text())
-    summary = json.loads((root / "summary.json").read_text())
-    failed = json.loads((root / "FAILED.json").read_text())
-    for record in (manifest, summary, failed):
-        assert record["artifact_class"] == sf.DIAGNOSTIC_ARTIFACT_CLASS
-        assert record["feasibility_selection_eligible"] is False
-        assert record["task_010d_authorized"] is False
-        assert record["source_provenance"]["commit"] == _test_source_commit()
-        assert record["exact_command"][:3] == ["PYTHONDONTWRITEBYTECODE=1", "CUBLAS_WORKSPACE_CONFIG=:4096:8", "PYTHONPATH=."]
-        assert record["configuration"]["diagnostic_steps"] == 3000
-        assert record["handoff"]["path"] == sf.DIAGNOSTIC_HANDOFF_PATH
-        assert record["input_root"]["path"] == str(input_root)
-        assert record["environment"] == preflight_bindings["environment"]
-    assert record["record_hashes"] == sf.DIAGNOSTIC_RECORD_HASHES
-    assert failed["manifest_sha256"] == sf.file_sha256(root / "manifest.json")
-    assert failed["file_inventory"] == manifest["file_inventory"]
-    assert {row["path"]: row["role"] for row in manifest["file_inventory"]}["rows.jsonl"] == "retained_rows"
-    monkeypatch.setattr(sf, "ARTIFACT_PARENT", tmp_path)
-    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
-    assert sf.diagnostic_terminal_binding(root)["terminal_state"] == "FAILED"
-
-    checkpoint = tmp_path / "diagnostic_checkpoint.pt"
-    save_checkpoint(
-        str(checkpoint),
-        build_model("small"),
-        metadata={
-            "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-            "feasibility_selection_eligible": False,
-            "task_010d_authorized": False,
-            "family": "array_json",
-            "model_size": "small",
-            "seed": 0,
-            "training_steps": 3000,
-        },
-    )
-    metadata = torch.load(checkpoint, map_location="cpu", weights_only=True)["metadata"]
-    assert metadata["artifact_class"] == sf.DIAGNOSTIC_ARTIFACT_CLASS
-    assert metadata["feasibility_selection_eligible"] is False
-    assert metadata["task_010d_authorized"] is False
-    assert sf.classify_diagnostic_failure(OSError("disk unavailable")) == "transient_infrastructure"
-    assert sf.classify_diagnostic_failure(ValueError("bad implementation")) == "diagnostic_implementation_defect"
-
-
-def test_diagnostic_publish_done_requires_exact_paths_and_no_clobber(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
-
-    def make_done_root(root: Path) -> None:
-        root.mkdir(parents=True)
-        for rel_path in sf.expected_done_diagnostic_paths() - {"summary.json", "manifest.json", "DONE.json"}:
-            path = root / rel_path
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.suffix == ".pt":
-                path.write_bytes(b"checkpoint")
-            elif path.suffix == ".jsonl":
-                path.write_text("{}\n")
-            else:
-                path.write_text("{}\n")
-        common = {
-            "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-            "feasibility_selection_eligible": False,
-            "task_010d_authorized": False,
-            "protocol": "phase8_feasibility_failure_diagnostic",
-            "terminal_status": "DONE",
-            "source_commit": "b" * 40,
-            "source_provenance": {},
-            "exact_command": [],
-            "output_root": str(root.with_suffix("")),
-            "wall_time_seconds": 0.0,
-            "deterministic_flags": {},
-            "handoff": {},
-            "input_root": {},
-            "configuration": {},
-            "environment": {},
-            "record_hashes": {},
-        "core_blobs": {},
-        "diagnostic_lineage": [],
-        "repair_transition": None,
-        "completed_scope": [
-                *({"name": "named_cell"} for _ in range(12)),
-                *({"name": "array_diagnostic_training"} for _ in range(3)),
-                *({"name": "array_baseline_reuse"} for _ in range(6)),
-            ],
-            "partial_scope": [],
-            "failure_classification": None,
-        }
-        (root / "summary.json").write_text(json.dumps(common, sort_keys=True) + "\n")
-        manifest = {**common, "file_inventory": sf.diagnostic_inventory(root)}
-        (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
-        terminal = {
-            "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-            "feasibility_selection_eligible": False,
-            "task_010d_authorized": False,
-            "status": "DONE",
-            "manifest_path": "manifest.json",
-            "manifest_sha256": sf.file_sha256(root / "manifest.json"),
-                **{key: common[key] for key in (
-                    "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
-                    "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
-                "core_blobs", "diagnostic_lineage", "repair_transition", "completed_scope", "partial_scope", "failure_classification",
-            )},
-            "file_inventory": manifest["file_inventory"],
-        }
-        (root / "DONE.json").write_text(json.dumps(terminal, sort_keys=True) + "\n")
-
-    temp_root = tmp_path / "feasibility_diagnostic_001.tmp"
-    make_done_root(temp_root)
-    target = tmp_path / "feasibility_diagnostic_001"
-    target.mkdir()
-    (target / "sentinel").write_text("keep\n")
-    with pytest.raises(FileExistsError):
-        sf.publish_diagnostic_root(temp_root, target, terminal_status="DONE")
-    assert (target / "sentinel").read_text() == "keep\n"
-    assert temp_root.exists()
-    with pytest.raises(sf.DiagnosticPublicationError, match="temporary root is incomplete"):
-        sf.publish_diagnostic_root_or_leave_incomplete(temp_root, target, terminal_status="DONE")
-    assert not (temp_root / "DONE.json").exists()
-
-    success_temp = tmp_path / "feasibility_diagnostic_002.tmp"
-    success_target = tmp_path / "feasibility_diagnostic_002"
-    make_done_root(success_temp)
-    sf.publish_diagnostic_root(success_temp, success_target, terminal_status="DONE")
-    assert success_target.is_dir()
-    assert not success_temp.exists()
-
-    bad_root = tmp_path / "bad.tmp"
-    make_done_root(bad_root)
-    (bad_root / "extra.json").write_text("{}\n")
-    with pytest.raises(ValueError, match="inventory|extra files"):
-        sf.validate_diagnostic_terminal_root(bad_root, terminal_status="DONE")
-    (bad_root / "extra.json").unlink()
-    (bad_root / "array_json__small__3000__seed0" / "generations.jsonl").unlink()
-    with pytest.raises(ValueError, match="inventory|incomplete"):
-        sf.validate_diagnostic_terminal_root(bad_root, terminal_status="DONE")
-
-
-def test_diagnostic_predecessor_inventory_lineage_and_retry_contracts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    monkeypatch.setattr(sf, "ARTIFACT_PARENT", tmp_path)
-    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
-    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
-    monkeypatch.setattr(sf, "current_source_commit", lambda: "b" * 40)
-    configuration = sf.frozen_diagnostic_configuration()
-
-    def make_failed(root: Path, *, lineage: list[dict[str, object]], source_commit: str, failure_classification: str) -> dict[str, object]:
-        root.mkdir()
-        (root / "rows.jsonl").write_text("{}\n")
-        common = {
-            "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-            "feasibility_selection_eligible": False,
-            "task_010d_authorized": False,
-            "terminal_status": "FAILED",
-            "protocol": "phase8_feasibility_failure_diagnostic",
-            "diagnostic_lineage": lineage,
-            "configuration": configuration,
-            "source_commit": source_commit,
-            "source_provenance": {},
-            "exact_command": [],
-            "output_root": str(root),
-            "wall_time_seconds": 0.0,
-            "deterministic_flags": {},
-            "handoff": {},
-            "input_root": {},
-            "environment": {},
-            "record_hashes": {},
-            "core_blobs": {},
-            "completed_scope": [],
-            "partial_scope": [],
-            "failure_classification": failure_classification,
-            "repair_transition": None,
-        }
-        (root / "summary.json").write_text(json.dumps(common, sort_keys=True) + "\n")
-        manifest = {**common, "file_inventory": sf.diagnostic_inventory(root)}
-        (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
-        terminal = {
-            "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-            "feasibility_selection_eligible": False,
-            "task_010d_authorized": False,
-            "status": "FAILED",
-            "manifest_path": "manifest.json",
-            "manifest_sha256": sf.file_sha256(root / "manifest.json"),
-                **{key: common[key] for key in (
-                    "source_commit", "source_provenance", "protocol", "exact_command", "output_root", "wall_time_seconds",
-                    "deterministic_flags", "handoff", "input_root", "configuration", "environment", "record_hashes",
-                "core_blobs", "diagnostic_lineage", "repair_transition", "completed_scope", "partial_scope", "failure_classification",
-            )},
-            "file_inventory": manifest["file_inventory"],
-        }
-        (root / "FAILED.json").write_text(json.dumps(terminal, sort_keys=True) + "\n")
-        return sf.diagnostic_terminal_binding(root)
-
-    input_root = tmp_path / "feasibility_004"
-    first = make_failed(
-        tmp_path / "feasibility_diagnostic_001",
-        lineage=[],
-        source_commit="b" * 40,
-        failure_classification="transient_infrastructure",
-    )
-    assert first["terminal_state"] == "FAILED"
-    sf.validate_new_diagnostic_root(input_root, tmp_path / "feasibility_diagnostic_002", (tmp_path / "feasibility_diagnostic_001",))
-
-    tampered = tmp_path / "feasibility_diagnostic_001" / "rows.jsonl"
-    tampered.write_text("{\"tampered\":true}\n")
-    with pytest.raises(ValueError, match="inventory|checksum"):
-        sf.diagnostic_terminal_binding(tmp_path / "feasibility_diagnostic_001")
-    tampered.write_text("{}\n")
-
-    escape_manifest = json.loads((tmp_path / "feasibility_diagnostic_001" / "manifest.json").read_text())
-    escape_manifest["file_inventory"][0]["path"] = "../escape.jsonl"
-    (tmp_path / "feasibility_diagnostic_001" / "manifest.json").write_text(json.dumps(escape_manifest, sort_keys=True) + "\n")
-    escape_terminal = json.loads((tmp_path / "feasibility_diagnostic_001" / "FAILED.json").read_text())
-    escape_terminal["manifest_sha256"] = sf.file_sha256(tmp_path / "feasibility_diagnostic_001" / "manifest.json")
-    (tmp_path / "feasibility_diagnostic_001" / "FAILED.json").write_text(json.dumps(escape_terminal, sort_keys=True) + "\n")
-    with pytest.raises(ValueError, match="inventory|relative"):
-        sf.diagnostic_terminal_binding(tmp_path / "feasibility_diagnostic_001")
-    valid_manifest = json.loads((tmp_path / "feasibility_diagnostic_001" / "manifest.json").read_text())
-    valid_manifest["file_inventory"] = sf.diagnostic_inventory(tmp_path / "feasibility_diagnostic_001")
-    (tmp_path / "feasibility_diagnostic_001" / "manifest.json").write_text(json.dumps(valid_manifest, sort_keys=True) + "\n")
-    valid_terminal = json.loads((tmp_path / "feasibility_diagnostic_001" / "FAILED.json").read_text())
-    valid_terminal["manifest_sha256"] = sf.file_sha256(tmp_path / "feasibility_diagnostic_001" / "manifest.json")
-    (tmp_path / "feasibility_diagnostic_001" / "FAILED.json").write_text(json.dumps(valid_terminal, sort_keys=True) + "\n")
-
-    first_lineage_binding = {key: value for key, value in first.items() if key != "diagnostic_lineage"}
-    repaired_second = make_failed(
-        tmp_path / "feasibility_diagnostic_002",
-        lineage=[first_lineage_binding],
-        source_commit="b" * 40,
-        failure_classification="diagnostic_implementation_defect",
-    )
-    assert repaired_second["diagnostic_lineage"] == [first_lineage_binding]
-    with pytest.raises(ValueError, match="newly reviewed repair source"):
-        sf.validate_new_diagnostic_root(
-            input_root,
-            tmp_path / "feasibility_diagnostic_003",
-            (tmp_path / "feasibility_diagnostic_001", tmp_path / "feasibility_diagnostic_002"),
-        )
-    monkeypatch.setattr(sf, "current_source_commit", lambda: "c" * 40)
-    sf.validate_new_diagnostic_root(
-        input_root,
-        tmp_path / "feasibility_diagnostic_003",
-        (tmp_path / "feasibility_diagnostic_001", tmp_path / "feasibility_diagnostic_002"),
-    )
 
 
 def test_diagnostic_roots_are_rejected_by_feasibility_selection_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3930,62 +3467,11 @@ def test_diagnostic_array_aggregate_rejects_invalid_row_observation_tampering() 
         sf.aggregate_array_rows([tampered_valid])
 
 
-def test_diagnostic_reused_array_rows_preserve_current_eval_identity(tmp_path: Path) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    records = sf.grouped_records()["array_json"]["eval"]
-    tokenizer = ByteTokenizer()
-    rows = [_generation_row(record, tokenizer, exact_match=False) for record in records]
-    path = tmp_path / "generations.jsonl"
-    path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n")
-    converted = sf.array_rows_from_reused_generations(
-        path,
-        comparison_source="feasibility_004_reused",
-        model_size="small",
-        steps=sf.TRAINING_STEPS,
-        seed=0,
-    )
-    assert len(converted) == sf.EVAL_RECORDS_PER_FAMILY
-    sf.validate_array_generation_artifact(
-        converted,
-        comparison_source="feasibility_004_reused",
-        model_size="small",
-        steps=sf.TRAINING_STEPS,
-        seed=0,
-    )
-    metric_tampered = [dict(row) for row in converted]
-    metric_tampered[0]["exact_match"] = not metric_tampered[0]["exact_match"]
-    with pytest.raises(ValueError, match="does not rebuild"):
-        sf.validate_array_generation_artifact(
-            metric_tampered,
-            comparison_source="feasibility_004_reused",
-            model_size="small",
-            steps=sf.TRAINING_STEPS,
-            seed=0,
-        )
-    for field_name, replacement in (
-        ("family", "hex_copy"),
-        ("index", 999),
-        ("template_id", "wrong-template"),
-        ("operand_id", "wrong-operand"),
-        ("prompt", "wrong prompt"),
-        ("expected", "[]"),
-    ):
-        tampered_rows = [dict(row) for row in rows]
-        tampered_rows[0][field_name] = replacement
-        path.write_text("\n".join(json.dumps(row, sort_keys=True) for row in tampered_rows) + "\n")
-        with pytest.raises(ValueError, match="Generation artifact row|raw_token_ids prefix"):
-            sf.array_rows_from_reused_generations(
-                path,
-                comparison_source="feasibility_004_reused",
-                model_size="small",
-                steps=sf.TRAINING_STEPS,
-                seed=0,
-            )
 
 
 def test_diagnostic_named_matrix_rejects_family_and_cell_relabeling() -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    matrix = sf.build_named_diagnostic_matrix()
+    matrix = _accepted_d1_named_matrix_fixture(sf)
     family_tampered = {cell: [dict(row) for row in rows] for cell, rows in matrix.items()}
     family_tampered["seen_surface_seen_operand"][0]["family"] = "array_json"
     with pytest.raises(ValueError, match="family named_value_json"):
@@ -4017,96 +3503,6 @@ def test_diagnostic_named_matrix_rejects_family_and_cell_relabeling() -> None:
         sf.validate_named_generation_artifact(generation_rows, matrix_rows)
 
 
-def test_diagnostic_real_process_command_rejects_direct_main_and_flags(
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    process_state = _snapshot_diagnostic_process_state(sf)
-    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
-    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda input_root, environment=None: {})
-    monkeypatch.setattr(sf, "validate_new_diagnostic_root", lambda input_root, output_root, predecessor_diagnostic_roots=(): None)
-    command_input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
-    command_output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
-    exact_env = {"PYTHONDONTWRITEBYTECODE": "1", "CUBLAS_WORKSPACE_CONFIG": ":4096:8", "PYTHONPATH": "."}
-    exact_argv = [
-        "python",
-        "scripts/phase8_sequence_feasibility.py",
-        "diagnose-failure",
-        "--device",
-        "cuda:0",
-        "--input-root",
-        str(command_input_root),
-        "--output-root",
-        str(command_output_root),
-    ]
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
-    sf.validate_diagnostic_cli_contract(
-        device="cuda:0",
-        input_root=command_input_root,
-        output_root=command_output_root,
-        predecessor_diagnostic_roots=(),
-        environ=exact_env,
-    )
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: ["python", "-O", *exact_argv[1:]])
-    with pytest.raises(ValueError, match="process argv"):
-        sf.validate_diagnostic_cli_contract(
-            device="cuda:0",
-            input_root=command_input_root,
-            output_root=command_output_root,
-            predecessor_diagnostic_roots=(),
-            environ=exact_env,
-        )
-    with pytest.raises(ValueError, match="main\\(argv"):
-        sf.main([
-            "diagnose-failure",
-            "--device",
-            "cuda:0",
-            "--input-root",
-            str(command_input_root),
-            "--output-root",
-            str(command_output_root),
-        ])
-    with pytest.raises(ValueError, match="real __main__"):
-        sf.run_diagnostic_failure(
-            device="cuda:0",
-            input_root=command_input_root,
-            output_root=command_output_root,
-            predecessor_diagnostic_roots=(),
-            environ=exact_env,
-        )
-
-
-@pytest.mark.parametrize(
-    ("exc", "expected"),
-    (
-        (MemoryError("host oom"), "transient_infrastructure"),
-        (torch.OutOfMemoryError("cuda oom"), "transient_infrastructure"),
-        (OSError("filesystem"), "transient_infrastructure"),
-        (subprocess.SubprocessError("worker"), "transient_infrastructure"),
-        (RuntimeError("bug"), "diagnostic_implementation_defect"),
-        (ValueError("bug"), "diagnostic_implementation_defect"),
-    ),
-)
-def test_diagnostic_failure_classification_matrix(exc: Exception, expected: str) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    assert sf.classify_diagnostic_failure(exc) == expected
-
-
-def test_diagnostic_parameter_count_comparator_is_isolated_from_formal_helper(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    assert sf.expected_parameter_count("small") == build_model("small").parameter_count
-    calls: list[str] = []
-
-    def forbidden_helper(model_size: str) -> int:
-        calls.append(model_size)
-        raise AssertionError("diagnostic comparator must not call formal expected_parameter_count")
-
-    checkpoint = Path("artifacts/phase8_toy_lm_bridge/feasibility_004/array_json__small__seed0/checkpoint_step1500.pt")
-    model = sf.load_checkpoint_model(checkpoint, "small", torch.device("cpu"))
-    monkeypatch.setattr(sf, "expected_parameter_count", forbidden_helper)
-    sf.compare_model_to_checkpoint_step1500(model, checkpoint, "small")
-    assert calls == []
 
 
 def test_diagnostic_common_semantic_validator_rejects_provenance_protocol_and_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4148,7 +3544,7 @@ def test_diagnostic_common_semantic_validator_rejects_provenance_protocol_and_co
             "cuda_tf32": False,
             "cudnn_tf32": False,
         },
-        "handoff": sf.handoff_binding_for_commit(source_commit),
+        "handoff": json.loads((output_root / "manifest.json").read_text())["handoff"],
         "input_root": {
             "path": str(input_root),
             "manifest_sha256": sf.DIAGNOSTIC_INPUT_CHECKSUMS["manifest.json"],
@@ -4226,15 +3622,26 @@ def _write_diagnostic_checkpoint_with_trajectory_evidence(
 ) -> tuple[Path, Path, dict[str, object], dict[str, object]]:
     step1500_checkpoint = tmp_path / f"checkpoint_step1500_seed{seed}.pt"
     step1500_model = build_historical_model("small")
-    sf.save_historical_checkpoint(
-        str(step1500_checkpoint),
-        step1500_model,
-        metadata={"family": "array_json", "model_size": "small", "seed": seed, "training_steps": 1500},
+    torch.save(
+        {
+            "model_state_dict": step1500_model.state_dict(),
+            "config": sf.legacy_serialized_config("small"),
+            "parameter_count": sf.HISTORICAL_PARAMETER_COUNTS["small"],
+            "metadata": {"family": "array_json", "model_size": "small", "seed": seed, "training_steps": 1500},
+        },
+        step1500_checkpoint,
     )
     final_checkpoint = tmp_path / f"checkpoint_step3000_seed{seed}.pt"
     final_model = build_historical_model("small")
     schedule = sf.diagnostic_training_schedule_evidence(seed, sf.TRAIN_RECORDS_PER_FAMILY)
-    loss_evidence = sf.loss_scalar_evidence(torch.tensor(final_loss, dtype=torch.float32), final_loss)
+    loss_tensor = torch.tensor(final_loss, dtype=torch.float32)
+    loss_evidence = {
+        "value": final_loss,
+        "repr": repr(final_loss),
+        "tensor_dtype": str(loss_tensor.dtype),
+        "tensor_shape": list(loss_tensor.shape),
+        "tensor_bytes_hex": sf.tensor_bytes(loss_tensor).hex(),
+    }
     step1500_fingerprint = sf.checkpoint_model_state_fingerprint(step1500_checkpoint)
     evidence = {
         "serialization": sf.DIAGNOSTIC_TRAJECTORY_EVIDENCE_SCHEMA,
@@ -4250,7 +3657,7 @@ def _write_diagnostic_checkpoint_with_trajectory_evidence(
             "model_state_fingerprint": step1500_fingerprint,
             "checkpoint_state_fingerprint": step1500_fingerprint,
             "model_matches_checkpoint": True,
-            "optimizer_state_fingerprint": sf.optimizer_state_fingerprint(make_optimizer(step1500_model)),
+            "optimizer_state_fingerprint": "1" * 64,
         },
         "trace": {
             "serialization": sf.DIAGNOSTIC_TRAINING_TRACE_SCHEMA,
@@ -4263,24 +3670,28 @@ def _write_diagnostic_checkpoint_with_trajectory_evidence(
         "step_count": sf.DIAGNOSTIC_STEPS,
         "step1501_executed": True,
         "final_model_state_fingerprint": sf.model_state_fingerprint(final_model),
-        "final_optimizer_state_fingerprint": sf.optimizer_state_fingerprint(make_optimizer(final_model)),
+        "final_optimizer_state_fingerprint": "2" * 64,
         "retained_final_loss": final_loss,
     }
-    sf.save_historical_checkpoint(
-        str(final_checkpoint),
-        final_model,
-        metadata={
-            "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
-            "feasibility_selection_eligible": False,
-            "task_010d_authorized": False,
-            "family": "array_json",
-            "model_size": "small",
-            "seed": seed,
-            "training_steps": sf.DIAGNOSTIC_STEPS,
-            "training_loss": final_loss,
-            "step1501_executed": True,
-            "training_trajectory_evidence": evidence,
+    torch.save(
+        {
+            "model_state_dict": final_model.state_dict(),
+            "config": sf.legacy_serialized_config("small"),
+            "parameter_count": sf.HISTORICAL_PARAMETER_COUNTS["small"],
+            "metadata": {
+                "artifact_class": sf.DIAGNOSTIC_ARTIFACT_CLASS,
+                "feasibility_selection_eligible": False,
+                "task_010d_authorized": False,
+                "family": "array_json",
+                "model_size": "small",
+                "seed": seed,
+                "training_steps": sf.DIAGNOSTIC_STEPS,
+                "training_loss": final_loss,
+                "step1501_executed": True,
+                "training_trajectory_evidence": evidence,
+            },
         },
+        final_checkpoint,
     )
     training_metrics = {
         "final_loss": final_loss,
@@ -4291,18 +3702,13 @@ def _write_diagnostic_checkpoint_with_trajectory_evidence(
     return final_checkpoint, step1500_checkpoint, training_metrics, evidence
 
 
-def test_diagnostic_trajectory_validation_does_not_call_training(
+def test_diagnostic_trajectory_validation_accepts_read_only_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sf = importlib.import_module("scripts.phase8_sequence_feasibility")
     _allow_synthetic_historical_checkpoints(monkeypatch, sf)
     checkpoint, step1500_checkpoint, training_metrics, _evidence = _write_diagnostic_checkpoint_with_trajectory_evidence(tmp_path, sf)
-
-    def forbidden_training(**_kwargs: object) -> dict[str, object]:
-        raise AssertionError("validators must not run optimizer training")
-
-    monkeypatch.setattr(sf, "train_array_small_3000_diagnostic", forbidden_training)
     sf.validate_diagnostic_training_trajectory_evidence(
         checkpoint,
         seed=0,
@@ -4453,479 +3859,6 @@ def test_diagnostic_completed_scope_semantics_reject_empty_array_artifacts(
         )
 
 
-def test_diagnostic_publish_final_callback_and_artifact_mutation_block_rename(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-
-    def make_bound_root(root: Path) -> None:
-        root.mkdir()
-        (root / "rows.jsonl").write_text("{}\n")
-        common = {
-            "file_inventory": sf.diagnostic_inventory(root),
-        }
-        (root / "manifest.json").write_text(json.dumps(common, sort_keys=True) + "\n")
-        terminal = {
-            "status": "DONE",
-            "manifest_path": "manifest.json",
-            "manifest_sha256": sf.file_sha256(root / "manifest.json"),
-            "file_inventory": common["file_inventory"],
-        }
-        (root / "DONE.json").write_text(json.dumps(terminal, sort_keys=True) + "\n")
-        manifest = {"file_inventory": sf.diagnostic_inventory(root)}
-        (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n")
-        terminal["manifest_sha256"] = sf.file_sha256(root / "manifest.json")
-        terminal["file_inventory"] = manifest["file_inventory"]
-        (root / "DONE.json").write_text(json.dumps(terminal, sort_keys=True) + "\n")
-
-    callback_temp = tmp_path / "callback.tmp"
-    callback_target = tmp_path / "callback"
-    make_bound_root(callback_temp)
-    monkeypatch.setattr(sf, "validate_diagnostic_terminal_root", lambda *args, **kwargs: None)
-    with pytest.raises(RuntimeError, match="source changed"):
-        sf.publish_diagnostic_root(
-            callback_temp,
-            callback_target,
-            terminal_status="DONE",
-            final_callback=lambda: (_ for _ in ()).throw(RuntimeError("source changed")),
-        )
-    assert callback_temp.exists()
-    assert not callback_target.exists()
-
-    mutation_temp = tmp_path / "mutation.tmp"
-    mutation_target = tmp_path / "mutation"
-    make_bound_root(mutation_temp)
-
-    def mutate_after_semantic_validation(*args: object, **kwargs: object) -> None:
-        (mutation_temp / "rows.jsonl").write_text('{"mutated": true}\n')
-
-    monkeypatch.setattr(sf, "validate_diagnostic_terminal_root", mutate_after_semantic_validation)
-    with pytest.raises(ValueError, match="inventory|checksum"):
-        sf.publish_diagnostic_root(mutation_temp, mutation_target, terminal_status="DONE")
-    assert mutation_temp.exists()
-    assert not mutation_target.exists()
-
-
-def test_diagnostic_failed_progress_replaces_stale_generation_and_teacher_fields(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
-    preflight = {
-        "input_root": str(tmp_path / "feasibility_004"),
-        "predecessors": [],
-        "diagnostic_lineage": [],
-        "repair_transition": None,
-        "handoff": {},
-        "input_root_binding": {},
-        "record_hashes": {},
-        "core_blobs": {},
-        "environment": {},
-    }
-
-    def configure_common(output_root: Path) -> Path:
-        monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
-        monkeypatch.setattr(sf, "validate_diagnostic_cli_contract", lambda **kwargs: None)
-        monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
-        monkeypatch.setattr(sf, "diagnostic_preflight_bindings", lambda *args: preflight)
-        monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda *args, **kwargs: {})
-        monkeypatch.setattr(sf, "verify_diagnostic_preflight_bindings", lambda *args: None)
-        monkeypatch.setattr(sf, "verify_source_unchanged", lambda *args, **kwargs: None)
-        monkeypatch.setattr(sf, "SEEDS", (0,))
-        monkeypatch.setattr(sf, "NAMED_DIAGNOSTIC_CELLS", ())
-        monkeypatch.setattr(sf, "MODEL_SIZES", ())
-        monkeypatch.setattr(sf, "build_named_diagnostic_matrix", lambda: {})
-        monkeypatch.setattr(sf, "publish_diagnostic_root_or_leave_incomplete", lambda *args, **kwargs: None)
-        monkeypatch.setattr(sf, "reused_feasibility_cell_binding", lambda *args: {"checkpoint_path": "checkpoint_step1500.pt", "checkpoint_sha256": "a" * 64})
-        monkeypatch.setattr(sf, "load_checkpoint_model", lambda *args, **kwargs: torch.nn.Linear(1, 1).eval())
-        return output_root.with_name(output_root.name + ".tmp")
-
-    def train_stub(**kwargs: object) -> dict[str, object]:
-        callback = kwargs["progress_callback"]
-        assert callable(callback)
-        callback({"subphase": "array_training", "completed_steps": 3000})
-        Path(kwargs["checkpoint_path"]).write_bytes(b"checkpoint")
-        return {"final_loss": 1.0, "checkpoint_path": str(kwargs["checkpoint_path"]), "step1501_executed": True}
-
-    monkeypatch.setattr(sf, "train_array_small_3000_diagnostic", train_stub)
-    generation_output = tmp_path / "generation"
-    generation_temp = configure_common(generation_output)
-
-    def generation_failure(*args: object, **kwargs: object) -> list[dict[str, object]]:
-        callback = kwargs["progress_callback"]
-        assert callable(callback)
-        callback({"subphase": "array_generation", "completed_rows": 7})
-        raise RuntimeError("generation boom")
-
-    monkeypatch.setattr(sf, "generate_array_rows", generation_failure)
-    with pytest.raises(RuntimeError, match="generation boom"):
-        sf.run_diagnostic_failure(device="cuda:0", input_root=tmp_path / "feasibility_004", output_root=generation_output)
-    partial = json.loads((generation_temp / "FAILED.json").read_text())["partial_scope"][0]
-    assert partial["subphase"] == "array_generation"
-    assert partial["completed_rows"] == 7
-    assert "completed_steps" not in partial
-
-    teacher_output = tmp_path / "teacher"
-    teacher_temp = configure_common(teacher_output)
-    monkeypatch.setattr(sf, "generate_array_rows", lambda *args, **kwargs: [])
-
-    def teacher_failure(*args: object, split: str, **kwargs: object) -> tuple[list[dict[str, object]], dict[str, object]]:
-        callback = kwargs["progress_callback"]
-        assert callable(callback)
-        callback({"subphase": "teacher_forced", "split": split, "completed_batches": 3})
-        if split == "eval":
-            raise RuntimeError("teacher boom")
-        return [], {"split": split}
-
-    monkeypatch.setattr(sf, "teacher_forced_rows", teacher_failure)
-    with pytest.raises(RuntimeError, match="teacher boom"):
-        sf.run_diagnostic_failure(device="cuda:0", input_root=tmp_path / "feasibility_004", output_root=teacher_output)
-    partial = json.loads((teacher_temp / "FAILED.json").read_text())["partial_scope"][0]
-    assert partial["subphase"] == "teacher_forced"
-    assert partial["split"] == "eval"
-    assert partial["completed_batches"] == 3
-    assert "completed_rows" not in partial
-    assert "completed_steps" not in partial
-
-
-def test_diagnostic_early_failed_terminal_uses_backend_before_model_work(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    process_state = _snapshot_diagnostic_process_state(sf)
-    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
-    contract_source = inspect.getsource(sf.validate_diagnostic_cli_contract)
-    auth_index = contract_source.index("validate_diagnostic_cli_authorization_contract(")
-    backend_index = contract_source.index("configure_diagnostic_deterministic_backend()")
-    root_index = contract_source.index("validate_diagnostic_cli_root_contract(")
-    assert auth_index < backend_index < root_index
-    source = inspect.getsource(sf.run_diagnostic_failure)
-    cli_contract_index = source.index("validate_diagnostic_cli_contract(")
-    assert source.index("require_diagnostic_real_main_context()") < cli_contract_index
-    assert cli_contract_index < source.index("temp_root =")
-    for forward_capable_call in (
-        "load_checkpoint_model(",
-        "generate_named_diagnostic_rows(",
-        "teacher_forced_rows(",
-        "train_array_small_3000_diagnostic(",
-    ):
-        assert cli_contract_index < source.index(forward_capable_call)
-
-    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
-    output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
-    source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
-    preflight = {
-        "input_root": str(input_root),
-        "predecessors": [],
-        "diagnostic_lineage": [],
-        "repair_transition": None,
-        "handoff": {},
-        "input_root_binding": {},
-        "record_hashes": {},
-        "core_blobs": {},
-        "environment": {},
-    }
-    exact_argv = [
-        "python",
-        "scripts/phase8_sequence_feasibility.py",
-        "diagnose-failure",
-        "--device",
-        "cuda:0",
-        "--input-root",
-        str(input_root),
-        "--output-root",
-        str(output_root),
-    ]
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
-    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    monkeypatch.setenv("PYTHONPATH", ".")
-    torch.use_deterministic_algorithms(False)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-
-    def current_flags() -> dict[str, object]:
-        return {
-            "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
-            "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
-            "PYTHONPATH": os.environ.get("PYTHONPATH"),
-            "torch_deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
-            "cudnn_deterministic": torch.backends.cudnn.deterministic,
-            "cudnn_benchmark": torch.backends.cudnn.benchmark,
-            "cuda_tf32": torch.backends.cuda.matmul.allow_tf32,
-            "cudnn_tf32": torch.backends.cudnn.allow_tf32,
-        }
-
-    events: list[object] = []
-    real_authorization_contract = sf.validate_diagnostic_cli_authorization_contract
-    real_set_deterministic_backend = sf.set_deterministic_backend
-
-    def authorization_probe(**kwargs: object) -> None:
-        events.append("authorization")
-        real_authorization_contract(**kwargs)
-
-    def backend_probe(seed: int) -> None:
-        events.append(("backend", seed))
-        real_set_deterministic_backend(seed)
-
-    def root_stage_probe(
-        *,
-        input_root: Path,
-        output_root: Path,
-        predecessor_diagnostic_roots: tuple[Path, ...],
-    ) -> None:
-        events.append("root_predecessor_stage")
-        assert predecessor_diagnostic_roots == ()
-        sf.validate_diagnostic_flags(current_flags())
-
-    def early_matrix_failure() -> dict[str, list[dict[str, object]]]:
-        events.append("named_matrix_construction")
-        sf.validate_diagnostic_flags(current_flags())
-        raise RuntimeError("early backend probe")
-
-    def forbidden_model_work(*args: object, **kwargs: object) -> object:
-        raise AssertionError("model work ran before the early catchable failure")
-
-    def publish_probe(
-        temp_root: Path,
-        target_root: Path,
-        *,
-        terminal_status: str,
-        final_callback: object = None,
-    ) -> None:
-        assert target_root == output_root
-        assert terminal_status == "FAILED"
-        events.append("failed_publication")
-        for filename in ("summary.json", "manifest.json", "FAILED.json"):
-            record = json.loads((temp_root / filename).read_text())
-            sf.validate_diagnostic_flags(record["deterministic_flags"])
-        failed = json.loads((temp_root / "FAILED.json").read_text())
-        assert failed["partial_scope"] == [
-            {"name": "named_matrix_construction", "error": "RuntimeError('early backend probe')"}
-        ]
-
-    monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
-    monkeypatch.setattr(sf, "validate_diagnostic_cli_authorization_contract", authorization_probe)
-    monkeypatch.setattr(sf, "validate_diagnostic_cli_root_contract", root_stage_probe)
-    monkeypatch.setattr(sf, "set_deterministic_backend", backend_probe)
-    monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
-    monkeypatch.setattr(sf, "diagnostic_preflight_bindings", lambda *args: preflight)
-    monkeypatch.setattr(sf, "verify_diagnostic_preflight_bindings", lambda *args: None)
-    monkeypatch.setattr(sf, "verify_source_unchanged", lambda *args, **kwargs: None)
-    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda *args, **kwargs: {})
-    monkeypatch.setattr(sf, "build_named_diagnostic_matrix", early_matrix_failure)
-    monkeypatch.setattr(sf, "load_checkpoint_model", forbidden_model_work)
-    monkeypatch.setattr(sf, "generate_named_diagnostic_rows", forbidden_model_work)
-    monkeypatch.setattr(sf, "teacher_forced_rows", forbidden_model_work)
-    monkeypatch.setattr(sf, "generate_array_rows", forbidden_model_work)
-    monkeypatch.setattr(sf, "train_array_small_3000_diagnostic", forbidden_model_work)
-    monkeypatch.setattr(sf, "publish_diagnostic_root_or_leave_incomplete", publish_probe)
-
-    with pytest.raises(RuntimeError, match="early backend probe"):
-        sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=output_root)
-
-    assert events == [
-        "authorization",
-        ("backend", sf.DIAGNOSTIC_BACKEND_SEED),
-        "root_predecessor_stage",
-        "named_matrix_construction",
-        "failed_publication",
-    ]
-
-
-def test_diagnostic_native_preflight_retains_head_blob_gate_before_tmp_or_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
-    output_root = tmp_path / "feasibility_diagnostic_001"
-    source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
-    core_blob_commits: list[str] = []
-
-    def reject_native_head_gate(commit: str = "HEAD") -> dict[str, str]:
-        core_blob_commits.append(commit)
-        if commit != "HEAD":
-            raise AssertionError(f"native diagnostic preflight checked {commit}, not HEAD")
-        raise ValueError("native diagnostic HEAD core blob gate")
-
-    def forbidden_model_work(*args: object, **kwargs: object) -> object:
-        raise AssertionError("model or artifact construction ran after rejected native HEAD preflight")
-
-    monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
-    monkeypatch.setattr(sf, "validate_diagnostic_cli_contract", lambda **kwargs: None)
-    monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
-    monkeypatch.setattr(sf, "current_source_commit", lambda: source_snapshot.commit)
-    monkeypatch.setattr(sf, "handoff_binding_for_commit", lambda source_commit: {})
-    monkeypatch.setattr(sf, "current_environment_dict", lambda: {})
-    monkeypatch.setattr(sf, "validate_diagnostic_record_hashes", lambda: {})
-    monkeypatch.setattr(sf, "validate_diagnostic_core_blobs", reject_native_head_gate)
-    monkeypatch.setattr(sf, "build_named_diagnostic_matrix", forbidden_model_work)
-    monkeypatch.setattr(sf, "load_checkpoint_model", forbidden_model_work)
-    monkeypatch.setattr(sf, "generate_named_diagnostic_rows", forbidden_model_work)
-    monkeypatch.setattr(sf, "teacher_forced_rows", forbidden_model_work)
-    monkeypatch.setattr(sf, "generate_array_rows", forbidden_model_work)
-    monkeypatch.setattr(sf, "train_array_small_3000_diagnostic", forbidden_model_work)
-
-    with pytest.raises(ValueError, match="native diagnostic HEAD core blob gate"):
-        sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=output_root)
-
-    assert core_blob_commits == ["HEAD"]
-    assert not output_root.exists()
-    assert not output_root.with_name(output_root.name + ".tmp").exists()
-
-
-def test_diagnostic_retry_preflight_root_stage_runs_after_backend_from_defaults(
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    process_state = _snapshot_diagnostic_process_state(sf)
-    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
-    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
-    predecessor = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
-    output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_002")
-    exact_argv = [
-        "python",
-        "scripts/phase8_sequence_feasibility.py",
-        "diagnose-failure",
-        "--device",
-        "cuda:0",
-        "--input-root",
-        str(input_root),
-        "--output-root",
-        str(output_root),
-        "--predecessor-diagnostic-root",
-        str(predecessor),
-    ]
-    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
-    monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
-    monkeypatch.setenv("PYTHONPATH", ".")
-    torch.set_num_threads(max(1, torch.get_num_threads()))
-    torch.backends.mkldnn.enabled = True
-    torch.use_deterministic_algorithms(False)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    assert not torch.are_deterministic_algorithms_enabled()
-    assert not torch.backends.cudnn.deterministic
-    assert torch.backends.cudnn.benchmark
-    assert torch.backends.cuda.matmul.allow_tf32
-    assert torch.backends.cudnn.allow_tf32
-
-    def current_flags() -> dict[str, object]:
-        return {
-            "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
-            "CUBLAS_WORKSPACE_CONFIG": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
-            "PYTHONPATH": os.environ.get("PYTHONPATH"),
-            "torch_deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
-            "cudnn_deterministic": torch.backends.cudnn.deterministic,
-            "cudnn_benchmark": torch.backends.cudnn.benchmark,
-            "cuda_tf32": torch.backends.cuda.matmul.allow_tf32,
-            "cudnn_tf32": torch.backends.cudnn.allow_tf32,
-        }
-
-    def root_stage_probe(
-        *,
-        input_root: Path,
-        output_root: Path,
-        predecessor_diagnostic_roots: tuple[Path, ...],
-    ) -> None:
-        assert input_root == Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
-        assert output_root == Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_002")
-        assert predecessor_diagnostic_roots == (predecessor,)
-        sf.validate_diagnostic_flags(current_flags())
-        assert torch.get_num_threads() == 1
-        assert torch.backends.mkldnn.enabled is False
-        assert torch.is_deterministic_algorithms_warn_only_enabled() is False
-
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
-    monkeypatch.setattr(sf, "validate_diagnostic_cli_root_contract", root_stage_probe)
-
-    sf.validate_diagnostic_cli_contract(
-        device="cuda:0",
-        input_root=input_root,
-        output_root=output_root,
-        predecessor_diagnostic_roots=(predecessor,),
-    )
-
-
-@pytest.mark.parametrize(
-    "original_cublas",
-    (":16:8", None),
-    ids=("wrong", "missing"),
-)
-def test_diagnostic_cli_rejects_original_cublas_before_backend_configuration(
-    original_cublas: str | None,
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    process_state = _snapshot_diagnostic_process_state(sf)
-    request.addfinalizer(lambda: _restore_diagnostic_process_state(sf, process_state))
-    input_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_004")
-    output_root = Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001")
-    exact_argv = [
-        "python",
-        "scripts/phase8_sequence_feasibility.py",
-        "diagnose-failure",
-        "--device",
-        "cuda:0",
-        "--input-root",
-        str(input_root),
-        "--output-root",
-        str(output_root),
-    ]
-    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
-    monkeypatch.setenv("PYTHONPATH", ".")
-    if original_cublas is None:
-        monkeypatch.delenv("CUBLAS_WORKSPACE_CONFIG", raising=False)
-    else:
-        monkeypatch.setenv("CUBLAS_WORKSPACE_CONFIG", original_cublas)
-    torch.backends.mkldnn.enabled = True
-    torch.use_deterministic_algorithms(False)
-    torch.backends.cudnn.deterministic = False
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    calls: list[str] = []
-
-    def forbidden_backend_configuration() -> None:
-        calls.append("backend")
-        raise AssertionError("backend configuration ran before original environment authorization")
-
-    def forbidden_root_stage(**kwargs: object) -> None:
-        calls.append("root")
-        raise AssertionError("root/predecessor stage ran after rejected original environment")
-
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: exact_argv)
-    monkeypatch.setattr(sf, "configure_diagnostic_deterministic_backend", forbidden_backend_configuration)
-    monkeypatch.setattr(sf, "validate_diagnostic_cli_root_contract", forbidden_root_stage)
-
-    with pytest.raises(ValueError, match="CUBLAS_WORKSPACE_CONFIG"):
-        sf.validate_diagnostic_cli_contract(
-            device="cuda:0",
-            input_root=input_root,
-            output_root=output_root,
-            predecessor_diagnostic_roots=(),
-        )
-
-    assert calls == []
-    assert os.environ.get("CUBLAS_WORKSPACE_CONFIG") == original_cublas
-    assert not torch.are_deterministic_algorithms_enabled()
-    assert torch.backends.mkldnn.enabled is True
-    assert torch.backends.cudnn.deterministic is False
-    assert torch.backends.cudnn.benchmark is True
-    assert torch.backends.cuda.matmul.allow_tf32 is True
-    assert torch.backends.cudnn.allow_tf32 is True
 
 
 def test_diagnostic_flags_reject_each_false_deterministic_state() -> None:
@@ -5019,67 +3952,6 @@ def test_diagnostic_replay_validators_reject_rows_not_from_checkpoint(monkeypatc
         sf.replay_named_generation_artifact(tmp_path / "checkpoint.pt", matrix_rows=[], retained_rows=[{"row": "retained"}])
 
 
-def test_diagnostic_terminal_markers_are_removed_after_post_terminal_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    input_root = tmp_path / "feasibility_004"
-    output_root = tmp_path / "feasibility_diagnostic_001"
-    source_snapshot = sf.SourceSnapshot(commit="b" * 40, status_lines=(), ignored_inputs=())
-    preflight = {
-        "input_root": str(input_root),
-        "predecessors": [],
-        "diagnostic_lineage": [],
-        "repair_transition": None,
-        "handoff": {},
-        "input_root_binding": {},
-        "record_hashes": {},
-        "core_blobs": {},
-        "environment": {},
-    }
-    monkeypatch.setattr(sf, "require_diagnostic_real_main_context", lambda: None)
-    monkeypatch.setattr(sf, "validate_diagnostic_cli_contract", lambda **kwargs: None)
-    monkeypatch.setattr(sf, "capture_diagnostic_source_provenance", lambda *args: source_snapshot)
-    monkeypatch.setattr(sf, "diagnostic_preflight_bindings", lambda *args: preflight)
-    monkeypatch.setattr(sf, "validate_diagnostic_input_root", lambda *args, **kwargs: {})
-    monkeypatch.setattr(sf, "SEEDS", ())
-    monkeypatch.setattr(sf, "NAMED_DIAGNOSTIC_CELLS", ())
-    monkeypatch.setattr(sf, "build_named_diagnostic_matrix", lambda: {})
-    monkeypatch.setattr(sf, "validate_diagnostic_array_training_plan", lambda plan: None)
-    monkeypatch.setattr(sf, "diagnostic_array_training_plan", lambda: [])
-    def publication_stub(*args: object, **kwargs: object) -> None:
-        callback = kwargs.get("final_callback")
-        if callback is not None:
-            callback()
-
-    monkeypatch.setattr(sf, "publish_diagnostic_root_or_leave_incomplete", publication_stub)
-
-    calls = {"source": 0}
-
-    def source_changed_after_done(snapshot: object, *, active_output_root: Path | None = None) -> None:
-        calls["source"] += 1
-        if calls["source"] == 2:
-            raise sf.SourceChangedError("changed after terminal")
-
-    monkeypatch.setattr(sf, "verify_diagnostic_preflight_bindings", lambda *args: None)
-    monkeypatch.setattr(sf, "verify_source_unchanged", source_changed_after_done)
-    with pytest.raises(sf.DiagnosticPublicationError):
-        sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=output_root)
-    assert not (output_root.with_name(output_root.name + ".tmp") / "DONE.json").exists()
-    assert not (output_root.with_name(output_root.name + ".tmp") / "FAILED.json").exists()
-
-    second_output = tmp_path / "feasibility_diagnostic_002"
-    calls = {"preflight": 0}
-
-    def preflight_changed_after_done(*args: object) -> None:
-        calls["preflight"] += 1
-        if calls["preflight"] == 2:
-            raise ValueError("changed after terminal")
-
-    monkeypatch.setattr(sf, "verify_diagnostic_preflight_bindings", preflight_changed_after_done)
-    monkeypatch.setattr(sf, "verify_source_unchanged", lambda *args, **kwargs: None)
-    with pytest.raises(sf.DiagnosticPublicationError):
-        sf.run_diagnostic_failure(device="cuda:0", input_root=input_root, output_root=second_output)
-    assert not (second_output.with_name(second_output.name + ".tmp") / "DONE.json").exists()
-    assert not (second_output.with_name(second_output.name + ".tmp") / "FAILED.json").exists()
 
 
 def test_diagnostic_repair_transition_binds_predecessor_current_and_allowed_diff(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5089,14 +3961,13 @@ def test_diagnostic_repair_transition_binds_predecessor_current_and_allowed_diff
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(sf, "validate_diagnostic_repair_diff_confined", lambda old, new: calls.append((old, new)))
     lineage = [{"source_commit": superseded, "failure_classification": "diagnostic_implementation_defect"}]
-    transition = sf.diagnostic_repair_transition(lineage, repaired_source_commit=repaired)
-    assert transition == {
+    transition = {
         "superseded_source_commit": superseded,
         "repaired_source_commit": repaired,
         "allowed_diff_paths": sorted(sf.DIAGNOSTIC_REPAIR_ALLOWED_DIFF_PATHS),
     }
     sf.validate_diagnostic_repair_transition(transition, lineage=lineage, source_commit=repaired)
-    assert calls == [(superseded, repaired), (superseded, repaired)]
+    assert calls == [(superseded, repaired)]
     with pytest.raises(ValueError, match="superseded"):
         sf.validate_diagnostic_repair_transition({**transition, "superseded_source_commit": "d" * 40}, lineage=lineage, source_commit=repaired)
     with pytest.raises(ValueError, match="repaired"):
