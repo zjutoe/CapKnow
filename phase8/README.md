@@ -107,6 +107,40 @@ An executor must not implement a later task, change a scientific constant, loose
 gate, run the formal experiment, or authorize resources. Ambiguity is a stop
 condition and must be returned to `main`.
 
+## Future-only shared handoff protocol
+
+Only a future handoff may inherit common sections from this README, and only by
+explicitly naming both `phase8/README.md` and the exact Git commit whose README
+bytes it uses. Its opt-in declaration must enumerate every inherited section by
+name:
+
+```text
+Shared protocol path: phase8/README.md
+Shared protocol commit: <exact-40-hex-Git-commit>
+Inherited sections: <exact section name>[, <exact section name> ...]
+Task-specific overrides: <exact inherited field/section and replacement, or none>
+```
+
+Permitted shared material is limited to generic process text in `Fixed execution
+route`, the writer lease/main-owned commit and review gate in `Sequence and mutation
+lease`, `Common return format`, and its blocked return format. The shared protocol
+and this index grant no scientific, execution, experiment, selection, commit, or
+resource authority.
+
+This rule is future-only and has no retroactive effect. Existing A-H and D1-D3
+handoffs keep their exact frozen bytes and do not implicitly inherit it. Never
+inherit or deduplicate task-specific scientific constants, schemas, metrics, stop
+or selection gates, artifact/source/path/hash bindings, allowed paths, tests,
+prerequisites, resource or experiment authorization, or accepted/rejected lineage.
+
+An override must name the exact inherited fields or sections and affect only those
+fields. It cannot broaden execution, scientific, or resource authority unless the
+task's actual accepted authority explicitly grants that broader authority.
+
+A missing or mismatched shared-protocol path, exact commit, or named section fails
+closed and must be returned to `main`. A branch name or moving `HEAD` is not a valid
+binding.
+
 ## Handoff index
 
 The role labels below are navigational summaries, not replacement task contracts.
