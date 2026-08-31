@@ -157,6 +157,7 @@ The role labels below are navigational summaries, not replacement task contracts
 | `Task_010C_D3_Feasibility_005_Postmortem_Proposal.md` | Checkpoint-read-only postmortem proposal | Historical provenance after the accepted D3 run | Proposal, not evidence | No direct implementation or experiment authority |
 | `Task_010C_D3_Postmortem_Implementation.md` | Fail-closed read-only postmortem implementation handoff | Historical provenance after D3 `DONE` | Defines a non-evidence analysis only | No current authority; cannot authorize `010D` |
 | `Task_010C_D3_Postmortem_Verifier.py.txt` | Frozen inline D3 launch verifier / pre-runner trust root | Historical provenance; not scientific authority | Executable verification provenance, not scientific evidence | None by itself |
+| `Future_Only_Postmortem_Process_Isolation_Design.md` | Future-only postmortem process-isolation simplification design | Conditional future / design only; never current scientific authority | None | None |
 | `Task_010D_Training_Checkpoint_and_Evaluator.md` | Formal training, checkpoint, and evaluator handoff | Conditional future / blocked by no selection | No current evidence | No current authority |
 | `Task_010E_Behavioral_Certificate_Integration.md` | Behavioral-certificate integration handoff | Conditional future / blocked behind `010D` | No current evidence | No current authority |
 | `Task_010F_Metrics_and_Aggregation.md` | Metrics and aggregation handoff | Conditional future / blocked behind prior tasks | No current evidence | No current authority |
