@@ -63,7 +63,6 @@ from capability_certificate_lab.lm_bridge.train import (
     make_optimizer,
     response_only_labels,
     save_checkpoint,
-    set_deterministic_backend,
     train_text_records,
     load_model_from_checkpoint,
     validate_tied_checkpoint_payload,
@@ -132,7 +131,6 @@ FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS = (
     "artifacts/phase8_toy_lm_bridge/feasibility_004",
 )
 FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT = "artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001"
-FEASIBILITY_REQUIRED_ENV = DIAGNOSTIC_REQUIRED_ENV
 FEASIBILITY_REQUIRED_RUNTIME_ENV = {
     "cuda": "13.0",
     "cuda_available": True,
@@ -2238,19 +2236,6 @@ def validate_current_deterministic_flags(value: object) -> None:
     validate_diagnostic_flags(value)
 
 
-def configure_feasibility_deterministic_backend() -> None:
-    set_deterministic_backend(0)
-    validate_current_deterministic_flags(current_deterministic_flags())
-
-
-def validate_feasibility_environment() -> None:
-    for key, expected in FEASIBILITY_REQUIRED_ENV.items():
-        if os.environ.get(key) != expected:
-            raise ValueError(f"run environment {key} must exactly equal {expected!r}.")
-    if current_environment_dict() != FEASIBILITY_REQUIRED_RUNTIME_ENV:
-        raise ValueError("run environment dictionary does not match the frozen cuda:0 A800 environment.")
-
-
 def validate_diagnostic_core_blobs(commit: str = "HEAD") -> dict[str, str]:
     actual = {
         path: git_output(["git", "rev-parse", f"{commit}:{path}"])
@@ -3468,30 +3453,6 @@ def validate_diagnostic_repair_transition(
 
 
 
-def diagnostic_kernel_argv() -> list[str]:
-    cmdline = Path("/proc/self/cmdline")
-    try:
-        raw = cmdline.read_bytes()
-    except OSError as exc:
-        raise ValueError("diagnose-failure cannot authorize without Linux /proc/self/cmdline.") from exc
-    if not raw or not raw.endswith(b"\0"):
-        raise ValueError("diagnose-failure kernel argv is unavailable or malformed.")
-    parts = raw[:-1].split(b"\0")
-    if not parts or any(part == b"" for part in parts):
-        raise ValueError("diagnose-failure kernel argv is malformed.")
-    try:
-        return [os.fsdecode(part) for part in parts]
-    except UnicodeDecodeError as exc:
-        raise ValueError("diagnose-failure kernel argv is not decodable.") from exc
-
-
-
-
-def require_feasibility_real_main_context() -> None:
-    if __name__ != "__main__":
-        raise ValueError("run must execute from this file's real __main__ process context.")
-
-
 def diagnostic_exact_command(
     output_root: Path,
     predecessor_diagnostic_roots: Sequence[Path],
@@ -3550,38 +3511,6 @@ def feasibility_exact_command(
         "PYTHONPATH=.",
         *feasibility_exact_argv(root, predecessor_roots, decision_diagnostic_root),
     ]
-
-
-def validate_feasibility_process_argv(raw_argv: Sequence[str], expected_argv: Sequence[str]) -> None:
-    if list(raw_argv) != list(expected_argv):
-        raise ValueError(f"run process argv must exactly match the authorized command: {list(expected_argv)!r}.")
-    if any(arg in {"-O", "-OO", "-B"} or arg.startswith("-X") for arg in raw_argv):
-        raise ValueError("run forbids Python optimization, bytecode, or implementation flags.")
-
-
-def validate_feasibility_cli_contract(
-    *,
-    device: str,
-    root: Path,
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    decision_diagnostic_root: Path,
-) -> None:
-    if device != FEASIBILITY_REQUIRED_DEVICE:
-        raise ValueError("run only supports device string cuda:0.")
-    if predecessor_selections:
-        raise ValueError("run forbids predecessor selections for feasibility_005.")
-    if str(root) != FEASIBILITY_REQUIRED_ROOT:
-        raise ValueError("run root must be exactly artifacts/phase8_toy_lm_bridge/feasibility_005.")
-    if tuple(str(path) for path in predecessor_roots) != FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS:
-        raise ValueError("run predecessor roots must be exactly feasibility_001..004 in numerical order.")
-    if str(decision_diagnostic_root) != FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT:
-        raise ValueError("run decision diagnostic root must be exactly feasibility_diagnostic_001.")
-    validate_feasibility_process_argv(
-        diagnostic_kernel_argv(),
-        feasibility_exact_argv(root, predecessor_roots, decision_diagnostic_root),
-    )
-    validate_feasibility_environment()
 
 
 def reused_feasibility_cell_binding(input_root: Path, family: str, model_size: str, seed: int) -> dict[str, object]:
@@ -3824,223 +3753,14 @@ def diagnostic_inventory(root: Path) -> list[dict[str, object]]:
 
 
 
-def validate_current_feasibility_terminal_root(
-    temp_root: Path,
-    output_root: Path,
-    *,
-    terminal_status: str,
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    decision_diagnostic_root: Path,
-    source_snapshot: SourceSnapshot,
-    allowed_source_paths: set[Path],
-) -> None:
-    terminals = [path.name for path in (temp_root / "DONE.json", temp_root / "FAILED.json") if path.exists()]
-    if terminals != [f"{terminal_status}.json"]:
-        raise ValueError("Current feasibility temp root must contain exactly one terminal marker matching the requested status.")
-    manifest = temp_root / "manifest.json"
-    summary = temp_root / "summary.json"
-    terminal = temp_root / f"{terminal_status}.json"
-    if not manifest.is_file() or not summary.is_file() or not terminal.is_file():
-        raise ValueError("Current feasibility temp root must contain manifest.json, summary.json, and its terminal marker before publish.")
-    manifest_data = json.loads(manifest.read_text())
-    summary_data = json.loads(summary.read_text())
-    terminal_data = json.loads(terminal.read_text())
-    expected_terminal_keys = set(CURRENT_TERMINAL_KEYS)
-    if terminal_status == "FAILED" and manifest_data.get("failure") is not None:
-        expected_terminal_keys.add("error")
-    if set(manifest_data) != CURRENT_MANIFEST_KEYS:
-        raise ValueError("Current manifest must use the exact tied feasibility schema.")
-    if set(summary_data) != CURRENT_SUMMARY_KEYS:
-        raise ValueError("Current summary must use the exact tied feasibility schema.")
-    if set(terminal_data) != expected_terminal_keys:
-        raise ValueError("Current terminal must use the exact tied feasibility schema.")
-    if terminal_data.get("status") != terminal_status:
-        raise ValueError("Current feasibility terminal status does not match its filename.")
-    if manifest_data.get("terminal_status") != terminal_status or summary_data.get("terminal_status") != terminal_status:
-        raise ValueError("Current feasibility manifest/summary terminal_status mismatch.")
-    if terminal_data.get("manifest_path") != "manifest.json":
-        raise ValueError("Current feasibility terminal manifest_path must be manifest.json.")
-    if terminal_data.get("manifest_sha256") != file_sha256(manifest):
-        raise ValueError("Current feasibility terminal does not bind the exact manifest checksum.")
-    if terminal_status == "DONE":
-        if manifest_data.get("failure") is not None or summary_data.get("failure") is not None or "error" in terminal_data:
-            raise ValueError("DONE current feasibility root must not record a failure.")
-    elif terminal_data.get("error") != manifest_data.get("failure"):
-        raise ValueError("FAILED current feasibility terminal error does not match the manifest failure.")
-    if summary_data.get("failure") != manifest_data.get("failure"):
-        raise ValueError("Current feasibility summary and manifest disagree on failure.")
-
-    cells = manifest_data.get("cells")
-    if terminal_data.get("cells") != cells:
-        raise ValueError("Current feasibility terminal cells do not match manifest cells.")
-    if summary_data.get("cells") != cells:
-        raise ValueError("Current feasibility summary cells do not match manifest cells.")
-    complete_matrix = isinstance(cells, list) and len(cells) == len(current_feasibility_cell_identities())
-    require_all_pass = terminal_status == "DONE"
-    validate_current_feasibility_cells(
-        cells,
-        require_complete=terminal_status == "DONE" or complete_matrix,
-        require_all_pass=require_all_pass,
-    )
-    if terminal_status == "DONE" and not complete_matrix:
-        raise ValueError("DONE current feasibility root must contain the complete 24-cell matrix.")
-    if terminal_status == "FAILED" and not complete_matrix and manifest_data.get("failure") is None:
-        raise ValueError("Partial FAILED current feasibility root must record an operational failure.")
-
-    validate_summary_aggregates(summary_data, cells, terminal_status, manifest_data.get("failure"))
-    expected_configuration = frozen_configuration()
-    expected_command = feasibility_exact_command(output_root, predecessor_roots, decision_diagnostic_root)
-    for record_name, record in (("manifest", manifest_data), ("summary", summary_data), ("terminal", terminal_data)):
-        if record.get("configuration") != expected_configuration:
-            raise ValueError(f"Current {record_name} configuration mismatch.")
-        if record.get("decision_diagnostic") != DECISION_DIAGNOSTIC_ROOT_BINDING:
-            raise ValueError(f"Current {record_name} decision_diagnostic mismatch.")
-        if record.get("record_hashes") != FEASIBILITY_RECORD_HASHES:
-            raise ValueError(f"Current {record_name} record_hashes mismatch.")
-        if record.get("exact_command") != expected_command:
-            raise ValueError(f"Current {record_name} exact_command mismatch.")
-        validate_current_deterministic_flags(record.get("deterministic_flags"))
-    if manifest_data.get("environment") != FEASIBILITY_REQUIRED_RUNTIME_ENV:
-        raise ValueError("Current manifest environment does not match the frozen cuda:0 A800 environment.")
-    if manifest_data.get("source_commit") != source_snapshot.commit:
-        raise ValueError("Current manifest source_commit does not match the clean-source snapshot.")
-    validate_source_provenance(manifest_data.get("source_provenance"), source_snapshot.commit, allowed_source_paths)
-    summary_source = summary_data.get("source")
-    if not isinstance(summary_source, dict) or set(summary_source) != {"commit", "script", "ignored_inputs"}:
-        raise ValueError("Current summary source must use the exact schema.")
-    if summary_source.get("commit") != source_snapshot.commit:
-        raise ValueError("Current summary source commit does not match the clean-source snapshot.")
-    if summary_source.get("script") != "scripts/phase8_sequence_feasibility.py":
-        raise ValueError("Current summary source script mismatch.")
-    if summary_source.get("ignored_inputs") != list(source_snapshot.ignored_inputs):
-        raise ValueError("Current summary source ignored_inputs do not match the clean-source snapshot.")
-    if manifest_data.get("predecessor_selections") != [selection_binding(path) for path in predecessor_selections]:
-        raise ValueError("Current manifest predecessor_selections mismatch.")
-    expected_predecessor_roots = complete_predecessor_root_bindings(predecessor_roots, predecessor_selections)
-    if manifest_data.get("predecessor_roots") != expected_predecessor_roots:
-        raise ValueError("Current manifest predecessor_roots do not bind the complete predecessor lineage.")
-
-    inventory_paths = validate_root_file_inventory(temp_root, manifest_data)
-    expected_files = {"summary.json"}
-    for cell in cells:
-        generation_path = require_canonical_relative_path(cell["generations_path"], "generations_path")
-        checkpoint_path = require_canonical_relative_path(cell["checkpoint_path"], "checkpoint_path")
-        expected_files.add(generation_path)
-        expected_files.add(checkpoint_path)
-    if inventory_paths != expected_files:
-        raise ValueError("Current manifest file_inventory contains files outside the completed-cell artifact set.")
-    actual_files = {str(path.relative_to(temp_root)) for path in temp_root.rglob("*") if path.is_file()}
-    expected_root_files = {*expected_files, "manifest.json", f"{terminal_status}.json"}
-    if actual_files != expected_root_files:
-        missing = sorted(expected_root_files - actual_files)
-        extra = sorted(actual_files - expected_root_files)
-        raise ValueError(f"Current feasibility temp root has incomplete or extra files: missing={missing!r}, extra={extra!r}.")
-    for cell in cells:
-        generation_rows = validate_generation_artifact(temp_root / str(cell["generations_path"]), cell)
-        validate_checkpoint_artifact(temp_root / str(cell["checkpoint_path"]), cell)
-        validate_checkpoint_replays_generations(temp_root / str(cell["checkpoint_path"]), cell, generation_rows)
 
 
-def validate_current_feasibility_terminal_inventory_snapshot(temp_root: Path, *, terminal_status: str) -> None:
-    terminals = [path.name for path in (temp_root / "DONE.json", temp_root / "FAILED.json") if path.exists()]
-    if terminals != [f"{terminal_status}.json"]:
-        raise ValueError("Current feasibility temp root must contain exactly one terminal marker matching the requested status.")
-    manifest = temp_root / "manifest.json"
-    terminal = temp_root / f"{terminal_status}.json"
-    if not manifest.is_file() or not terminal.is_file():
-        raise ValueError("Current feasibility temp root lacks terminal inventory files.")
-    manifest_data = json.loads(manifest.read_text())
-    terminal_data = json.loads(terminal.read_text())
-    expected_inventory = inventory(temp_root)
-    if manifest_data.get("file_inventory") != expected_inventory:
-        raise ValueError("Current feasibility final manifest inventory does not exactly match current root files.")
-    if terminal_data.get("manifest_sha256") != file_sha256(manifest):
-        raise ValueError("Current feasibility final terminal manifest checksum mismatch.")
-    for row in expected_inventory:
-        path = temp_root / require_canonical_relative_path(row.get("path"), "current_feasibility.final_inventory.path")
-        if row.get("sha256") != file_sha256(path) or row.get("bytes") != path.stat().st_size:
-            raise ValueError("Current feasibility final inventory checksum or byte count mismatch.")
 
 
-def publish_current_feasibility_root(
-    temp_root: Path,
-    output_root: Path,
-    *,
-    terminal_status: str,
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    decision_diagnostic_root: Path,
-    source_snapshot: SourceSnapshot,
-    allowed_source_paths: set[Path],
-    final_callback: Callable[[], None] | None = None,
-) -> None:
-    if output_root.exists() or output_root.is_symlink():
-        raise FileExistsError(f"Refusing to overwrite existing feasibility root: {output_root}")
-    validate_current_feasibility_terminal_root(
-        temp_root,
-        output_root,
-        terminal_status=terminal_status,
-        predecessor_roots=predecessor_roots,
-        predecessor_selections=predecessor_selections,
-        decision_diagnostic_root=decision_diagnostic_root,
-        source_snapshot=source_snapshot,
-        allowed_source_paths=allowed_source_paths,
-    )
-    if final_callback is not None:
-        final_callback()
-    validate_current_feasibility_terminal_inventory_snapshot(temp_root, terminal_status=terminal_status)
-    if final_callback is not None:
-        final_callback()
-    atomic_rename_noreplace(temp_root, output_root)
 
 
-def publish_current_feasibility_root_or_leave_incomplete(
-    temp_root: Path,
-    output_root: Path,
-    *,
-    terminal_status: str,
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    decision_diagnostic_root: Path,
-    source_snapshot: SourceSnapshot,
-    allowed_source_paths: set[Path],
-    final_callback: Callable[[], None] | None = None,
-) -> None:
-    try:
-        publish_current_feasibility_root(
-            temp_root,
-            output_root,
-            terminal_status=terminal_status,
-            predecessor_roots=predecessor_roots,
-            predecessor_selections=predecessor_selections,
-            decision_diagnostic_root=decision_diagnostic_root,
-            source_snapshot=source_snapshot,
-            allowed_source_paths=allowed_source_paths,
-            final_callback=final_callback,
-        )
-    except Exception as exc:
-        remove_diagnostic_terminal_markers(temp_root)
-        raise FeasibilityPublicationError(
-            f"Current feasibility publication failed without overwriting {output_root}; the temporary root is incomplete."
-        ) from exc
 
 
-def remove_diagnostic_terminal_markers(root: Path) -> None:
-    try:
-        root_metadata = root.lstat()
-    except FileNotFoundError:
-        return
-    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
-        return
-    for name in ("DONE.json", "FAILED.json"):
-        marker = root / name
-        try:
-            marker_metadata = marker.lstat()
-        except FileNotFoundError:
-            continue
-        if stat.S_ISREG(marker_metadata.st_mode):
-            marker.unlink()
 
 
 def atomic_rename_noreplace(source: Path, destination: Path) -> None:
@@ -4079,229 +3799,10 @@ def atomic_rename_noreplace_at(
 
 
 
-def run_current_suite(
-    root: Path,
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    *,
-    device: str,
-    decision_diagnostic_root: Path,
-) -> None:
-    require_feasibility_real_main_context()
-    validate_feasibility_cli_contract(
-        device=device,
-        root=root,
-        predecessor_roots=predecessor_roots,
-        predecessor_selections=predecessor_selections,
-        decision_diagnostic_root=decision_diagnostic_root,
-    )
-    validate_current_run_root_contract(root, predecessor_roots, predecessor_selections, decision_diagnostic_root)
-    shallow_allowed_paths = shallow_current_run_allowed_paths(predecessor_roots, decision_diagnostic_root)
-    source_snapshot = capture_source_provenance(root, predecessor_roots, predecessor_selections, allowed_paths=shallow_allowed_paths)
-    configure_feasibility_deterministic_backend()
-    record_hashes = validate_feasibility_record_hashes()
-    for predecessor_root in predecessor_roots:
-        validate_feasibility_root_artifacts(predecessor_root, require_passing=False)
-    decision_diagnostic_binding = validate_decision_diagnostic_binding(decision_diagnostic_root, deep=True)
-    temp_root = root.with_name(root.name + ".tmp")
-    if temp_root.exists():
-        raise FileExistsError(f"Temporary feasibility root already exists: {temp_root}")
-    temp_root.mkdir(parents=True)
-    cells: list[dict[str, object]] = []
-
-    def final_publication_callback() -> None:
-        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
-
-    try:
-        records = grouped_records()
-        tokenizer = ByteTokenizer()
-        target_device = torch.device(device)
-        for family in FAMILIES:
-            train_records = tuple(TextRecord(r.prompt, r.answer) for r in records[family]["train"])
-            eval_records = records[family]["eval"]
-            for model_size in MODEL_SIZES:
-                for seed in SEEDS:
-                    set_deterministic_backend(seed)
-                    model = build_model(model_size)
-                    if model.lm_head.weight is not model.token_embedding.weight:
-                        raise ValueError("Current feasibility model must tie lm_head.weight to token_embedding.weight.")
-                    if any(parameter.device.type != "cpu" for parameter in model.parameters()):
-                        raise ValueError("Current feasibility model must be initialized completely on CPU before cuda:0 transfer.")
-                    model.to(target_device)
-                    result = train_text_records(
-                        model,
-                        train_records,
-                        seed=seed,
-                        state_mask=0,
-                        steps=TRAINING_STEPS,
-                        batch_size=BATCH_SIZE,
-                        tokenizer=tokenizer,
-                        device=target_device,
-                    )
-                    exact_matches, generations = evaluate_model(model, eval_records, tokenizer, target_device)
-                    cell_dir = temp_root / f"{family}__{model_size}__seed{seed}"
-                    cell_dir.mkdir()
-                    write_jsonl(cell_dir / "generations.jsonl", generations)
-                    save_checkpoint(
-                        str(cell_dir / "checkpoint_step1500.pt"),
-                        model,
-                        metadata={
-                            "family": family,
-                            "model_size": model_size,
-                            "seed": seed,
-                            "training_steps": TRAINING_STEPS,
-                            "training_loss": result.final_loss,
-                            "training_accuracy": result.training_accuracy,
-                        },
-                    )
-                    cells.append(
-                        {
-                            "family": family,
-                            "model_size": model_size,
-                            "seed": seed,
-                            "eval_count": EVAL_RECORDS_PER_FAMILY,
-                            "exact_matches": exact_matches,
-                            "passed": exact_matches >= PASS_THRESHOLD,
-                            "generations_path": str(cell_dir.relative_to(temp_root) / "generations.jsonl"),
-                            "checkpoint_path": str(cell_dir.relative_to(temp_root) / "checkpoint_step1500.pt"),
-                            "parameter_count": model.parameter_count,
-                            "embedding_weight_tying": True,
-                            "model_protocol_revision": TIED_MODEL_PROTOCOL_REVISION,
-                        }
-                    )
-        terminal_status = "DONE" if all(cell["passed"] for cell in cells) else "FAILED"
-        failure = None if terminal_status == "DONE" else "complete feasibility matrix did not satisfy all 24 pass thresholds."
-        try:
-            validate_current_feasibility_cells(
-                cells,
-                require_complete=True,
-                require_all_pass=terminal_status == "DONE",
-            )
-            verify_source_unchanged(source_snapshot, active_output_root=temp_root)
-            write_terminal(
-                temp_root,
-                terminal_status,
-                cells,
-                predecessor_roots,
-                predecessor_selections,
-                failure=failure,
-                source_snapshot=source_snapshot,
-                decision_diagnostic=decision_diagnostic_binding,
-                exact_command=feasibility_exact_command(root, predecessor_roots, decision_diagnostic_root),
-                deterministic_flags=current_deterministic_flags(),
-                record_hashes=record_hashes,
-            )
-            publish_current_feasibility_root_or_leave_incomplete(
-                temp_root,
-                root,
-                terminal_status=terminal_status,
-                predecessor_roots=predecessor_roots,
-                predecessor_selections=predecessor_selections,
-                decision_diagnostic_root=decision_diagnostic_root,
-                source_snapshot=source_snapshot,
-                allowed_source_paths=shallow_allowed_paths,
-                final_callback=final_publication_callback,
-            )
-        except (SourceChangedError, FeasibilityPublicationError):
-            remove_diagnostic_terminal_markers(temp_root)
-            raise
-        except Exception as terminal_exc:
-            remove_diagnostic_terminal_markers(temp_root)
-            raise FeasibilityPublicationError("Current feasibility terminal publication failed; temporary root is incomplete.") from terminal_exc
-    except (SourceChangedError, FeasibilityPublicationError):
-        remove_diagnostic_terminal_markers(temp_root)
-        raise
-    except Exception as exc:
-        verify_source_unchanged(source_snapshot, active_output_root=temp_root)
-        try:
-            write_terminal(
-                temp_root,
-                "FAILED",
-                cells,
-                predecessor_roots,
-                predecessor_selections,
-                failure=repr(exc),
-                source_snapshot=source_snapshot,
-                decision_diagnostic=decision_diagnostic_binding,
-                exact_command=feasibility_exact_command(root, predecessor_roots, decision_diagnostic_root),
-                deterministic_flags=current_deterministic_flags(),
-                record_hashes=record_hashes,
-            )
-            publish_current_feasibility_root_or_leave_incomplete(
-                temp_root,
-                root,
-                terminal_status="FAILED",
-                predecessor_roots=predecessor_roots,
-                predecessor_selections=predecessor_selections,
-                decision_diagnostic_root=decision_diagnostic_root,
-                source_snapshot=source_snapshot,
-                allowed_source_paths=shallow_allowed_paths,
-                final_callback=final_publication_callback,
-            )
-        except Exception as post_terminal_exc:
-            remove_diagnostic_terminal_markers(temp_root)
-            raise FeasibilityPublicationError("Current feasibility FAILED terminal failed post-construction validation; temporary root is incomplete.") from post_terminal_exc
-        raise
 
 
-def validate_new_root(
-    root: Path,
-    predecessor_roots: Sequence[Path] = (),
-    predecessor_selections: Sequence[Path] = (),
-) -> None:
-    context = FeasibilityValidationContext()
-    require_canonical_path_string(str(root), "root", ROOT_RE)
-    require_artifact_location(root, "root", ROOT_RE)
-    root_number = feasibility_root_number(root)
-    direct_numbers: list[int] = []
-    for predecessor_root in predecessor_roots:
-        predecessor_number = feasibility_root_number(predecessor_root)
-        if direct_numbers and predecessor_number <= direct_numbers[-1]:
-            raise ValueError("Feasibility predecessor roots must be in strictly ascending root-number order.")
-        direct_numbers.append(predecessor_number)
-        terminal_binding(predecessor_root, context=context)
-    selected_numbers: list[int] = []
-    for selection in predecessor_selections:
-        data = validate_selection_record(selection, context=context)
-        selected_numbers.append(feasibility_root_number(Path(str(data["selected_root"]))))
-    expected_previous_numbers = list(range(1, root_number))
-    observed_numbers = sorted({*direct_numbers, *selected_numbers})
-    if observed_numbers != expected_previous_numbers:
-        raise ValueError(
-            f"Feasibility predecessor roots must be complete and continuous before {root.name!r}; "
-            f"expected {expected_previous_numbers!r}, got {observed_numbers!r}."
-        )
-    expected_number = len(expected_previous_numbers) + 1
-    if root_number != expected_number:
-        raise ValueError(
-            f"Feasibility root must use the next numbered root feasibility_{expected_number:03d}; "
-            f"got {root.name!r}."
-        )
-    if root.exists() or root.is_symlink():
-        raise FileExistsError(f"Refusing to overwrite existing feasibility root: {root}")
 
 
-def validate_current_run_root_contract(
-    root: Path,
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    decision_diagnostic_root: Path,
-) -> None:
-    require_canonical_path_string(str(root), "root", ROOT_RE)
-    require_artifact_location(root, "root", ROOT_RE)
-    if str(root) != FEASIBILITY_REQUIRED_ROOT:
-        raise ValueError("Current D2 run root must be exactly artifacts/phase8_toy_lm_bridge/feasibility_005.")
-    if root.exists() or root.is_symlink():
-        raise FileExistsError(f"Refusing to overwrite existing feasibility root: {root}")
-    temp_root = root.with_name(root.name + ".tmp")
-    if temp_root.exists() or temp_root.is_symlink():
-        raise FileExistsError(f"Temporary feasibility root already exists: {temp_root}")
-    if predecessor_selections:
-        raise ValueError("Current D2 run forbids predecessor selections.")
-    if tuple(str(path) for path in predecessor_roots) != FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS:
-        raise ValueError("Current D2 run requires exactly predecessor roots feasibility_001..004 in numerical order.")
-    if str(decision_diagnostic_root) != FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT:
-        raise ValueError("Current D2 run requires exactly feasibility_diagnostic_001 as decision diagnostic.")
 
 
 def feasibility_root_number(root: Path) -> int:
@@ -4339,47 +3840,8 @@ def validation_context(context: FeasibilityValidationContext | None = None) -> F
     return context if context is not None else FeasibilityValidationContext()
 
 
-def validate_source_clean(root: Path, predecessor_roots: Sequence[Path], predecessor_selections: Sequence[Path]) -> SourceSnapshot:
-    return capture_source_provenance(root, predecessor_roots, predecessor_selections)
 
 
-def capture_source_provenance(
-    root: Path,
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    *,
-    allowed_paths: set[Path] | None = None,
-) -> SourceSnapshot:
-    require_artifact_location(root, "root", ROOT_RE)
-    allowed = source_clean_allowed_paths(predecessor_roots, predecessor_selections) if allowed_paths is None else allowed_paths
-    status = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        cwd=REPO_ROOT,
-    ).stdout.splitlines()
-    for line in status:
-        code = line[:2]
-        rel = line[3:]
-        rel_path = Path(rel)
-        candidate = (rel_path if rel_path.is_absolute() else REPO_ROOT / rel_path).resolve()
-        if code != "??":
-            raise RuntimeError(f"Tracked or staged source change blocks feasibility run: {line}")
-        if candidate not in allowed:
-            raise RuntimeError(f"Untracked file is not an exact supplied predecessor/root binding: {line}")
-    commit = git_output(["git", "rev-parse", "HEAD"])
-    validate_git_sha(commit, "source_commit")
-    ignored_inputs = ignored_source_inputs()
-    if ignored_inputs:
-        paths = ", ".join(str(row["path"]) for row in ignored_inputs[:5])
-        suffix = " ..." if len(ignored_inputs) > 5 else ""
-        raise RuntimeError(f"Ignored executable source input blocks feasibility run: {paths}{suffix}")
-    return SourceSnapshot(
-        commit=commit,
-        status_lines=tuple(status),
-        ignored_inputs=(),
-    )
 
 
 def shallow_inventory_bound_paths_from_rows(root: Path, rows: object, *, schema_mode: str) -> set[Path]:
@@ -4470,30 +3932,8 @@ def shallow_decision_diagnostic_paths(root: Path) -> set[Path]:
     }
 
 
-def shallow_current_run_allowed_paths(predecessor_roots: Sequence[Path], decision_diagnostic_root: Path) -> set[Path]:
-    allowed: set[Path] = set()
-    for root in predecessor_roots:
-        allowed.update(shallow_inventory_bound_root_paths(root))
-    allowed.update(shallow_decision_diagnostic_paths(decision_diagnostic_root))
-    return allowed
 
 
-def verify_source_unchanged(snapshot: SourceSnapshot, *, active_output_root: Path | None = None) -> None:
-    current = git_output(["git", "rev-parse", "HEAD"])
-    if current != snapshot.commit:
-        raise SourceChangedError("Source HEAD changed during feasibility run before terminal publication.")
-    status = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        cwd=REPO_ROOT,
-    ).stdout.splitlines()
-    filtered_status = tuple(line for line in status if not is_active_output_status_line(line, active_output_root))
-    if filtered_status != snapshot.status_lines:
-        raise SourceChangedError("Source worktree status changed during feasibility run before terminal publication.")
-    if ignored_source_inputs() != snapshot.ignored_inputs:
-        raise SourceChangedError("Ignored executable source inputs changed during feasibility run before terminal publication.")
 
 
 def ignored_import_surface_candidate(path: Path, *, is_symlink: bool, link_target: str | None) -> bool:
@@ -4520,89 +3960,14 @@ def ignored_import_surface_candidate(path: Path, *, is_symlink: bool, link_targe
     return False
 
 
-def sha256_regular_file_no_follow(path: Path, expected_stat: os.stat_result | None = None) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
-    try:
-        observed = os.fstat(fd)
-        if not stat.S_ISREG(observed.st_mode):
-            raise ValueError("Source snapshot can hash only regular non-symlink files.")
-        if expected_stat is not None:
-            expected_identity = (expected_stat.st_dev, expected_stat.st_ino, stat.S_IFMT(expected_stat.st_mode), expected_stat.st_size)
-            observed_identity = (observed.st_dev, observed.st_ino, stat.S_IFMT(observed.st_mode), observed.st_size)
-            if observed_identity != expected_identity:
-                raise ValueError("Source snapshot file identity changed while hashing.")
-        digest = sha256()
-        while True:
-            chunk = os.read(fd, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-        return digest.hexdigest()
-    finally:
-        os.close(fd)
 
 
-def symlink_target_sha256(path: Path) -> tuple[str, int]:
-    target = os.readlink(path)
-    payload = os.fsencode(target)
-    return sha256(payload).hexdigest(), len(payload)
 
 
-def ignored_source_input_snapshot(path: Path) -> dict[str, object] | None:
-    if path.is_absolute():
-        raise ValueError("Ignored source snapshot requires repository-relative paths.")
-    absolute = REPO_ROOT / path
-    try:
-        metadata = absolute.lstat()
-    except FileNotFoundError:
-        return None
-    is_symlink = stat.S_ISLNK(metadata.st_mode)
-    link_target = os.readlink(absolute) if is_symlink else None
-    if not ignored_import_surface_candidate(path, is_symlink=is_symlink, link_target=link_target):
-        return None
-    if is_symlink:
-        digest, byte_count = symlink_target_sha256(absolute)
-    elif stat.S_ISREG(metadata.st_mode):
-        digest = sha256_regular_file_no_follow(absolute, metadata)
-        byte_count = metadata.st_size
-    else:
-        raise ValueError("Ignored import-surface input must be a regular file or symlink.")
-    return {"path": path.as_posix(), "sha256": digest, "bytes": int(byte_count)}
 
 
-def ignored_source_inputs() -> tuple[dict[str, object], ...]:
-    rows: list[dict[str, object]] = []
-    completed = subprocess.run(
-        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
-        check=True,
-        text=True,
-        stdout=subprocess.PIPE,
-        cwd=REPO_ROOT,
-    )
-    for rel in completed.stdout.split("\0"):
-        if not rel:
-            continue
-        path = Path(rel)
-        snapshot = ignored_source_input_snapshot(path)
-        if snapshot is not None:
-            rows.append(snapshot)
-    return tuple(sorted(rows, key=lambda row: str(row["path"])))
 
 
-def is_active_output_status_line(line: str, active_output_root: Path | None) -> bool:
-    if active_output_root is None or not line.startswith("?? "):
-        return False
-    rel = line[3:]
-    candidate = Path(rel)
-    candidate_path = candidate if candidate.is_absolute() else REPO_ROOT / candidate
-    active_path = active_output_root if active_output_root.is_absolute() else REPO_ROOT / active_output_root
-    try:
-        candidate_resolved = candidate_path.resolve(strict=False)
-        active_resolved = active_path.resolve(strict=False)
-    except OSError:
-        return False
-    return candidate_resolved == active_resolved or active_resolved in candidate_resolved.parents
 
 
 def source_clean_allowed_paths(
@@ -4674,49 +4039,6 @@ def inventory_bound_root_paths(
     return allowed
 
 
-def build_manifest(
-    root: Path,
-    cells: Sequence[dict[str, object]],
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    terminal_status: str,
-    failure: str | None = None,
-    source_snapshot: SourceSnapshot | None = None,
-    decision_diagnostic: dict[str, object] | None = None,
-    exact_command: Sequence[str] | None = None,
-    deterministic_flags: dict[str, object] | None = None,
-    record_hashes: dict[str, str] | None = None,
-) -> dict[str, object]:
-    source_snapshot = source_snapshot or unchecked_source_snapshot()
-    return {
-        "protocol": "phase8_sequence_feasibility",
-        "terminal_status": terminal_status,
-        "failure": failure,
-        "source_commit": source_snapshot.commit,
-        "source_provenance": {
-            "commit": source_snapshot.commit,
-            "status_lines": list(source_snapshot.status_lines),
-            "ignored_inputs": list(source_snapshot.ignored_inputs),
-        },
-        "configuration": frozen_configuration(),
-        "decision_diagnostic": decision_diagnostic,
-        "exact_command": list(exact_command) if exact_command is not None else None,
-        "deterministic_flags": deterministic_flags,
-        "record_hashes": record_hashes,
-        "environment": {
-            "python": sys.version,
-            "platform": platform.platform(),
-            "torch": torch.__version__,
-            "cuda_available": torch.cuda.is_available(),
-            "cuda": torch.version.cuda,
-            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-            "gpu_driver": gpu_driver_version(),
-        },
-        "cells": list(cells),
-        "predecessor_roots": complete_predecessor_root_bindings(predecessor_roots, predecessor_selections),
-        "predecessor_selections": [selection_binding(path) for path in predecessor_selections],
-        "file_inventory": inventory(root),
-    }
 
 
 def gpu_driver_version() -> str | None:
@@ -4735,109 +4057,8 @@ def gpu_driver_version() -> str | None:
     return first_line[0].strip() if first_line else None
 
 
-def build_summary(
-    cells: Sequence[dict[str, object]],
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    terminal_status: str,
-    *,
-    failure: str | None = None,
-    source_snapshot: SourceSnapshot | None = None,
-    decision_diagnostic: dict[str, object] | None = None,
-    exact_command: Sequence[str] | None = None,
-    deterministic_flags: dict[str, object] | None = None,
-    record_hashes: dict[str, str] | None = None,
-) -> dict[str, object]:
-    source_snapshot = source_snapshot or unchecked_source_snapshot()
-    passed_cells = sum(1 for cell in cells if cell.get("passed") is True)
-    return {
-        "protocol": "phase8_sequence_feasibility",
-        "terminal_status": terminal_status,
-        "failure": failure,
-        "source": {
-            "commit": source_snapshot.commit,
-            "script": "scripts/phase8_sequence_feasibility.py",
-            "ignored_inputs": list(source_snapshot.ignored_inputs),
-        },
-        "configuration": frozen_configuration(),
-        "decision_diagnostic": decision_diagnostic,
-        "exact_command": list(exact_command) if exact_command is not None else None,
-        "deterministic_flags": deterministic_flags,
-        "record_hashes": record_hashes,
-        "cells": list(cells),
-        "summary": {
-            "total_cells": len(cells),
-            "passed_cells": passed_cells,
-            "failed_cells": len(cells) - passed_cells,
-            "all_cells_passed": len(cells) == len(FAMILIES) * len(MODEL_SIZES) * len(SEEDS) and passed_cells == len(cells),
-        },
-        "predecessor_root_count": len(predecessor_roots),
-        "predecessor_selection_count": len(predecessor_selections),
-    }
 
 
-def write_terminal(
-    root: Path,
-    terminal_status: str,
-    cells: Sequence[dict[str, object]],
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-    *,
-    failure: str | None = None,
-    source_snapshot: SourceSnapshot | None = None,
-    decision_diagnostic: dict[str, object] | None = None,
-    exact_command: Sequence[str] | None = None,
-    deterministic_flags: dict[str, object] | None = None,
-    record_hashes: dict[str, str] | None = None,
-) -> None:
-    if terminal_status not in {"DONE", "FAILED"}:
-        raise ValueError(f"Unknown terminal status: {terminal_status!r}.")
-    write_json(
-        root / "summary.json",
-        build_summary(
-            cells,
-            predecessor_roots,
-            predecessor_selections,
-            terminal_status,
-            failure=failure,
-            source_snapshot=source_snapshot,
-            decision_diagnostic=decision_diagnostic,
-            exact_command=exact_command,
-            deterministic_flags=deterministic_flags,
-            record_hashes=record_hashes,
-        ),
-    )
-    manifest = build_manifest(
-        root,
-        cells,
-        predecessor_roots,
-        predecessor_selections,
-        terminal_status,
-        failure,
-        source_snapshot=source_snapshot,
-        decision_diagnostic=decision_diagnostic,
-        exact_command=exact_command,
-        deterministic_flags=deterministic_flags,
-        record_hashes=record_hashes,
-    )
-    manifest_path = root / "manifest.json"
-    write_json(manifest_path, manifest)
-    manifest_sha = file_sha256(manifest_path)
-    terminal = {
-        "status": terminal_status,
-        "manifest_path": "manifest.json",
-        "manifest_sha256": manifest_sha,
-        "pass_threshold": PASS_THRESHOLD,
-        "configuration": frozen_configuration(),
-        "decision_diagnostic": decision_diagnostic,
-        "exact_command": list(exact_command) if exact_command is not None else None,
-        "deterministic_flags": deterministic_flags,
-        "record_hashes": record_hashes,
-        "cells": list(cells),
-    }
-    if failure is not None:
-        terminal["error"] = failure
-    write_json(root / f"{terminal_status}.json", terminal)
 
 
 def terminal_binding(
@@ -5543,10 +4764,6 @@ def validate_checkpoint_replays_generations(
                 raise ValueError("Checkpoint replay does not reproduce retained generation raw_token_ids.")
 
 
-def selection_binding(path: Path) -> dict[str, object]:
-    require_canonical_path_string(str(path), "predecessor_selection.path", SELECTION_RE)
-    require_artifact_location(path, "predecessor_selection.path", SELECTION_RE)
-    return {"path": str(path), "sha256": file_sha256(path)}
 
 
 def root_binding_key(binding: dict[str, object]) -> tuple[str, str, str, str]:
@@ -5601,33 +4818,6 @@ def add_root_binding(
     binding_map[path_key] = current
 
 
-def complete_predecessor_root_bindings(
-    predecessor_roots: Sequence[Path],
-    predecessor_selections: Sequence[Path],
-) -> list[dict[str, object]]:
-    context = FeasibilityValidationContext()
-    completed: list[dict[str, object]] = []
-    binding_map: dict[str, tuple[str, str, str]] = {}
-
-    def add(binding: dict[str, object]) -> None:
-        path_key, terminal_state, terminal_sha, manifest_sha = root_binding_key(binding)
-        previous = binding_map.get(path_key)
-        current = (terminal_state, terminal_sha, manifest_sha)
-        if previous is not None:
-            if previous != current:
-                raise ValueError("predecessor_roots contain inconsistent bindings for the same root.")
-            return
-        binding_map[path_key] = current
-        completed.append(binding)
-
-    for root in predecessor_roots:
-        add(terminal_binding(root, context=context))
-    for selection_path in predecessor_selections:
-        selection_data = validate_selection_record(selection_path, context=context)
-        add(terminal_binding(Path(str(selection_data["selected_root"])), context=context))
-        for predecessor in selection_data["predecessor_roots"]:
-            add(predecessor)
-    return sorted(completed, key=lambda binding: feasibility_root_number(Path(str(binding["path"]))))
 
 
 def source_provenance_allowed_paths(
@@ -5883,18 +5073,8 @@ def inventory(root: Path) -> list[dict[str, object]]:
     return rows
 
 
-def write_json(path: Path, value: object) -> None:
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temp, path)
 
 
-def write_jsonl(path: Path, rows: Iterable[dict[str, object]]) -> None:
-    temp = path.with_suffix(path.suffix + ".tmp")
-    with temp.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n")
-    os.replace(temp, path)
 
 
 def file_sha256(path: Path) -> str:
@@ -5913,9 +5093,6 @@ def current_source_commit() -> str:
     return validate_git_sha(git_output(["git", "rev-parse", "HEAD"]), "current_source_commit")
 
 
-def unchecked_source_snapshot() -> SourceSnapshot:
-    commit = current_source_commit()
-    return SourceSnapshot(commit=commit, status_lines=(), ignored_inputs=ignored_source_inputs())
 
 
 def validate_git_sha(value: object, field_name: str) -> str:
@@ -9478,12 +8655,6 @@ def run_postmortem_failure(
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Phase 8 non-scientific sequence-transduction feasibility runner.")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    run = subparsers.add_parser("run")
-    run.add_argument("--device", required=True)
-    run.add_argument("--root", required=True)
-    run.add_argument("--predecessor-root", action="append", default=[])
-    run.add_argument("--predecessor-selection", action="append", default=[])
-    run.add_argument("--decision-diagnostic-root", required=True)
     validate = subparsers.add_parser("validate-selection")
     validate.add_argument("path")
     inspect = subparsers.add_parser("inspect-records")
@@ -9499,34 +8670,6 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    if args.command == "run":
-        if argv is not None:
-            raise ValueError("run must be launched as a real process command, not via main(argv=...).")
-        root = Path(require_canonical_path_string(args.root, "root", ROOT_RE))
-        predecessor_roots = tuple(
-            Path(require_canonical_path_string(path, "predecessor_root.path", ROOT_RE))
-            for path in args.predecessor_root
-        )
-        predecessor_selections = tuple(
-            Path(require_canonical_path_string(path, "predecessor_selection.path", SELECTION_RE))
-            for path in args.predecessor_selection
-        )
-        decision_diagnostic_root = Path(require_canonical_path_string(args.decision_diagnostic_root, "decision_diagnostic_root", DIAGNOSTIC_ROOT_RE))
-        validate_feasibility_cli_contract(
-            device=args.device,
-            root=root,
-            predecessor_roots=predecessor_roots,
-            predecessor_selections=predecessor_selections,
-            decision_diagnostic_root=decision_diagnostic_root,
-        )
-        run_current_suite(
-            root,
-            predecessor_roots,
-            predecessor_selections,
-            device=args.device,
-            decision_diagnostic_root=decision_diagnostic_root,
-        )
-        return 0
     if args.command == "validate-selection":
         validate_selection_record(Path(require_canonical_path_string(args.path, "selection_record.path", SELECTION_RE)))
         return 0

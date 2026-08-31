@@ -382,6 +382,123 @@ def _historical_source_commit() -> str:
     ).stdout.strip()
 
 
+def _write_json(path: Path, value: object) -> None:
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def _selection_fixture_binding(path: Path) -> dict[str, object]:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    return {"path": str(path), "sha256": sf.file_sha256(path)}
+
+
+def _complete_fixture_root_bindings(
+    predecessor_roots: tuple[Path, ...],
+    predecessor_selections: tuple[Path, ...],
+) -> list[dict[str, object]]:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    by_path: dict[str, dict[str, object]] = {}
+
+    def add(binding: dict[str, object]) -> None:
+        by_path.setdefault(str(binding["path"]), binding)
+
+    for root in predecessor_roots:
+        add(sf.terminal_binding(root))
+    for selection_path in predecessor_selections:
+        selection = sf.validate_selection_record(selection_path)
+        add(sf.terminal_binding(Path(str(selection["selected_root"]))))
+        for binding in selection["predecessor_roots"]:
+            add(binding)
+    return sorted(by_path.values(), key=lambda binding: sf.feasibility_root_number(Path(str(binding["path"]))))
+
+
+def _write_feasibility_terminal(
+    root: Path,
+    terminal_status: str,
+    cells: list[dict[str, object]],
+    predecessor_roots: tuple[Path, ...],
+    predecessor_selections: tuple[Path, ...],
+    *,
+    failure: str | None = None,
+    source_snapshot: object,
+    decision_diagnostic: dict[str, object] | None = None,
+    exact_command: list[str] | None = None,
+    deterministic_flags: dict[str, object] | None = None,
+    record_hashes: dict[str, str] | None = None,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    source_commit = source_snapshot.commit
+    ignored_inputs = list(source_snapshot.ignored_inputs)
+    configuration = sf.frozen_configuration()
+    command = list(exact_command) if exact_command is not None else None
+    passed_cells = sum(1 for cell in cells if cell.get("passed") is True)
+    summary = {
+        "protocol": "phase8_sequence_feasibility",
+        "terminal_status": terminal_status,
+        "failure": failure,
+        "source": {
+            "commit": source_commit,
+            "script": "scripts/phase8_sequence_feasibility.py",
+            "ignored_inputs": ignored_inputs,
+        },
+        "configuration": configuration,
+        "decision_diagnostic": decision_diagnostic,
+        "exact_command": command,
+        "deterministic_flags": deterministic_flags,
+        "record_hashes": record_hashes,
+        "cells": list(cells),
+        "summary": {
+            "total_cells": len(cells),
+            "passed_cells": passed_cells,
+            "failed_cells": len(cells) - passed_cells,
+            "all_cells_passed": (
+                len(cells) == len(sf.FAMILIES) * len(sf.MODEL_SIZES) * len(sf.SEEDS)
+                and passed_cells == len(cells)
+            ),
+        },
+        "predecessor_root_count": len(predecessor_roots),
+        "predecessor_selection_count": len(predecessor_selections),
+    }
+    _write_json(root / "summary.json", summary)
+    manifest = {
+        "protocol": "phase8_sequence_feasibility",
+        "terminal_status": terminal_status,
+        "failure": failure,
+        "source_commit": source_commit,
+        "source_provenance": {
+            "commit": source_commit,
+            "status_lines": list(source_snapshot.status_lines),
+            "ignored_inputs": ignored_inputs,
+        },
+        "configuration": configuration,
+        "decision_diagnostic": decision_diagnostic,
+        "exact_command": command,
+        "deterministic_flags": deterministic_flags,
+        "record_hashes": record_hashes,
+        "environment": sf.current_environment_dict(),
+        "cells": list(cells),
+        "predecessor_roots": _complete_fixture_root_bindings(predecessor_roots, predecessor_selections),
+        "predecessor_selections": [_selection_fixture_binding(path) for path in predecessor_selections],
+        "file_inventory": sf.inventory(root),
+    }
+    manifest_path = root / "manifest.json"
+    _write_json(manifest_path, manifest)
+    terminal = {
+        "status": terminal_status,
+        "manifest_path": "manifest.json",
+        "manifest_sha256": sf.file_sha256(manifest_path),
+        "pass_threshold": sf.PASS_THRESHOLD,
+        "configuration": configuration,
+        "decision_diagnostic": decision_diagnostic,
+        "exact_command": command,
+        "deterministic_flags": deterministic_flags,
+        "record_hashes": record_hashes,
+        "cells": list(cells),
+    }
+    if failure is not None:
+        terminal["error"] = failure
+    _write_json(root / f"{terminal_status}.json", terminal)
+
+
 def _write_feasibility_root(
     root: Path,
     status: str,
@@ -426,9 +543,9 @@ def _write_feasibility_root(
             )
     command_roots = tuple(
         Path(str(binding["path"]))
-        for binding in sf.complete_predecessor_root_bindings(predecessor_roots, predecessor_selections)
+        for binding in _complete_fixture_root_bindings(predecessor_roots, predecessor_selections)
     )
-    sf.write_terminal(
+    _write_feasibility_terminal(
         root,
         status,
         cells,
@@ -444,7 +561,7 @@ def _write_feasibility_root(
     manifest = root / "manifest.json"
     manifest_data = json.loads(manifest.read_text())
     manifest_data["environment"] = dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)
-    sf.write_json(manifest, manifest_data)
+    _write_json(manifest, manifest_data)
     _rewrite_terminal_manifest_sha(root, status)
     return root / "manifest.json", root / f"{status}.json"
 
@@ -537,7 +654,7 @@ def _write_historical_generation_root(
         },
         checkpoint,
     )
-    sf.write_terminal(
+    _write_feasibility_terminal(
         root,
         "FAILED",
         [cell],
@@ -593,7 +710,7 @@ def _rewrite_terminal_manifest_sha(root: Path, status: str) -> None:
     terminal = root / f"{status}.json"
     terminal_data = json.loads(terminal.read_text())
     terminal_data["manifest_sha256"] = sf.file_sha256(root / "manifest.json")
-    sf.write_json(terminal, terminal_data)
+    _write_json(terminal, terminal_data)
 
 
 def _rewrite_current_publication_command(
@@ -613,17 +730,17 @@ def _rewrite_current_publication_command(
 
     summary = json.loads(summary_path.read_text())
     summary["exact_command"] = exact_command
-    sf.write_json(summary_path, summary)
+    _write_json(summary_path, summary)
 
     manifest = json.loads(manifest_path.read_text())
     manifest["exact_command"] = exact_command
     manifest["file_inventory"] = sf.inventory(root)
-    sf.write_json(manifest_path, manifest)
+    _write_json(manifest_path, manifest)
 
     terminal = json.loads(terminal_path.read_text())
     terminal["exact_command"] = exact_command
     terminal["manifest_sha256"] = sf.file_sha256(manifest_path)
-    sf.write_json(terminal_path, terminal)
+    _write_json(terminal_path, terminal)
 
 
 def _refresh_current_publication_hashes(root: Path, status: str) -> None:
@@ -631,7 +748,7 @@ def _refresh_current_publication_hashes(root: Path, status: str) -> None:
     manifest_path = root / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["file_inventory"] = sf.inventory(root)
-    sf.write_json(manifest_path, manifest)
+    _write_json(manifest_path, manifest)
     _rewrite_terminal_manifest_sha(root, status)
 
 
@@ -694,7 +811,7 @@ def test_d2_current_manifest_summary_terminal_and_cell_schemas_are_exact(
     manifest, terminal = _write_feasibility_root(root, "DONE", _passing_feasibility_cells(), lightweight=True)
     manifest_data = json.loads(manifest.read_text())
     manifest_data["environment"] = dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)
-    sf.write_json(manifest, manifest_data)
+    _write_json(manifest, manifest_data)
     _rewrite_terminal_manifest_sha(root, "DONE")
 
     sf.validate_feasibility_root_artifacts(root, require_passing=True)
@@ -725,18 +842,18 @@ def test_d2_current_manifest_summary_terminal_and_cell_schemas_are_exact(
     legacy_alias_configuration = dict(sf.frozen_configuration())
     legacy_alias_configuration["protocol_revision"] = legacy_alias_configuration.pop("model_protocol_revision")
     manifest_data["configuration"] = legacy_alias_configuration
-    sf.write_json(manifest, manifest_data)
+    _write_json(manifest, manifest_data)
     _rewrite_terminal_manifest_sha(root, "DONE")
     with pytest.raises(ValueError, match="configuration"):
         sf.validate_feasibility_root_artifacts(root, require_passing=True)
 
     manifest_data["configuration"] = sf.frozen_configuration()
-    sf.write_json(manifest, manifest_data)
+    _write_json(manifest, manifest_data)
     _rewrite_terminal_manifest_sha(root, "DONE")
 
     manifest_data = json.loads(manifest.read_text())
     manifest_data["unexpected"] = True
-    sf.write_json(manifest, manifest_data)
+    _write_json(manifest, manifest_data)
     _rewrite_terminal_manifest_sha(root, "DONE")
     with pytest.raises(ValueError, match="Current manifest"):
         sf.validate_feasibility_root_artifacts(root, require_passing=True)
@@ -922,583 +1039,20 @@ def test_d2_decision_diagnostic_cannot_be_selected_or_used_as_current_cell() -> 
         sf.validate_checkpoint_artifact(checkpoint, _passing_feasibility_cells()[0])
 
 
-def test_d2_run_cli_requires_exact_real_argv_environment_and_no_programmatic_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    root = Path("artifacts/phase8_toy_lm_bridge/feasibility_005")
-    predecessors = tuple(Path(path) for path in sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS)
-    diagnostic_root = Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT)
-    for key, value in sf.FEASIBILITY_REQUIRED_ENV.items():
-        monkeypatch.setenv(key, value)
-    monkeypatch.setattr(sf, "current_environment_dict", lambda: dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV))
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: sf.feasibility_exact_argv(root, predecessors, diagnostic_root))
-
-    sf.validate_feasibility_cli_contract(
-        device="cuda:0",
-        root=root,
-        predecessor_roots=predecessors,
-        predecessor_selections=(),
-        decision_diagnostic_root=diagnostic_root,
-    )
-
-    for bad_device in ("cpu", "cuda"):
-        with pytest.raises(ValueError, match="cuda:0"):
-            sf.validate_feasibility_cli_contract(
-                device=bad_device,
-                root=root,
-                predecessor_roots=predecessors,
-                predecessor_selections=(),
-                decision_diagnostic_root=diagnostic_root,
-            )
-    with pytest.raises(ValueError, match="predecessor selections"):
-        sf.validate_feasibility_cli_contract(
-            device="cuda:0",
-            root=root,
-            predecessor_roots=predecessors,
-            predecessor_selections=(Path("artifacts/phase8_toy_lm_bridge/feasibility_selection_001.json"),),
-            decision_diagnostic_root=diagnostic_root,
-        )
-    with pytest.raises(ValueError, match="root"):
-        sf.validate_feasibility_cli_contract(
-            device="cuda:0",
-            root=Path("artifacts/phase8_toy_lm_bridge/feasibility_006"),
-            predecessor_roots=predecessors,
-            predecessor_selections=(),
-            decision_diagnostic_root=diagnostic_root,
-        )
-    with pytest.raises(ValueError, match="predecessor roots"):
-        sf.validate_feasibility_cli_contract(
-            device="cuda:0",
-            root=root,
-            predecessor_roots=tuple(reversed(predecessors)),
-            predecessor_selections=(),
-            decision_diagnostic_root=diagnostic_root,
-        )
-    with pytest.raises(ValueError, match="decision diagnostic"):
-        sf.validate_feasibility_cli_contract(
-            device="cuda:0",
-            root=root,
-            predecessor_roots=predecessors,
-            predecessor_selections=(),
-            decision_diagnostic_root=Path("artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_002"),
-        )
-    monkeypatch.setenv("PYTHONPATH", str(REPO_ROOT))
-    with pytest.raises(ValueError, match="PYTHONPATH"):
-        sf.validate_feasibility_cli_contract(
-            device="cuda:0",
-            root=root,
-            predecessor_roots=predecessors,
-            predecessor_selections=(),
-            decision_diagnostic_root=diagnostic_root,
-        )
-    monkeypatch.setenv("PYTHONPATH", ".")
-    monkeypatch.setattr(sf, "current_environment_dict", lambda: {**sf.FEASIBILITY_REQUIRED_RUNTIME_ENV, "gpu": "different"})
-    with pytest.raises(ValueError, match="environment dictionary"):
-        sf.validate_feasibility_cli_contract(
-            device="cuda:0",
-            root=root,
-            predecessor_roots=predecessors,
-            predecessor_selections=(),
-            decision_diagnostic_root=diagnostic_root,
-        )
-
-    monkeypatch.setattr(sf, "current_environment_dict", lambda: dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV))
-    monkeypatch.setattr(sf, "diagnostic_kernel_argv", lambda: ["python", "-O", *sf.feasibility_exact_argv(root, predecessors, diagnostic_root)[1:]])
-    with pytest.raises(ValueError, match="process argv"):
-        sf.validate_feasibility_cli_contract(
-            device="cuda:0",
-            root=root,
-            predecessor_roots=predecessors,
-            predecessor_selections=(),
-            decision_diagnostic_root=diagnostic_root,
-        )
-    with pytest.raises(ValueError, match="main\\(argv"):
-        sf.main([
-            "run",
-            "--device",
-            "cuda:0",
-            "--root",
-            str(root),
-            *[item for predecessor in predecessors for item in ("--predecessor-root", str(predecessor))],
-            "--decision-diagnostic-root",
-            str(diagnostic_root),
-        ])
 
 
-def test_d2_run_current_suite_direct_import_rejects_before_tmp_or_model_construction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    root = tmp_path / "feasibility_005"
-    predecessors = tuple(tmp_path / f"feasibility_{index:03d}" for index in range(1, 5))
-    diagnostic_root = tmp_path / "feasibility_diagnostic_001"
-
-    for name in (
-        "validate_current_run_root_contract",
-        "shallow_current_run_allowed_paths",
-        "capture_source_provenance",
-        "validate_feasibility_cli_contract",
-        "build_model",
-    ):
-        monkeypatch.setattr(sf, name, lambda *args, _name=name, **kwargs: (_ for _ in ()).throw(AssertionError(f"{_name} ran before real main gate")))
-
-    with pytest.raises(ValueError, match="real __main__"):
-        sf.run_current_suite(
-            root,
-            predecessors,
-            (),
-            device="cuda:0",
-            decision_diagnostic_root=diagnostic_root,
-        )
-    assert not root.exists()
-    assert not root.with_name(root.name + ".tmp").exists()
 
 
-def test_d2_record_hash_mismatch_stops_before_model_construction_and_output(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    events: list[str] = []
-    root = tmp_path / "feasibility_005"
-    predecessors = tuple(tmp_path / f"feasibility_{index:03d}" for index in range(1, 5))
-    diagnostic_root = tmp_path / "feasibility_diagnostic_001"
-
-    monkeypatch.setattr(sf, "require_feasibility_real_main_context", lambda: events.append("main_context"))
-    monkeypatch.setattr(sf, "validate_feasibility_cli_contract", lambda **kwargs: events.append("cli"))
-    monkeypatch.setattr(sf, "validate_current_run_root_contract", lambda *args: events.append("root_contract"))
-    monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: events.append("shallow") or set())
-    monkeypatch.setattr(
-        sf,
-        "capture_source_provenance",
-        lambda *args, **kwargs: events.append("clean") or sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
-    )
-    monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: events.append("backend"))
-
-    def hash_mismatch() -> dict[str, str]:
-        events.append("record_hashes")
-        raise ValueError("record hash mismatch")
-
-    monkeypatch.setattr(sf, "validate_feasibility_record_hashes", hash_mismatch)
-    monkeypatch.setattr(sf, "build_model", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model constructed")))
-    with pytest.raises(ValueError, match="record hash mismatch"):
-        sf.run_current_suite(
-            root,
-            predecessors,
-            (),
-            device="cuda:0",
-            decision_diagnostic_root=diagnostic_root,
-        )
-    assert events == ["main_context", "cli", "root_contract", "shallow", "clean", "backend", "record_hashes"]
-    assert not root.exists()
-    assert not root.with_name(root.name + ".tmp").exists()
 
 
-def test_d2_shallow_inventory_then_source_cleanliness_precedes_deep_validation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    artifact_parent = Path(".pytest_d2_preflight") / tmp_path.name / "phase8_toy_lm_bridge"
-    root = artifact_parent / "feasibility_005"
-    predecessors = tuple(artifact_parent / f"feasibility_{index:03d}" for index in range(1, 5))
-    diagnostic_root = artifact_parent / "feasibility_diagnostic_001"
-    events: list[str] = []
-
-    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
-    monkeypatch.setattr(sf, "FEASIBILITY_REQUIRED_ROOT", str(root))
-    monkeypatch.setattr(sf, "FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS", tuple(str(path) for path in predecessors))
-    monkeypatch.setattr(sf, "FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT", str(diagnostic_root))
-    monkeypatch.setattr(sf, "require_feasibility_real_main_context", lambda: events.append("main_context"))
-    monkeypatch.setattr(sf, "validate_feasibility_cli_contract", lambda **kwargs: events.append("cli"))
-    monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: events.append("shallow") or set())
-
-    def dirty_source(*args: object, **kwargs: object) -> object:
-        events.append("clean")
-        raise RuntimeError("dirty source")
-
-    monkeypatch.setattr(sf, "capture_source_provenance", dirty_source)
-    for name in (
-        "configure_feasibility_deterministic_backend",
-        "validate_feasibility_record_hashes",
-        "validate_feasibility_root_artifacts",
-        "validate_decision_diagnostic_binding",
-        "build_model",
-        "deterministic_batch_indices",
-        "load_model_from_checkpoint",
-    ):
-        monkeypatch.setattr(sf, name, lambda *args, _name=name, **kwargs: (_ for _ in ()).throw(AssertionError(f"{_name} ran before source cleanliness failed")))
-
-    with pytest.raises(RuntimeError, match="dirty source"):
-        sf.run_current_suite(
-            root,
-            predecessors,
-            (),
-            device="cuda:0",
-            decision_diagnostic_root=diagnostic_root,
-        )
-    assert events == ["main_context", "cli", "shallow", "clean"]
-    assert not (REPO_ROOT / root).exists()
-    assert not (REPO_ROOT / root.with_name(root.name + ".tmp")).exists()
-
-    events.clear()
-    monkeypatch.setattr(
-        sf,
-        "capture_source_provenance",
-        lambda *args, **kwargs: events.append("clean") or sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
-    )
-    monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: events.append("backend"))
-    monkeypatch.setattr(sf, "validate_feasibility_record_hashes", lambda: events.append("record_hashes") or dict(sf.FEASIBILITY_RECORD_HASHES))
-    monkeypatch.setattr(sf, "validate_feasibility_root_artifacts", lambda predecessor_root, **kwargs: events.append(f"deep:{predecessor_root.name}"))
-
-    def d1_probe(root: Path, *, deep: bool) -> dict[str, object]:
-        events.append(f"d1_deep:{deep}")
-        raise RuntimeError("deep validation probe")
-
-    monkeypatch.setattr(sf, "validate_decision_diagnostic_binding", d1_probe)
-    with pytest.raises(RuntimeError, match="deep validation probe"):
-        sf.run_current_suite(
-            root,
-            predecessors,
-            (),
-            device="cuda:0",
-            decision_diagnostic_root=diagnostic_root,
-        )
-    assert events == [
-        "main_context",
-        "cli",
-        "shallow",
-        "clean",
-        "backend",
-        "record_hashes",
-        "deep:feasibility_001",
-        "deep:feasibility_002",
-        "deep:feasibility_003",
-        "deep:feasibility_004",
-        "d1_deep:True",
-    ]
-    assert not (REPO_ROOT / root).exists()
-    assert not (REPO_ROOT / root.with_name(root.name + ".tmp")).exists()
 
 
-def test_d2_run_current_suite_uses_cpu_initialized_tied_models_and_all_24_fake_cells(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-
-    class FakeModel(torch.nn.Module):
-        def __init__(self, model_size: str) -> None:
-            super().__init__()
-            self.model_size = model_size
-            self.token_embedding = torch.nn.Embedding(1, 1)
-            self.lm_head = torch.nn.Linear(1, 1, bias=False)
-            self.lm_head.weight = self.token_embedding.weight
-            self.parameter_count = sf.FROZEN_PARAMETER_COUNTS[model_size]
-            self.transfers: list[str] = []
-
-        def to(self, device: object) -> "FakeModel":
-            self.transfers.append(str(device))
-            return self
-
-    def fake_records() -> dict[str, dict[str, tuple[object, ...]]]:
-        return {
-            family: {
-                "train": (sf.FeasibilityRecord(family, "train", 0, f"{family}_train", f"{family}_train", "prompt", "answer"),),
-                "eval": (sf.FeasibilityRecord(family, "eval", 0, f"{family}_eval", f"{family}_eval", "prompt", "answer"),),
-            }
-            for family in sf.FAMILIES
-        }
-
-    def configure_common(match_overrides: dict[tuple[str, str, int], int]) -> tuple[Path, tuple[Path, ...], Path, list[tuple[str, str, int]], list[FakeModel]]:
-        root = tmp_path / f"feasibility_005_{len(match_overrides)}"
-        predecessors = tuple(tmp_path / f"feasibility_{index:03d}" for index in range(1, 5))
-        diagnostic_root = tmp_path / "feasibility_diagnostic_001"
-        executed: list[tuple[str, str, int]] = []
-        models: list[FakeModel] = []
-        original_build_manifest = sf.build_manifest
-        for key, value in sf.FEASIBILITY_REQUIRED_ENV.items():
-            monkeypatch.setenv(key, value)
-        monkeypatch.setattr(sf, "require_feasibility_real_main_context", lambda: None)
-        monkeypatch.setattr(sf, "validate_feasibility_cli_contract", lambda **kwargs: None)
-        monkeypatch.setattr(sf, "validate_current_run_root_contract", lambda *args: None)
-        monkeypatch.setattr(sf, "shallow_current_run_allowed_paths", lambda *args: set())
-        monkeypatch.setattr(
-            sf,
-            "capture_source_provenance",
-            lambda *args, **kwargs: sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=()),
-        )
-        monkeypatch.setattr(sf, "configure_feasibility_deterministic_backend", lambda: None)
-        monkeypatch.setattr(sf, "validate_feasibility_record_hashes", lambda: dict(sf.FEASIBILITY_RECORD_HASHES))
-        monkeypatch.setattr(sf, "validate_feasibility_root_artifacts", lambda *args, **kwargs: None)
-        monkeypatch.setattr(sf, "validate_decision_diagnostic_binding", lambda root, *, deep: dict(sf.DECISION_DIAGNOSTIC_ROOT_BINDING))
-        monkeypatch.setattr(sf, "grouped_records", fake_records)
-        monkeypatch.setattr(sf, "verify_source_unchanged", lambda *args, **kwargs: None)
-        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
-        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
-        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
-        monkeypatch.setattr(sf, "expected_parameter_count", lambda model_size: sf.FROZEN_PARAMETER_COUNTS[model_size])
-
-        def build_manifest_with_required_environment(*args: object, **kwargs: object) -> dict[str, object]:
-            manifest = original_build_manifest(*args, **kwargs)
-            manifest["environment"] = dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)
-            return manifest
-
-        monkeypatch.setattr(sf, "build_manifest", build_manifest_with_required_environment)
-        monkeypatch.setattr(
-            sf,
-            "complete_predecessor_root_bindings",
-            lambda roots, selections, context=None: [
-                {
-                    "path": str(path),
-                    "terminal_state": "FAILED",
-                    "terminal_sha256": f"{index}" * 64,
-                    "manifest_sha256": f"{index + 4}" * 64,
-                }
-                for index, path in enumerate(roots, start=1)
-            ],
-        )
-
-        def build_fake_model(model_size: str) -> FakeModel:
-            model = FakeModel(model_size)
-            models.append(model)
-            assert all(parameter.device.type == "cpu" for parameter in model.parameters())
-            return model
-
-        def fake_train(model: FakeModel, records: object, *, seed: int, **kwargs: object) -> object:
-            assert model.transfers == ["cuda:0"]
-            return type("FakeTrainResult", (), {"final_loss": 0.0, "training_accuracy": 1.0})()
-
-        def fake_evaluate(model: FakeModel, records: tuple[object, ...], tokenizer: object, device: torch.device) -> tuple[int, list[dict[str, object]]]:
-            assert model.transfers == ["cuda:0"]
-            assert str(device) == "cuda:0"
-            family = records[0].family
-            key = (family, model.model_size, len([item for item in executed if item[0] == family and item[1] == model.model_size]))
-            seed = key[2]
-            executed.append((family, model.model_size, seed))
-            exact_matches = match_overrides.get((family, model.model_size, seed), sf.PASS_THRESHOLD)
-            return exact_matches, [{"family": family, "index": 0, "exact_match": exact_matches >= sf.PASS_THRESHOLD}]
-
-        monkeypatch.setattr(sf, "build_model", build_fake_model)
-        monkeypatch.setattr(sf, "train_text_records", fake_train)
-        monkeypatch.setattr(sf, "evaluate_model", fake_evaluate)
-        monkeypatch.setattr(sf, "save_checkpoint", lambda path, model, metadata: Path(path).write_bytes(b"checkpoint"))
-        return root, predecessors, diagnostic_root, executed, models
-
-    root, predecessors, diagnostic_root, executed, models = configure_common({})
-    sf.run_current_suite(
-        root,
-        predecessors,
-        (),
-        device="cuda:0",
-        decision_diagnostic_root=diagnostic_root,
-    )
-    assert len(executed) == len(sf.FAMILIES) * len(sf.MODEL_SIZES) * len(sf.SEEDS) == 24
-    assert all(model.transfers == ["cuda:0"] for model in models)
-    assert (root / "DONE.json").exists()
-    assert json.loads((root / "summary.json").read_text())["summary"]["all_cells_passed"] is True
-
-    fail_key = (sf.FAMILIES[-1], sf.MODEL_SIZES[-1], sf.SEEDS[-1])
-    root, predecessors, diagnostic_root, executed, _models = configure_common({fail_key: sf.PASS_THRESHOLD - 1})
-    sf.run_current_suite(
-        root,
-        predecessors,
-        (),
-        device="cuda:0",
-        decision_diagnostic_root=diagnostic_root,
-    )
-    assert len(executed) == 24
-    assert (root / "FAILED.json").exists()
-    failed = json.loads((root / "FAILED.json").read_text())
-    assert len(failed["cells"]) == 24
-    assert any(cell["passed"] is False for cell in failed["cells"])
-    assert failed["error"] == "complete feasibility matrix did not satisfy all 24 pass thresholds."
-    assert json.loads((root / "summary.json").read_text())["summary"]["all_cells_passed"] is False
 
 
-@pytest.mark.parametrize(
-    ("mutation", "cause_match"),
-    (
-        ("generation", "Generation artifact raw_token_ids prefix|Generation artifact row prompt"),
-        ("checkpoint", "Checkpoint artifact is not a loadable"),
-        ("cell_schema", "exact current tied schema"),
-        ("lineage", "predecessor_roots"),
-        ("replay", "Checkpoint replay mismatch probe"),
-    ),
-)
-def test_d2_current_publication_gate_rejects_mutated_artifacts_schema_lineage_or_replay(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
-    cause_match: str,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    status = "FAILED"
-    root_dir = tmp_path / mutation
-    temp_root = root_dir / "feasibility_005.tmp"
-    output_root = root_dir / "feasibility_005"
-    cell = dict(_passing_feasibility_cells()[0])
-    use_real_generation = mutation == "generation"
-    _write_feasibility_root(temp_root, status, [cell], lightweight=not use_real_generation)
-    _rewrite_current_publication_command(temp_root, status, output_root)
-
-    if mutation == "generation":
-        generation_path = temp_root / str(cell["generations_path"])
-        rows = [json.loads(line) for line in generation_path.read_text().splitlines()]
-        rows[0]["prompt"] = f"{rows[0]['prompt']} tampered"
-        generation_path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-        _refresh_current_publication_hashes(temp_root, status)
-        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
-        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
-    elif mutation == "checkpoint":
-        checkpoint_path = temp_root / str(cell["checkpoint_path"])
-        checkpoint_path.write_bytes(b"tampered checkpoint")
-        _refresh_current_publication_hashes(temp_root, status)
-        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
-        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
-    elif mutation == "cell_schema":
-        for filename in ("summary.json", "manifest.json", f"{status}.json"):
-            path = temp_root / filename
-            data = json.loads(path.read_text())
-            for row in data["cells"]:
-                row.pop("model_protocol_revision")
-            if filename == "manifest.json":
-                data["file_inventory"] = sf.inventory(temp_root)
-            sf.write_json(path, data)
-        _refresh_current_publication_hashes(temp_root, status)
-        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
-        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
-        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
-    elif mutation == "lineage":
-        manifest_path = temp_root / "manifest.json"
-        manifest = json.loads(manifest_path.read_text())
-        manifest["predecessor_roots"] = [
-            {
-                "path": "artifacts/phase8_toy_lm_bridge/feasibility_001",
-                "terminal_state": "FAILED",
-                "terminal_sha256": "0" * 64,
-                "manifest_sha256": "1" * 64,
-            }
-        ]
-        sf.write_json(manifest_path, manifest)
-        _rewrite_terminal_manifest_sha(temp_root, status)
-        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
-        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
-        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
-    elif mutation == "replay":
-        monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
-        monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
-
-        def replay_mismatch(path: Path, cell: dict[str, object], rows: list[dict[str, object]]) -> None:
-            raise ValueError("Checkpoint replay mismatch probe")
-
-        monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", replay_mismatch)
-    else:  # pragma: no cover - parametrization guard
-        raise AssertionError(mutation)
-
-    with pytest.raises(sf.FeasibilityPublicationError) as excinfo:
-        sf.publish_current_feasibility_root_or_leave_incomplete(
-            temp_root,
-            output_root,
-            terminal_status=status,
-            predecessor_roots=(),
-            predecessor_selections=(),
-            decision_diagnostic_root=Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT),
-            source_snapshot=_source_snapshot(),
-            allowed_source_paths=set(),
-        )
-    assert excinfo.value.__cause__ is not None
-    assert re.search(cause_match, str(excinfo.value.__cause__))
-    assert not output_root.exists()
-    assert temp_root.exists()
-    assert not (temp_root / "DONE.json").exists()
-    assert not (temp_root / "FAILED.json").exists()
-    assert (temp_root / "manifest.json").exists()
 
 
-def test_d2_current_publication_success_validates_before_rename_and_replays_on_cuda0(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    status = "FAILED"
-    temp_root = tmp_path / "feasibility_005.tmp"
-    output_root = tmp_path / "feasibility_005"
-    _write_feasibility_root(temp_root, status, [dict(_passing_feasibility_cells()[0])], lightweight=True)
-    _rewrite_current_publication_command(temp_root, status, output_root)
-    events: list[str] = []
-    replay_devices: list[str] = []
-
-    monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: events.append("generation") or [])
-    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: events.append("checkpoint"))
-    monkeypatch.setattr(sf.torch.cuda, "is_available", lambda: True)
-
-    def replay_probe(path: Path, cell: dict[str, object], rows: list[dict[str, object]]) -> None:
-        events.append("replay")
-        replay_devices.append(str(sf.feasibility_replay_device()))
-
-    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", replay_probe)
-
-    def source_callback() -> None:
-        events.append("callback")
-
-    def rename_probe(source: Path, destination: Path) -> None:
-        events.append("rename")
-        source.rename(destination)
-
-    monkeypatch.setattr(sf, "atomic_rename_noreplace", rename_probe)
-    sf.publish_current_feasibility_root_or_leave_incomplete(
-        temp_root,
-        output_root,
-        terminal_status=status,
-        predecessor_roots=(),
-        predecessor_selections=(),
-        decision_diagnostic_root=Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT),
-        source_snapshot=_source_snapshot(),
-        allowed_source_paths=set(),
-        final_callback=source_callback,
-    )
-    assert output_root.exists()
-    assert not temp_root.exists()
-    assert events == ["generation", "checkpoint", "replay", "callback", "callback", "rename"]
-    assert replay_devices == ["cuda:0"]
 
 
-def test_d2_current_publication_callback_failure_blocks_rename_and_leaves_tmp_incomplete(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    status = "FAILED"
-    temp_root = tmp_path / "feasibility_005.tmp"
-    output_root = tmp_path / "feasibility_005"
-    _write_feasibility_root(temp_root, status, [dict(_passing_feasibility_cells()[0])], lightweight=True)
-    _rewrite_current_publication_command(temp_root, status, output_root)
-
-    monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
-    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
-    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
-    monkeypatch.setattr(sf, "atomic_rename_noreplace", lambda source, destination: (_ for _ in ()).throw(AssertionError("rename after failed callback")))
-
-    with pytest.raises(sf.FeasibilityPublicationError) as excinfo:
-        sf.publish_current_feasibility_root_or_leave_incomplete(
-            temp_root,
-            output_root,
-            terminal_status=status,
-            predecessor_roots=(),
-            predecessor_selections=(),
-            decision_diagnostic_root=Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT),
-            source_snapshot=_source_snapshot(),
-            allowed_source_paths=set(),
-            final_callback=lambda: (_ for _ in ()).throw(sf.SourceChangedError("source changed probe")),
-        )
-    assert isinstance(excinfo.value.__cause__, sf.SourceChangedError)
-    assert not output_root.exists()
-    assert temp_root.exists()
-    assert not (temp_root / "DONE.json").exists()
-    assert not (temp_root / "FAILED.json").exists()
 
 
 def test_feasibility_families_disjoint_cell_gate_raw_retention_and_marker_rejection(tmp_path: Path) -> None:
@@ -2348,115 +1902,38 @@ def test_feasibility_script_direct_cli_inspect_records() -> None:
     assert len(data["hex_copy"]) == 576
 
 
-def test_feasibility_root_numbering_refuses_overwrite_and_skips(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
-    artifact_parent.mkdir(parents=True)
-    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
 
-    with pytest.raises(ValueError, match="feasibility_001"):
-        sf.validate_new_root(artifact_parent / "feasibility_000")
-    with pytest.raises(ValueError, match="complete and continuous"):
-        sf.validate_new_root(artifact_parent / "feasibility_002")
-    with pytest.raises(ValueError, match="canonical path spelling"):
-        sf.validate_new_root(artifact_parent / "alias" / ".." / "feasibility_001")
-    with pytest.raises(ValueError, match="canonical path spelling"):
-        sf.require_canonical_path_string(f"{artifact_parent}//feasibility_001", "root", sf.ROOT_RE)
-    with pytest.raises(ValueError, match="real process command"):
-        sf.main([
-            "run",
+
+
+
+def test_feasibility_retired_run_cli_is_rejected_and_reader_cli_parsing_is_preserved() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    with pytest.raises(SystemExit):
+        sf.parse_args(["run"])
+
+    validate = sf.parse_args(["validate-selection", "artifacts/phase8_toy_lm_bridge/feasibility_selection_001.json"])
+    assert (validate.command, validate.path) == (
+        "validate-selection",
+        "artifacts/phase8_toy_lm_bridge/feasibility_selection_001.json",
+    )
+    inspect = sf.parse_args(["inspect-records", "--family", "hex_copy"])
+    assert (inspect.command, inspect.family) == ("inspect-records", "hex_copy")
+    postmortem = sf.parse_args(
+        [
+            "postmortem-failure",
             "--device",
             "cuda:0",
-            "--root",
-            sf.FEASIBILITY_REQUIRED_ROOT,
-            "--predecessor-root",
-            sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS[0],
-            "--predecessor-root",
-            sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS[1],
-            "--predecessor-root",
-            sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS[2],
-            "--predecessor-root",
-            sf.FEASIBILITY_REQUIRED_PREDECESSOR_ROOTS[3],
-            "--decision-diagnostic-root",
-            sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT,
-        ])
-    with pytest.raises(ValueError, match="located directly"):
-        sf.validate_new_root(tmp_path / "feasibility_001")
-
-    predecessor = artifact_parent / "feasibility_001"
-    predecessor.mkdir()
-    sf.write_terminal(
-        predecessor,
-        "FAILED",
-        [],
-        (),
-        (),
-        failure="synthetic predecessor failure",
-        source_snapshot=_source_snapshot(),
+            "--input-root",
+            sf.POSTMORTEM_REQUIRED_INPUT_ROOT,
+            "--output-root",
+            sf.POSTMORTEM_REQUIRED_OUTPUT_ROOT,
+            "--accepted-proposal-commit",
+            sf.POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT,
+            "--accepted-implementation-commit",
+            "d" * 40,
+        ]
     )
-
-    monkeypatch.setattr(sf, "terminal_binding", lambda root, context=None: _unchecked_terminal_binding(root))
-    sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
-    with pytest.raises(ValueError, match="complete and continuous"):
-        sf.validate_new_root(artifact_parent / "feasibility_003", (predecessor,), ())
-    second_predecessor = artifact_parent / "feasibility_002"
-    _write_feasibility_root(second_predecessor, "FAILED", [], predecessor_roots=(predecessor,))
-    with pytest.raises(ValueError, match="strictly ascending"):
-        sf.validate_new_root(artifact_parent / "feasibility_003", (second_predecessor, predecessor), ())
-    selection = artifact_parent / "feasibility_selection_001.json"
-    selection.write_text("{}\n")
-    monkeypatch.setattr(sf, "validate_selection_record", lambda path, **kwargs: {"selected_root": str(predecessor)})
-    sf.validate_new_root(artifact_parent / "feasibility_003", (second_predecessor,), (selection,))
-
-    with pytest.raises(FileExistsError, match="overwrite"):
-        sf.validate_new_root(second_predecessor, (predecessor,), ())
-
-    symlink_parent = tmp_path / "symlink_artifacts" / "phase8_toy_lm_bridge"
-    symlink_parent.mkdir(parents=True)
-    monkeypatch.setattr(sf, "ARTIFACT_PARENT", symlink_parent)
-    dangling = symlink_parent / "feasibility_001"
-    dangling.symlink_to(tmp_path / "missing-target", target_is_directory=True)
-    with pytest.raises((FileExistsError, ValueError), match="symlink|overwrite"):
-        sf.validate_new_root(dangling)
-
-
-def test_feasibility_failed_terminal_binds_manifest(tmp_path: Path) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    sf.write_terminal(
-        tmp_path,
-        "FAILED",
-        [],
-        (),
-        (),
-        failure="synthetic failure",
-        source_snapshot=_source_snapshot(),
-    )
-
-    manifest = tmp_path / "manifest.json"
-    summary = tmp_path / "summary.json"
-    failed = tmp_path / "FAILED.json"
-    assert manifest.exists()
-    assert summary.exists()
-    assert failed.exists()
-    failed_data = json.loads(failed.read_text())
-    manifest_data = json.loads(manifest.read_text())
-    summary_data = json.loads(summary.read_text())
-    assert failed_data["status"] == "FAILED"
-    assert failed_data["manifest_sha256"] == sf.file_sha256(manifest)
-    assert manifest_data["terminal_status"] == "FAILED"
-    assert manifest_data["failure"] == "synthetic failure"
-    assert manifest_data["environment"]["gpu_driver"] == sf.gpu_driver_version()
-    assert summary_data["protocol"] == "phase8_sequence_feasibility"
-    assert summary_data["source"]["script"] == "scripts/phase8_sequence_feasibility.py"
-    assert summary_data["configuration"]["pass_threshold"] == sf.PASS_THRESHOLD
-    assert summary_data["cells"] == []
-    summary_inventory = [row for row in manifest_data["file_inventory"] if row["path"] == "summary.json"]
-    assert summary_inventory == [
-        {"path": "summary.json", "sha256": sf.file_sha256(summary), "bytes": summary.stat().st_size}
-    ]
+    assert postmortem.command == "postmortem-failure"
 
 
 def test_feasibility_root_rejects_dual_terminal_and_manifest_status_mismatch(tmp_path: Path) -> None:
@@ -2500,7 +1977,7 @@ def test_historical_predecessor_generation_rows_are_not_reinterpreted_as_current
     assert historical_first["expected"] != current_first.answer
 
     with pytest.raises(ValueError, match="decision_diagnostic|configuration|allowlist"):
-        sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
+        sf.validate_feasibility_root_artifacts(predecessor, require_passing=False)
 
 
 def test_historical_predecessor_generation_internal_inconsistency_is_rejected(
@@ -2518,7 +1995,7 @@ def test_historical_predecessor_generation_internal_inconsistency_is_rejected(
     rows = _legacy_generation_rows()
     rows[0] = {**rows[0], "prompt": "tampered retained prompt with unchanged raw prefix"}
     (predecessor / str(cell["generations_path"])).write_text("\n".join(json.dumps(row) for row in rows) + "\n")
-    sf.write_terminal(
+    _write_feasibility_terminal(
         predecessor,
         "FAILED",
         [cell],
@@ -2529,7 +2006,7 @@ def test_historical_predecessor_generation_internal_inconsistency_is_rejected(
     )
 
     with pytest.raises(ValueError, match="decision_diagnostic|configuration|allowlist"):
-        sf.validate_new_root(artifact_parent / "feasibility_002", (predecessor,), ())
+        sf.validate_feasibility_root_artifacts(predecessor, require_passing=False)
 
 
 def test_current_source_generation_prompt_mismatch_is_still_rejected(
@@ -2557,199 +2034,13 @@ def test_current_source_generation_prompt_mismatch_is_still_rejected(
     _write_historical_generation_root(current_source_root, source_commit=_test_source_commit(), rows=rows)
 
     with pytest.raises(ValueError, match="decision_diagnostic|configuration|allowlist"):
-        sf.validate_new_root(artifact_parent / "feasibility_002", (current_source_root,), ())
+        sf.validate_feasibility_root_artifacts(current_source_root, require_passing=False)
 
 
-def test_source_clean_only_allows_inventory_bound_predecessor_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    cells = _passing_feasibility_cells()
-    monkeypatch.setattr(sf, "validate_generation_artifact", lambda path, cell: [])
-    monkeypatch.setattr(sf, "validate_historical_generation_artifact", lambda path, cell: [])
-    monkeypatch.setattr(sf, "validate_checkpoint_artifact", lambda path, cell: None)
-    monkeypatch.setattr(sf, "validate_checkpoint_replays_generations", lambda path, cell, rows: None)
-    monkeypatch.setattr(sf, "validate_feasibility_root_artifacts", lambda *args, **kwargs: None)
-    artifact_parent = tmp_path / "artifacts" / "phase8_toy_lm_bridge"
-    artifact_parent.mkdir(parents=True)
-    monkeypatch.setattr(sf, "ARTIFACT_PARENT", artifact_parent)
-
-    selected_root = artifact_parent / "feasibility_001"
-    manifest, terminal = _write_feasibility_root(selected_root, "DONE", cells, lightweight=True)
-    selection = artifact_parent / "feasibility_selection_001.json"
-    _write_selection(selection, selected_root, manifest, [], [], cells=cells)
-    inventory_files = [selected_root / row["path"] for row in json.loads(manifest.read_text())["file_inventory"]]
-    inventory_bytes = {path: path.read_bytes() for path in inventory_files}
-
-    def set_git_status(paths: list[Path], *, ignored_lines: tuple[str, ...] = ()) -> None:
-        def fake_run(
-            args: list[str],
-            check: bool,
-            text: bool,
-            stdout: object,
-            **kwargs: object,
-        ) -> subprocess.CompletedProcess[str]:
-            if args[:4] == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
-                return subprocess.CompletedProcess(args, 0, stdout="".join(f"?? {path}\n" for path in paths))
-            if args == ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"]:
-                return subprocess.CompletedProcess(args, 0, stdout="".join(f"{line}\0" for line in ignored_lines))
-            if args == ["git", "rev-parse", "HEAD"]:
-                return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
-            if args[:3] == ["git", "cat-file", "-e"]:
-                return subprocess.CompletedProcess(args, 0, stdout="")
-            raise AssertionError(args)
-
-        monkeypatch.setattr(sf.subprocess, "run", fake_run)
-
-    allowed_paths = [selection, manifest, terminal, *inventory_files]
-    set_git_status(allowed_paths)
-    snapshot = sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
-    assert snapshot.commit == "a" * 40
-
-    extra = selected_root / "unbound_extra.txt"
-    extra.write_text("not bound\n")
-    set_git_status([*allowed_paths, extra])
-    with pytest.raises((RuntimeError, ValueError), match="exact supplied|file_inventory|Expecting value"):
-        sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
-    extra.unlink()
-
-    inventory_files[-1].write_text("tampered after manifest\n")
-    set_git_status(allowed_paths)
-    with pytest.raises(ValueError, match="file_inventory|Expecting value"):
-        sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
-
-    inventory_files[-1].write_bytes(inventory_bytes[inventory_files[-1]])
-    set_git_status(allowed_paths, ignored_lines=("scripts/phase8_sequence_feasibility.py",))
-    with pytest.raises(RuntimeError, match="Ignored executable source input"):
-        sf.validate_source_clean(artifact_parent / "feasibility_002", (), (selection,))
 
 
-def test_repo_wide_ignored_source_scan_detects_root_sourceless_import_hooks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
-    (repo / ".gitignore").write_text("*.pyc\n*.pyo\n*.so\n*.pth\nignored_link\n__pycache__/\n", encoding="utf-8")
-    sitecustomize = repo / "sitecustomize.pyc"
-    shadow_module = repo / "shadow_module.pyc"
-    nested_cache = repo / "pkg" / "__pycache__" / "nested.cpython-313.pyc"
-    nested_cache.parent.mkdir(parents=True)
-    sitecustomize.write_bytes(b"root ignored sourceless sitecustomize")
-    shadow_module.write_bytes(b"root ignored sourceless shadow module")
-    nested_cache.write_bytes(b"nested ignored cache")
-    symlink_path = repo / "ignored_link"
-    symlink_created = False
-    try:
-        symlink_path.symlink_to("shadow_module.pyc")
-        symlink_created = True
-    except OSError:
-        pass
-
-    monkeypatch.setattr(sf, "REPO_ROOT", repo)
-    rows = sf.ignored_source_inputs()
-    by_path = {row["path"]: row for row in rows}
-    assert "sitecustomize.pyc" in by_path
-    assert "shadow_module.pyc" in by_path
-    assert "pkg/__pycache__/nested.cpython-313.pyc" in by_path
-    assert by_path["sitecustomize.pyc"] == {
-        "path": "sitecustomize.pyc",
-        "sha256": sf.file_sha256(sitecustomize),
-        "bytes": sitecustomize.stat().st_size,
-    }
-    assert by_path["shadow_module.pyc"] == {
-        "path": "shadow_module.pyc",
-        "sha256": sf.file_sha256(shadow_module),
-        "bytes": shadow_module.stat().st_size,
-    }
-    if symlink_created:
-        assert by_path["ignored_link"]["sha256"] == sha256(b"shadow_module.pyc").hexdigest()
-        assert by_path["ignored_link"]["bytes"] == len(b"shadow_module.pyc")
 
 
-def test_source_snapshot_rejects_head_or_status_change_before_terminal_publication(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
-    snapshot = sf.SourceSnapshot(commit="a" * 40, status_lines=(), ignored_inputs=())
-
-    def changed_head(
-        args: list[str],
-        check: bool,
-        text: bool,
-        stdout: object,
-        **kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        if args == ["git", "rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(args, 0, stdout="b" * 40 + "\n")
-        raise AssertionError(args)
-
-    monkeypatch.setattr(sf.subprocess, "run", changed_head)
-    with pytest.raises(sf.SourceChangedError, match="HEAD changed"):
-        sf.verify_source_unchanged(snapshot)
-
-    def changed_status(
-        args: list[str],
-        check: bool,
-        text: bool,
-        stdout: object,
-        **kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        if args == ["git", "rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
-        if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
-            return subprocess.CompletedProcess(args, 0, stdout=" M scripts/phase8_sequence_feasibility.py\n")
-        raise AssertionError(args)
-
-    monkeypatch.setattr(sf.subprocess, "run", changed_status)
-    with pytest.raises(sf.SourceChangedError, match="worktree status changed"):
-        sf.verify_source_unchanged(snapshot)
-
-    def changed_ignored(
-        args: list[str],
-        check: bool,
-        text: bool,
-        stdout: object,
-        **kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        if args == ["git", "rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
-        if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
-            return subprocess.CompletedProcess(args, 0, stdout="")
-        if args == ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"]:
-            return subprocess.CompletedProcess(args, 0, stdout="scripts/phase8_sequence_feasibility.py\0")
-        raise AssertionError(args)
-
-    monkeypatch.setattr(sf.subprocess, "run", changed_ignored)
-    with pytest.raises(sf.SourceChangedError, match="Ignored executable"):
-        sf.verify_source_unchanged(snapshot)
-
-    active_root = sf.ARTIFACT_PARENT / "feasibility_001.tmp"
-
-    def active_output_only(
-        args: list[str],
-        check: bool,
-        text: bool,
-        stdout: object,
-        **kwargs: object,
-    ) -> subprocess.CompletedProcess[str]:
-        if args == ["git", "rev-parse", "HEAD"]:
-            return subprocess.CompletedProcess(args, 0, stdout="a" * 40 + "\n")
-        if args == ["git", "status", "--porcelain=v1", "--untracked-files=all"]:
-            return subprocess.CompletedProcess(
-                args,
-                0,
-                stdout="?? artifacts/phase8_toy_lm_bridge/feasibility_001.tmp/in_progress.txt\n",
-            )
-        if args == ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"]:
-            return subprocess.CompletedProcess(args, 0, stdout="")
-        raise AssertionError(args)
-
-    monkeypatch.setattr(sf.subprocess, "run", active_output_only)
-    sf.verify_source_unchanged(snapshot, active_output_root=active_root)
 
 
 def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
@@ -2890,7 +2181,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
         _unchecked_terminal_binding(first_root),
         _unchecked_terminal_binding(fabricated_second_root),
     ]
-    sf.write_json(selected_manifest, selected_manifest_data)
+    _write_json(selected_manifest, selected_manifest_data)
     _rewrite_terminal_manifest_sha(selected_root, "DONE")
     selected_manifest_data = json.loads(selected_manifest.read_text())
     fabricated_selection = parent / "feasibility_selection_001.json"
@@ -2919,7 +2210,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     )
     second_manifest_data = json.loads(second_manifest.read_text())
     second_manifest_data["predecessor_selections"][0]["sha256"] = "0" * 64
-    sf.write_json(second_manifest, second_manifest_data)
+    _write_json(second_manifest, second_manifest_data)
     _rewrite_terminal_manifest_sha(forged_second_root, "FAILED")
     final_root = parent / "feasibility_003"
     final_manifest, _final_done = _write_feasibility_root(
@@ -2933,8 +2224,8 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
         _unchecked_terminal_binding(first_root),
         _unchecked_terminal_binding(forged_second_root),
     ]
-    final_manifest_data["predecessor_selections"] = [sf.selection_binding(first_selection)]
-    sf.write_json(final_manifest, final_manifest_data)
+    final_manifest_data["predecessor_selections"] = [_selection_fixture_binding(first_selection)]
+    _write_json(final_manifest, final_manifest_data)
     _rewrite_terminal_manifest_sha(final_root, "DONE")
     final_manifest_data = json.loads(final_manifest.read_text())
     final_selection = parent / "feasibility_selection_002.json"
@@ -2992,10 +2283,10 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
             "manifest_sha256": "0" * 64,
         }
     ]
-    sf.write_json(manifest, manifest_data)
+    _write_json(manifest, manifest_data)
     failed_data = json.loads(failed.read_text())
     failed_data["manifest_sha256"] = sf.file_sha256(manifest)
-    sf.write_json(failed, failed_data)
+    _write_json(failed, failed_data)
     with pytest.raises(ValueError, match="checksum mismatch|lineage contains a cycle"):
         sf.validate_feasibility_root_artifacts(cyclic_root, require_passing=False)
 
@@ -3040,7 +2331,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
     manifest_data = json.loads(bad_manifest.read_text())
     manifest_data["configuration"] = {"training_steps": 1500}
-    sf.write_json(bad_manifest, manifest_data)
+    _write_json(bad_manifest, manifest_data)
     _rewrite_terminal_manifest_sha(bad_root, "DONE")
     bad_selection = parent / "feasibility_selection_001.json"
     _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
@@ -3052,7 +2343,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     bad_manifest, _bad_done = _write_feasibility_root(bad_root, "DONE", cells)
     manifest_data = json.loads(bad_manifest.read_text())
     manifest_data["source_provenance"]["commit"] = "b" * 40
-    sf.write_json(bad_manifest, manifest_data)
+    _write_json(bad_manifest, manifest_data)
     _rewrite_terminal_manifest_sha(bad_root, "DONE")
     bad_selection = parent / "feasibility_selection_001.json"
     _write_selection(bad_selection, bad_root, bad_manifest, [], [], cells=cells)
@@ -3062,7 +2353,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     parent = set_parent("dirty_source_provenance")
     bad_root = parent / "feasibility_001"
     _write_feasibility_root(bad_root, "DONE", cells)
-    sf.write_terminal(
+    _write_feasibility_terminal(
         bad_root,
         "DONE",
         cells,
@@ -3083,7 +2374,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     parent = set_parent("unbound_source_provenance")
     failed_root = parent / "feasibility_001"
     failed_root.mkdir()
-    sf.write_terminal(
+    _write_feasibility_terminal(
         failed_root,
         "FAILED",
         [],
@@ -3102,7 +2393,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     parent = set_parent("ignored_source_provenance")
     failed_root = parent / "feasibility_001"
     failed_root.mkdir()
-    sf.write_terminal(
+    _write_feasibility_terminal(
         failed_root,
         "FAILED",
         [],
@@ -3122,7 +2413,7 @@ def test_strict_selection_validation_rejects_fabricated_roots_and_lineage(
     bad_root = parent / "feasibility_001"
     _write_feasibility_root(bad_root, "DONE", cells)
     missing_commit = "a" * 40
-    sf.write_terminal(
+    _write_feasibility_terminal(
         bad_root,
         "DONE",
         cells,
@@ -4604,7 +3895,7 @@ def _d3_build_faithful_input_root(
             },
         )
     exact_command = sf.feasibility_exact_command(input_root, (), Path(sf.FEASIBILITY_REQUIRED_DECISION_DIAGNOSTIC_ROOT))
-    sf.write_terminal(
+    _write_feasibility_terminal(
         input_root,
         "FAILED",
         cells,
@@ -4620,7 +3911,7 @@ def _d3_build_faithful_input_root(
     manifest_path = input_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["environment"] = dict(sf.FEASIBILITY_REQUIRED_RUNTIME_ENV)
-    sf.write_json(manifest_path, manifest)
+    _write_json(manifest_path, manifest)
     _rewrite_terminal_manifest_sha(input_root, "FAILED")
     monkeypatch.setattr(
         sf,
@@ -4638,7 +3929,7 @@ def _d3_refresh_faithful_input_checksums(sf: object, input_root: Path, monkeypat
     manifest_path = input_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["file_inventory"] = sf.inventory(input_root)
-    sf.write_json(manifest_path, manifest)
+    _write_json(manifest_path, manifest)
     _rewrite_terminal_manifest_sha(input_root, "FAILED")
     monkeypatch.setattr(
         sf,
@@ -5301,7 +4592,7 @@ def test_d3_postmortem_source_cleanliness_uses_only_injected_no_argument_callbac
     )
     monkeypatch.setattr(sf, "git_output", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("ambient git_output used")))
     monkeypatch.setattr(sf, "current_source_commit", lambda: (_ for _ in ()).throw(AssertionError("ambient HEAD lookup used")))
-    monkeypatch.setattr(sf, "ignored_source_inputs", lambda: (_ for _ in ()).throw(AssertionError("ambient ignored-source scan used")))
+    assert not hasattr(sf, "ignored_source_inputs")
 
     snapshot = sf.capture_postmortem_source_provenance(input_root, output_root, allowed_paths=allowed_paths)
     assert snapshot == sf.SourceSnapshot(
@@ -5690,7 +4981,7 @@ def test_d3_postmortem_real_shallow_and_deep_input_validation_rejects_evidence_m
     manifest_path = input_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["file_inventory"][0]["sha256"] = "0" * 64
-    sf.write_json(manifest_path, manifest)
+    _write_json(manifest_path, manifest)
     _rewrite_terminal_manifest_sha(input_root, "FAILED")
     monkeypatch.setattr(
         sf,
