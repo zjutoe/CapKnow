@@ -5,7 +5,6 @@ from collections.abc import Callable
 from dataclasses import replace
 from hashlib import sha256
 import importlib
-import inspect
 import json
 import math
 import os
@@ -49,6 +48,9 @@ from capability_certificate_lab.lm_bridge.train import (
     training_accuracy,
     validate_tied_checkpoint_payload,
 )
+
+
+_ACCEPTED_DIAGNOSTIC_SEED0_SCHEDULE_SHA256 = "d384400e9c42e0c67758d0b35ddf99e3528bf5fa159a47ca1b85ee5261859a84"
 
 
 def _tied_config(name: str = "test-tiny", d_model: int = 16, n_heads: int = 2, n_layers: int = 1, d_ff: int = 32) -> TransformerConfig:
@@ -3503,6 +3505,178 @@ def test_diagnostic_named_matrix_rejects_family_and_cell_relabeling() -> None:
         sf.validate_named_generation_artifact(generation_rows, matrix_rows)
 
 
+def _write_literal_diagnostic_terminal_fixture(
+    root: Path,
+    *,
+    diagnostic_lineage: tuple[dict[str, object], ...] = (),
+    extra_inventory_name: str | None = None,
+) -> None:
+    root.mkdir()
+    shared = {
+        "artifact_class": "non_evidence_feasibility_diagnostic",
+        "feasibility_selection_eligible": False,
+        "task_010d_authorized": False,
+        "source_commit": "a" * 40,
+        "source_provenance": {"commit": "a" * 40, "status_lines": [], "ignored_inputs": []},
+        "protocol": "phase8_feasibility_failure_diagnostic",
+        "exact_command": ["python", "historical-reader"],
+        "output_root": str(root),
+        "wall_time_seconds": 0.0,
+        "deterministic_flags": {},
+        "handoff": {},
+        "input_root": {},
+        "configuration": {},
+        "environment": {},
+        "record_hashes": {},
+        "core_blobs": {},
+        "diagnostic_lineage": [dict(row) for row in diagnostic_lineage],
+        "repair_transition": None,
+        "completed_scope": [],
+        "partial_scope": [],
+        "failure_classification": None,
+    }
+    summary = root / "summary.json"
+    summary.write_text(json.dumps(shared, sort_keys=True) + "\n")
+    inventory_paths = [summary]
+    if extra_inventory_name is not None:
+        extra = root / extra_inventory_name
+        extra.write_text("literal fixture\n")
+        inventory_paths.append(extra)
+    file_inventory = [
+        {
+            "path": str(path.relative_to(root)),
+            "sha256": sha256(path.read_bytes()).hexdigest(),
+            "bytes": path.stat().st_size,
+            "role": "summary" if path == summary else "diagnostic_artifact",
+        }
+        for path in sorted(inventory_paths)
+    ]
+    manifest = root / "manifest.json"
+    manifest.write_text(json.dumps({**shared, "terminal_status": "DONE", "file_inventory": file_inventory}, sort_keys=True) + "\n")
+    terminal = {
+        **shared,
+        "status": "DONE",
+        "manifest_path": "manifest.json",
+        "manifest_sha256": sha256(manifest.read_bytes()).hexdigest(),
+        "file_inventory": file_inventory,
+    }
+    (root / "DONE.json").write_text(json.dumps(terminal, sort_keys=True) + "\n")
+
+
+def test_diagnostic_terminal_loader_accepts_literal_fixture_and_rejects_binding_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    monkeypatch.setattr(sf, "validate_diagnostic_common_semantics", lambda *args, **kwargs: None)
+
+    valid_root = tmp_path / "valid" / "feasibility_diagnostic_001"
+    valid_root.parent.mkdir()
+    _write_literal_diagnostic_terminal_fixture(valid_root)
+    terminal, terminal_data, manifest, manifest_sha = sf.load_diagnostic_terminal_binding(valid_root)
+    assert terminal == valid_root / "DONE.json"
+    assert terminal_data["status"] == "DONE"
+    assert manifest == valid_root / "manifest.json"
+    assert manifest_sha == sha256(manifest.read_bytes()).hexdigest()
+
+    manifest.write_text(manifest.read_text() + " ")
+    with pytest.raises(ValueError, match="manifest checksum"):
+        sf.load_diagnostic_terminal_binding(valid_root)
+
+    escape_root = tmp_path / "escape" / "feasibility_diagnostic_001"
+    escape_root.parent.mkdir()
+    _write_literal_diagnostic_terminal_fixture(escape_root, extra_inventory_name="..\\escape.json")
+    with pytest.raises(ValueError, match="canonical relative path"):
+        sf.load_diagnostic_terminal_binding(escape_root)
+
+    lineage_binding = {
+        "path": "artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_000",
+        "terminal_sha256": "1" * 64,
+        "manifest_sha256": "2" * 64,
+    }
+    duplicate_root = tmp_path / "duplicate" / "feasibility_diagnostic_001"
+    duplicate_root.parent.mkdir()
+    _write_literal_diagnostic_terminal_fixture(
+        duplicate_root,
+        diagnostic_lineage=(lineage_binding, dict(lineage_binding)),
+    )
+    with pytest.raises(ValueError, match="duplicate roots"):
+        sf.load_diagnostic_terminal_binding(duplicate_root)
+
+
+def _accepted_d1_array_generation_rows() -> list[dict[str, object]]:
+    path = REPO_ROOT / "artifacts/phase8_toy_lm_bridge/feasibility_diagnostic_001/array_json__small__3000__seed0/generations.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_diagnostic_array_generation_validator_reconstructs_accepted_rows_and_rejects_raw_token_metric_mismatch() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    rows = _accepted_d1_array_generation_rows()
+    sf.validate_array_generation_artifact(
+        rows,
+        comparison_source="diagnostic_small_3000",
+        model_size="small",
+        steps=3000,
+        seed=0,
+    )
+
+    tampered = json.loads(json.dumps(rows))
+    tampered[0]["raw_token_ids"][-2] = ord("x")
+    with pytest.raises(ValueError, match="does not rebuild"):
+        sf.validate_array_generation_artifact(
+            tampered,
+            comparison_source="diagnostic_small_3000",
+            model_size="small",
+            steps=3000,
+            seed=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    (
+        ("family", "boolean_json"),
+        ("source_index", 1),
+        ("template_id", "tampered-template"),
+        ("operand_id", "tampered-operand"),
+        ("prompt", "tampered prompt"),
+        ("expected", "[]"),
+    ),
+)
+def test_diagnostic_array_generation_validator_rejects_frozen_record_identity(
+    field_name: str,
+    replacement: object,
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    rows = _accepted_d1_array_generation_rows()
+    rows[0][field_name] = replacement
+    with pytest.raises(ValueError, match="does not rebuild"):
+        sf.validate_array_generation_artifact(
+            rows,
+            comparison_source="diagnostic_small_3000",
+            model_size="small",
+            steps=3000,
+            seed=0,
+        )
+
+
+def test_diagnostic_schedule_reconstruction_matches_literal_oracle_and_frozen_prefix() -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    batches = sf.diagnostic_training_batches(seed=0, record_count=512)
+    frozen_prefix = sf.deterministic_batch_indices(
+        record_count=512,
+        seed=0,
+        state_mask=0,
+        batch_size=64,
+        steps=1500,
+    )
+    assert len(batches) == 3000
+    assert len(frozen_prefix) == 1500
+    assert batches[:1500] == frozen_prefix
+    assert batches[0][:8] == (336, 404, 419, 163, 376, 496, 158, 371)
+    assert sf.diagnostic_batch_schedule_digest(batches, seed=0, record_count=512) == _ACCEPTED_DIAGNOSTIC_SEED0_SCHEDULE_SHA256
+
+
 
 
 def test_diagnostic_common_semantic_validator_rejects_provenance_protocol_and_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3634,6 +3808,8 @@ def _write_diagnostic_checkpoint_with_trajectory_evidence(
     final_checkpoint = tmp_path / f"checkpoint_step3000_seed{seed}.pt"
     final_model = build_historical_model("small")
     schedule = sf.diagnostic_training_schedule_evidence(seed, sf.TRAIN_RECORDS_PER_FAMILY)
+    if seed == 0:
+        assert schedule["sha256"] == _ACCEPTED_DIAGNOSTIC_SEED0_SCHEDULE_SHA256
     loss_tensor = torch.tensor(final_loss, dtype=torch.float32)
     loss_evidence = {
         "value": final_loss,

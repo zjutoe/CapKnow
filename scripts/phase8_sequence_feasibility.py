@@ -62,7 +62,6 @@ from capability_certificate_lab.lm_bridge.train import (
     encode_record_batch,
     make_optimizer,
     response_only_labels,
-    response_only_loss,
     save_checkpoint,
     set_deterministic_backend,
     train_text_records,
