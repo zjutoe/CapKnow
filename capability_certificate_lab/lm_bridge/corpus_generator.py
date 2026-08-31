@@ -734,17 +734,6 @@ def record_order_indices(seed: int, state_mask: int, record_count: int) -> tuple
     return tuple(indices)
 
 
-def ordered_training_corpus(
-    condition: str,
-    seed: int,
-    state_mask: int,
-    corpus_size: str = "base",
-) -> tuple[SplitRecord, ...]:
-    corpus = build_training_corpus(condition, seed, state_mask, corpus_size)
-    order = record_order_indices(seed, state_mask, len(corpus))
-    return tuple(corpus[index] for index in order)
-
-
 def validate_training_corpus(
     records: Sequence[SplitRecord],
     condition: str,

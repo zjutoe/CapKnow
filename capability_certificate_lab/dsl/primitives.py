@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Sequence
 
 
 @dataclass(frozen=True)
@@ -54,7 +53,3 @@ def get_primitive(op_id: str) -> PrimitiveOperation:
     if op_id not in PRIMITIVES:
         raise ValueError(f"Unknown primitive operation '{op_id}'.")
     return PRIMITIVES[op_id]
-
-
-def list_primitives() -> Sequence[PrimitiveOperation]:
-    return tuple(PRIMITIVES.values())

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Iterator, List, Mapping, MutableMapping
+from typing import Iterable, List, Mapping, MutableMapping
 
 
 @dataclass(frozen=True)
@@ -34,10 +34,6 @@ class TaskUniverse:
         }
 
     @property
-    def tasks(self) -> List[Task]:
-        return list(self._tasks)
-
-    @property
     def task_ids(self) -> List[str]:
         return [task.id for task in self._tasks]
 
@@ -47,15 +43,6 @@ class TaskUniverse:
     def __contains__(self, item: str | Task) -> bool:
         task_id = item.id if isinstance(item, Task) else str(item)
         return task_id in self._index
-
-    def __iter__(self) -> Iterator[Task]:
-        return iter(self._tasks)
-
-    def get(self, task_id: str) -> Task:
-        return self._tasks[self._index[task_id]]
-
-    def index(self, task_id: str) -> int:
-        return self._index[task_id]
 
     def to_dict(self) -> Mapping[str, list[Mapping[str, str]]]:
         return {"tasks": [task.to_dict() for task in self._tasks]}

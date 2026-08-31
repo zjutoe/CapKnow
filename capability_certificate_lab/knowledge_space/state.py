@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Iterator, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -16,15 +16,6 @@ class KnowledgeState:
     def __contains__(self, task_id: str) -> bool:
         return task_id in self.tasks
 
-    def union(self, other: "KnowledgeState") -> "KnowledgeState":
-        return KnowledgeState(self.tasks | other.tasks)
-
-    def intersection(self, other: "KnowledgeState") -> "KnowledgeState":
-        return KnowledgeState(self.tasks & other.tasks)
-
-    def difference(self, other: "KnowledgeState") -> "KnowledgeState":
-        return KnowledgeState(self.tasks - other.tasks)
-
     def to_dict(self) -> Mapping[str, list[str]]:
         return {"tasks": sorted(self.tasks)}
 
@@ -37,6 +28,3 @@ class KnowledgeState:
             return tuple(sorted(self.tasks))
         order_map = {task_id: i for i, task_id in enumerate(task_order)}
         return tuple(sorted(self.tasks, key=lambda task_id: order_map[task_id]))
-
-    def items(self) -> Iterator[str]:
-        return iter(self.tasks)

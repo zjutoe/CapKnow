@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Literal, Sequence
+from typing import Literal, Sequence
 
 
 BYTE_VOCAB_SIZE = 256
@@ -197,12 +197,3 @@ class ByteTokenizer:
             raise ValueError("Sequence length limit must be non-negative.")
         if length > MAX_SEQUENCE_LENGTH:
             raise ValueError("Token operations are capped at the fixed 256-token context window.")
-
-
-def utf8_byte_token_encoder(text: str) -> tuple[int, ...]:
-    return ByteTokenizer().encode_text(text)
-
-
-def validate_no_special_ids(token_ids: Iterable[int]) -> None:
-    if any(token_id in SPECIAL_TOKEN_IDS for token_id in token_ids):
-        raise ValueError("Raw byte text must not contain special-token IDs.")

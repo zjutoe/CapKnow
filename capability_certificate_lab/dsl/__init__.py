@@ -1,7 +1,6 @@
 """Executable DSL primitives and task world utilities."""
 
 from .composition import (
-    CapabilityGraph,
     CompositionRule,
     DEFAULT_COMPOSITION_RULES,
     build_composite_program,
@@ -13,7 +12,6 @@ from .simulator import default_input_context, make_dsl_response_signature, simul
 from .task_generator import generate_dsl_world
 
 __all__ = [
-    "CapabilityGraph",
     "CompositionRule",
     "DEFAULT_COMPOSITION_RULES",
     "build_composite_program",
