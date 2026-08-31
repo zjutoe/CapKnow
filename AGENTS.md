@@ -22,11 +22,19 @@
 - Preserve manifests, fixed splits, seed provenance, and checksums for evidence outside Git.
 - Return failed or scientifically suspicious runs to `main`; `operator` must not patch code or silently alter protocol.
 
+## Agent Orchestration and Model Routing
+
+- Use `gpt-5.6-sol` with `reasoning_effort=medium` for task execution, including implementation, debugging, repairs, experiment operation, and documentation work.
+- Use a fresh-context `gpt-5.6-sol` agent with `reasoning_effort=high` for every independent review. Bind the review to an exact commit or commit range and keep the reviewer strictly read-only.
+- Start delegated executors and reviewers with `fork_turns=none` and an exact handoff. Do not inherit the main conversation as an implicit task specification.
+- Reserve `gpt-5.6-sol` with `reasoning_effort=xhigh` only for top-level design work such as architecture design. Do not use xhigh for ordinary implementation, diagnosis, repair, experiment execution, or independent review.
+- When a request reaches that top-level design boundary, stop before performing the design and ask the user to switch the current session manually to `gpt-5.6-sol` with `reasoning_effort=xhigh`. Do not prompt for a manual model switch in other cases.
+
 ## Research Review and Acceptance
 
 - High-risk changes include simulators, observation semantics, task distributions, train/calibration/evaluation splits, metrics, statistical aggregation, acceptance logic, and result interpretation.
-- Any high-risk change must trigger an independent review agent using the same model family as the main thread, with no shared context between the review agent and main thread.
-- Before accepting non-trivial changes, freeze them in a commit and spawn an independent strict read-only review agent by default with `fork_context=false`.
+- Any high-risk change must trigger an independent `gpt-5.6-sol` review agent with `reasoning_effort=high` and no shared context with the main thread.
+- Before accepting non-trivial changes, freeze them in a commit and spawn an independent strict read-only review agent with `fork_turns=none`.
 - The review handoff should include only: intended diff, relevant artifacts, acceptance criteria, protocol constraints, and verification already run.
 - For each high-risk change handoff, include: exact commit or range, concise change summary, reproducible commands, key touched files, verification outputs, and relevant artifact checksums.
 - Review protocol/implementation consistency, leakage, objective/inference consistency, statistical independence, clustered aggregation, metric semantics, acceptance logic, artifact provenance, and theoretical overclaiming.
