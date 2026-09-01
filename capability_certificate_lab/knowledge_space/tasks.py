@@ -17,7 +17,7 @@ class Task:
 
 
 class TaskUniverse:
-    """A sequence-like collection of unique tasks with index access."""
+    """An ordered collection of unique tasks."""
 
     def __init__(self, tasks: Iterable[str | Task]):
         normalized: List[Task] = []
