@@ -35,7 +35,7 @@ def _summarize_runs(runs: list[dict[str, object]]) -> dict[str, object]:
 def _run_world(name, world):
     fixed = solve_exact_certificate(world)
     policy_results = {}
-    for policy in ("entropy", "balanced"):
+    for policy in ("entropy",):
         outcome = solve_adaptive_certificate(world, policy=policy)
         independently_valid = validate_adaptive_certificate(outcome.root, world)
         if not outcome.valid or not independently_valid:

@@ -22,6 +22,7 @@ from scripts.phase7_structural_compressibility import (
     exhaustive_structured_population_closure,
     fixed_metric_diagnostics,
     generate_matched_control_world,
+    analyze_structured_cell,
     response_column_diagnostics,
     uniform_blocks,
     validate_fixed_certificate_independent,
@@ -144,7 +145,7 @@ def test_exact_fixed_size_and_block_coverage_formulas_across_grid():
 def test_independent_block_adaptive_depth_formula_across_grid():
     for block_count, block_size in GRID:
         world = generate_independent_block_world(uniform_blocks(block_count, block_size))
-        for policy in ("entropy", "balanced"):
+        for policy in ("entropy",):
             diagnostics = adaptive_diagnostics(world, policy)
             reconstructed = diagnostics["reconstructed_metrics"]
             assert diagnostics["solver"]["valid"]
@@ -159,7 +160,7 @@ def test_prefix_block_adaptive_tree_gates_across_grid():
     for block_count, block_size in GRID:
         world = generate_prefix_block_world(uniform_blocks(block_count, block_size))
         fixed = solve_exact_certificate(world)
-        for policy in ("entropy", "balanced"):
+        for policy in ("entropy",):
             diagnostics = adaptive_diagnostics(world, policy)
             reconstructed = diagnostics["reconstructed_metrics"]
             expected_worst = math.ceil(math.log2(block_count + 1))
@@ -177,6 +178,12 @@ def test_prefix_block_adaptive_tree_gates_across_grid():
                 assert reconstructed["worst_case_depth"] == fixed.certificate_size
             else:
                 assert reconstructed["worst_case_depth"] < fixed.certificate_size
+
+
+def test_structured_cell_has_only_current_adaptive_policy_key():
+    result = analyze_structured_cell("prefix_block", block_count=2, block_size=1)
+
+    assert set(result["adaptive"]) == {"entropy"}
 
 
 def test_canonical_no_compression_controls_have_single_coordinate_witnesses():

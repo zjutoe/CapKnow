@@ -558,7 +558,7 @@ def analyze_structured_cell(family: str, block_count: int, block_size: int) -> d
     )
     adaptive = {
         policy: adaptive_diagnostics(world, policy)
-        for policy in ("entropy", "balanced")
+        for policy in ("entropy",)
     }
 
     _require(identifiability["identifiable"], f"{family} {block_count}x{block_size} not identifiable.")

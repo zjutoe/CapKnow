@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from math import log2
 from random import Random
 from typing import Mapping
 
@@ -117,45 +116,12 @@ def select_entropy_reduction_question(
         return None
 
     best_question: str | None = None
-    best_gain = -1.0
-
-    total = len(candidate_states)
-    for question, no_count, yes_count in questions:
-        p_yes = yes_count / total
-        p_no = no_count / total
-        gain = -(p_yes * log2(p_yes) + p_no * log2(p_no))
-        if gain > best_gain:
-            best_gain = gain
-            best_question = question
-
-    return best_question
-
-
-def select_balanced_split_question(
-    candidate_states: Sequence[KnowledgeState],
-    task_ids: Sequence[str],
-    asked: set[str],
-    response_signature_fn: Callable[[KnowledgeState, Sequence[str]], Signature],
-    rng: Random | None = None,
-) -> str | None:
-    del rng
-
-    questions = _splitting_questions(
-        candidate_states,
-        task_ids,
-        asked,
-        response_signature_fn,
-    )
-    if not questions:
-        return None
-
-    best_question: str | None = None
-    best_balance = len(candidate_states) + 1
+    best_score = -1
 
     for question, no_count, yes_count in questions:
-        balance = max(no_count, yes_count)
-        if balance < best_balance:
-            best_balance = balance
+        score = min(no_count, yes_count)
+        if score > best_score:
+            best_score = score
             best_question = question
 
     return best_question
@@ -164,7 +130,6 @@ def select_balanced_split_question(
 POLICIES: Mapping[str, QuestionPolicy] = {
     "random": select_random_question,
     "entropy": select_entropy_reduction_question,
-    "balanced": select_balanced_split_question,
 }
 
 

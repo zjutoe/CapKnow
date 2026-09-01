@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import importlib
+from math import log2
+from pathlib import Path
+
 from capability_certificate_lab.certificate import (
     AdaptiveCertificate,
     DecisionNode,
@@ -8,9 +12,13 @@ from capability_certificate_lab.certificate import (
     tree_signature,
     validate_adaptive_certificate,
 )
+from capability_certificate_lab.certificate import policies
 from capability_certificate_lab.knowledge_space.state import KnowledgeState
 from capability_certificate_lab.knowledge_space import KnowledgeSpace, TaskUniverse
-from capability_certificate_lab.certificate.policies import select_entropy_reduction_question
+from capability_certificate_lab.certificate.policies import (
+    resolve_policy,
+    select_entropy_reduction_question,
+)
 from capability_certificate_lab.generators import (
     generate_chain_world,
     generate_tree_world,
@@ -28,7 +36,7 @@ def _is_internal(node: DecisionNode) -> bool:
 def test_chain_world_adaptive_improves_or_matches_fixed_depth():
     space = generate_chain_world(["A", "B", "C", "D"])
     fixed = solve_exact_certificate(space)
-    adaptive = solve_adaptive_certificate(space, policy="balanced")
+    adaptive = solve_adaptive_certificate(space, policy="entropy")
 
     assert isinstance(adaptive, AdaptiveCertificate)
     assert adaptive.valid
@@ -66,6 +74,58 @@ def test_random_policy_is_reproducible_with_seed():
     run_b = solve_adaptive_certificate(space, policy="random", seed=42)
 
     assert tree_signature(run_a.root) == tree_signature(run_b.root)
+
+
+def test_balanced_policy_is_rejected_by_resolver_and_solver():
+    with pytest.raises(ValueError, match="Unsupported policy 'balanced'"):
+        resolve_policy("balanced")
+
+    with pytest.raises(ValueError, match="Unsupported policy 'balanced'"):
+        solve_adaptive_certificate(generate_chain_world(["A"]), policy="balanced")
+
+
+def test_entropy_equal_scores_preserve_task_id_order(monkeypatch):
+    monkeypatch.setattr(
+        policies,
+        "_splitting_questions",
+        lambda *args: [("first", 2, 2), ("second", 2, 2)],
+    )
+
+    selected = select_entropy_reduction_question([], ["first", "second"], set(), lambda *_: ())
+
+    assert selected == "first"
+
+
+def test_entropy_large_counts_use_exact_integer_order(monkeypatch):
+    total = 268435456
+    neighboring = (total // 2 - 1, total // 2 + 1)
+    perfect = (total // 2, total // 2)
+
+    def old_float_entropy(counts):
+        no_count, yes_count = counts
+        p_no = no_count / total
+        p_yes = yes_count / total
+        return -(p_no * log2(p_no) + p_yes * log2(p_yes))
+
+    assert old_float_entropy(neighboring) == old_float_entropy(perfect)
+    monkeypatch.setattr(
+        policies,
+        "_splitting_questions",
+        lambda *args: [
+            ("neighboring", *neighboring),
+            ("perfect", *perfect),
+        ],
+    )
+    candidate_states = range(total)
+
+    selected = select_entropy_reduction_question(
+        candidate_states,  # type: ignore[arg-type]
+        ["neighboring", "perfect"],
+        set(),
+        lambda *_: (),
+    )
+
+    assert selected == "perfect"
 
 
 def _collapsed_signature(_: KnowledgeState, task_ids: Sequence[str]) -> Signature:
@@ -181,7 +241,7 @@ def test_adaptive_solver_rejects_empty_declared_state_population():
 
 def test_adaptive_serialization_contains_concrete_tree_structure():
     space = generate_chain_world(["A"])
-    result = solve_adaptive_certificate(space, policy="balanced")
+    result = solve_adaptive_certificate(space, policy="entropy")
     payload = result.to_dict()
 
     assert payload["root"]["question"] == "A"
@@ -193,3 +253,14 @@ def test_adaptive_serialization_contains_concrete_tree_structure():
         "question": None,
         "candidate_state_ids": ["[]"],
     }
+
+
+def test_phase4_world_results_have_only_current_policy_keys(monkeypatch):
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    monkeypatch.syspath_prepend(str(scripts_dir))
+    phase4 = importlib.import_module("revalidation_phase4_adaptive")
+    monkeypatch.setattr(phase4, "RANDOM_SEEDS", [0])
+
+    result = phase4._run_world("chain", generate_chain_world(["A", "B"]))
+
+    assert set(result["policy_results"]) == {"entropy", "random"}
