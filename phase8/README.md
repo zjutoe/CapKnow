@@ -160,6 +160,7 @@ The role labels below are navigational summaries, not replacement task contracts
 | `Future_Only_Postmortem_Process_Isolation_Design.md` | Future-only postmortem process-isolation simplification design | Conditional future / design only; never current scientific authority | None | None |
 | `Task_010D_Training_Checkpoint_and_Evaluator.md` | Formal training, checkpoint, and evaluator handoff | Conditional future / blocked by no selection | No current evidence | No current authority |
 | `Task_010E_Behavioral_Certificate_Integration.md` | Behavioral-certificate integration handoff | Conditional future / blocked behind `010D` | No current evidence | No current authority |
+| `Task_010E_Entropy_Only_Adaptive_Policy_Amendment.md` | Entropy-only adaptive-policy successor amendment proposal | Conditional future proposal; no effect before exact-commit review and main acceptance | None | No implementation or execution authority by itself |
 | `Task_010F_Metrics_and_Aggregation.md` | Metrics and aggregation handoff | Conditional future / blocked behind prior tasks | No current evidence | No current authority |
 | `Task_010G_Sharded_Runner_and_Provenance.md` | Formal sharded-runner handoff | Conditional future / blocked behind prior tasks | No current evidence | No current authority |
 | `Task_010H_Resource_Benchmark_and_Formal_Authorization.md` | Resource benchmark and authorization-evidence handoff | Conditional future / blocked behind prior tasks | No current evidence | No current authority |
