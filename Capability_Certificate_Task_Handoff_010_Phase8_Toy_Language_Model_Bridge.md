@@ -727,41 +727,50 @@ Exactly `11/24` cells passed: Hex Copy `5/6`, Named-value JSON `0/6`, Boolean JS
 `6/6`, and Array JSON `0/6`. This result permanently blocks selection and `010D`
 under the current Phase 8 protocol; there is no `feasibility_006` fallback.
 
-Any postmortem is non-evidence and cannot reopen that gate. Task 010C-D3 may propose
-checkpoint-read-only teacher-forced and retained-generation analyses using only the
-exact 005 artifacts and source-controlled records. It may not train, construct a new
-evaluation distribution, regenerate outputs, change the feasibility verdict, create
-a selection, or authorize `010D`. The proposal, any later implementation handoff,
-the implementation commit, and any future command each require their own explicit
-review/authorization boundary.
+Any postmortem is non-evidence and cannot reopen that gate. The accepted Task
+010C-D3 package used checkpoint-read-only teacher-forced and retained-generation
+analyses with only the exact 005 artifacts and source-controlled records. It did not
+train, construct a new evaluation distribution, regenerate outputs, change the
+feasibility verdict, create a selection, or authorize `010D`. Its proposal,
+implementation handoff, implementation commit, and launch each passed their own
+explicit review/authorization boundary.
 
 The repaired 010C-D3 proposal accepted at
-`06ee71d958eb1c4cb446ede3d120e99eb64bba97` and revised D3-I handoff define one
-future launch surface only. It is a direct `execve()` by a separately accepted
-external supervisor, not a shell command:
+`06ee71d958eb1c4cb446ede3d120e99eb64bba97` and the accepted implementation/source
+commit `e3f99fcabbce812408793b62a1cdad536b8b303b` governed one historical, completed
+launch. A separately accepted external supervisor performed a direct `execve()`,
+not a shell command:
 
 ```text
 executable: /opt/anaconda3/bin/python
 cwd: /home/mye/src/llm/CapKnow
 environment: exact clean LC_ALL plus the three frozen 005 environment values
-argv prefix: python -I -B -S -c <verifier bytes> --verifier-sha256 890671e89404a1c172b669cad8200fe926b9c052de0ab32d5c860549dd903432 --accepted-implementation-commit <accepted SHA> --runner-path scripts/phase8_sequence_feasibility.py --
-runner argv: postmortem-failure --device cuda:0 --input-root artifacts/phase8_toy_lm_bridge/feasibility_005 --output-root artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001 --accepted-proposal-commit 06ee71d958eb1c4cb446ede3d120e99eb64bba97 --accepted-implementation-commit <same accepted SHA>
+argv prefix: python -I -B -S -c <verifier bytes> --verifier-sha256 55c1e76086da332c9b7827980912f6ffe2bc1f38486c410be10c71e647b4e522 --accepted-implementation-commit e3f99fcabbce812408793b62a1cdad536b8b303b --runner-path scripts/phase8_sequence_feasibility.py --
+runner argv: postmortem-failure --device cuda:0 --input-root artifacts/phase8_toy_lm_bridge/feasibility_005 --output-root artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001 --accepted-proposal-commit 06ee71d958eb1c4cb446ede3d120e99eb64bba97 --accepted-implementation-commit e3f99fcabbce812408793b62a1cdad536b8b303b
 ```
 
-The exact verifier source is frozen by the revised D3-I handoff. It authenticates the
-accepted implementation tree/index/full-mode worktree through exact-argv Git plumbing
-and retained descriptor/content bindings, then loads repository modules only from
-captured accepted buffers before Torch or runner execution. The manifest records the
-launch as the handoff's exact closed four-key `exact_command` object, including the
-verifier source and both matching implementation-commit argv positions. Its nested
-four-variable environment records `execve`; the separate top-level manifest
-environment remains the exact feasibility-005 runtime object. The D3-I
-implementation package may encode this launch template, exact proposal/005/source/runtime bindings,
-checkpoint-read-only teacher-forced metrics, retained-generation taxonomy,
-forbidden-operation sentinels, and descriptor-bound DONE-only atomic publication. It
-does not supply the future accepted implementation SHA or supervisor, authorize a
-run or finalized FAILED postmortem root, create a selection, or change the permanent
-005 stop before `010D`.
+The exact verifier source is frozen by the revised D3-I handoff at SHA-256
+`55c1e76086da332c9b7827980912f6ffe2bc1f38486c410be10c71e647b4e522`. It
+authenticated the accepted implementation tree/index/full-mode worktree through
+exact-argv Git plumbing and retained descriptor/content bindings, then loaded
+repository modules only from captured accepted buffers before Torch or runner
+execution. The manifest records the launch as the handoff's exact closed four-key
+`exact_command` object, including the verifier source and both matching accepted
+implementation-commit argv positions. Its nested four-variable environment records
+`execve`; the separate top-level manifest environment remains the exact
+feasibility-005 runtime object.
+
+The completed accepted root is
+`artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001`, with operational terminal
+`DONE` and artifact class `non_evidence_feasibility_postmortem`. Its manifest,
+summary, and `DONE.json` SHA-256 values are, respectively,
+`1cf55f231cc064ba1e059c084dac38b26888d59907d5469c803cb061dd61d503`,
+`d8e9d78aa32147d697accdfb92068751724f0de87a0d969ce69f89278201a1cd`, and
+`f566a21e2ac2a1dd22dad90c77aaef2ee2331dd8532d824e0083e6f1382caec4`.
+Completion has `no_verdict_change`, carries no causal weight-tying claim, creates no
+selection, and grants no `010D` authority. The root is non-evidence and does not
+change the permanent 005 stop. The historical proposal and implementation handoffs
+remain archive-in-place with their point-in-time wording and bytes.
 
 ### 9.5 Non-scientific resource benchmark and authorization
 
@@ -904,9 +913,9 @@ When identifiable:
 - run the accepted exact fixed solver and independent validator;
 - independently enumerate all `2^8` task subsets to recover every minimum fixed
   behavioral certificate;
-- run entropy and balanced adaptive solvers and their independent validator;
+- run the canonical entropy adaptive solver and its independent validator;
 - reconstruct leaf identities, per-state depths, average depth, and worst-case depth
-  from each serialized tree and require agreement with solver metrics.
+  from its serialized tree and require agreement with solver metrics.
 
 ### 10.3 Metrics
 
@@ -953,7 +962,7 @@ Record the following population-level metrics with these exact denominators:
 - canonical selected-task Jaccard overlap with the unique ground-truth certificate;
 - minimum, arithmetic mean, and maximum Jaccard overlap across all minimum behavioral
   certificates;
-- entropy and balanced adaptive average and worst-case query depths under equal state
+- canonical entropy adaptive average and worst-case query depths under equal state
   weighting;
 - the earliest frozen checkpoint step at which the primary behavioral matrix is
   identifiable, if any.
@@ -1068,11 +1077,15 @@ phase8/Task_010G_Sharded_Runner_and_Provenance.md
 phase8/Task_010H_Resource_Benchmark_and_Formal_Authorization.md
 ```
 
-Every subtask uses a fresh-context execution subagent with model override `gpt-5.5`
-and `fork_turns=none`. The model identifier is exactly `gpt-5.5`; do not infer or
-append a role or model suffix. Before each launch, `main` supplies the accepted
-prerequisite commit, working directory, allowed paths, acceptance criteria,
-verification commands, and return format from the corresponding handoff.
+Task execution, documentation, repair, and operation use a fresh-context
+`gpt-5.6-sol` subagent with `reasoning_effort=medium` and `fork_turns=none`.
+Independent strict read-only review uses a separate fresh-context `gpt-5.6-sol`
+subagent with `reasoning_effort=high` and `fork_turns=none`. Before each launch,
+`main` supplies an exact handoff with the accepted prerequisite commit, working
+directory, allowed paths, acceptance criteria, verification commands, and return
+format. Reserve `reasoning_effort=xhigh` for top-level architecture design only,
+after asking the user to manually switch the current session to `gpt-5.6-sol` with
+`reasoning_effort=xhigh`.
 
 Only one delegated writer may hold the mutation lease. A delegate must stop at its
 handoff boundary, must not implement a later subtask, and must return protocol
@@ -1472,7 +1485,8 @@ The report must state at least:
 ## 18. Milestone-start Scientific Review Gate
 
 Freeze this handoff in a commit and start a fresh-context `gpt-5.6-sol` strict
-read-only reviewer. Provide only:
+read-only reviewer with `reasoning_effort=high` and `fork_turns=none`. Provide the
+reviewer an exact handoff containing only:
 
 - this handoff path and exact commit SHA;
 - accepted baseline `6d7012a905f8814e0788095bb3eee54a83616cc3`;

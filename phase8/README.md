@@ -1,4 +1,4 @@
-# Phase 8 GPT-5.5 Execution Handoffs
+# Phase 8 Execution Handoffs
 
 This directory contains the bounded implementation handoffs for
 `Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md`.
@@ -7,10 +7,13 @@ implementation and evidence-preparation work.
 
 ## Current Phase 8 state
 
-This status snapshot is bound as of repository commit
-`0cabe0c7a457939eb440063a2dd207ae84b005f1`. The sole master scientific authority is
-`Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md`; this
-index summarizes status and does not replace or extend that contract.
+This status snapshot records authority through the accepted entropy-only proposal
+`7e61ddbb891a41fff12daf61749d501bbc5b7a9c` and its accepted implementation
+`3cb456b86737167fcc2da42d084fac4d2872ff80`; it deliberately does not attempt to bind
+the future commit that repairs this index. The current scientific authority is
+`Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md`,
+amended only by that exact accepted entropy-only successor. This index summarizes
+status and does not replace or extend those contracts.
 
 - `feasibility_005` is bound to source commit
   `2dc8c50fab9ece27a07eb0dc04021b78de52895c`, terminated `FAILED`, and passed
@@ -37,6 +40,17 @@ does not grant selection or `010D` authority. Later source or test cleanup commi
 do not retroactively rebind, rewrite, replace, or reinterpret the `feasibility_005`
 or D3 artifacts.
 
+The entropy-only successor is accepted and implemented solely for future
+deterministic adaptive-policy use. It is not evidence and grants no execution,
+experiment, artifact, rerun, selection, `010D`, or `010E` authority. In particular,
+`feasibility_005` remains `FAILED` with no selection and permanently blocks `010D`
+under the current protocol. Historical Phase 4 and Phase 7 artifacts remain
+byte-identical at SHA-256
+`1d00e83570164b7253c724cb68e4c5760c283d459a4097621bd88079d96dd39d` and
+`9ffd95abfe4ad85ee55aa833342de175d8bebdb39bf9ac808259943282842270`,
+respectively; their historical entropy and balanced labels are archive-in-place and
+are not a claim of global equivalence.
+
 ## Lifecycle vocabulary and archive-in-place
 
 - **Current authority** identifies the exact master or accepted successor that owns
@@ -58,22 +72,26 @@ point-in-time state; current status comes from this index together with its exac
 master/successor binding. This index does not grant execution, experiment,
 selection, commit, or resource authority.
 
-## Fixed execution route
+## Operative model route
 
-Every task `010A` through `010H` must be launched as:
+Task execution, documentation, repair, and operation use:
 
 ```text
 executor: fresh-context Codex subagent
-model override: gpt-5.5
+model override: gpt-5.6-sol
+reasoning_effort: medium
 context: fresh
 fork_turns: none
 working directory: /home/mye/src/llm/CapKnow
 ```
 
-The required model identifier is exactly `gpt-5.5`; do not infer or append a role or
-model suffix. `main` must give the executor the exact accepted prerequisite commit
-and the relevant handoff paths in its launch packet. Branch names and an uncommitted
-working tree are not valid bindings.
+Independent strict read-only review uses a separate fresh-context `gpt-5.6-sol`
+subagent with `reasoning_effort=high` and `fork_turns=none`. Every executor and
+reviewer receives an exact handoff; `main` must include the exact accepted
+prerequisite commit and relevant paths. Branch names and an uncommitted working tree
+are not valid bindings. Reserve `reasoning_effort=xhigh` for top-level architecture
+design only, after asking the user to manually switch the current session to
+`gpt-5.6-sol` with `reasoning_effort=xhigh`.
 
 ## Sequence and mutation lease
 
@@ -121,7 +139,7 @@ Inherited sections: <exact section name>[, <exact section name> ...]
 Task-specific overrides: <exact inherited field/section and replacement, or none>
 ```
 
-Permitted shared material is limited to generic process text in `Fixed execution
+Permitted shared material is limited to generic process text in `Operative model
 route`, the writer lease/main-owned commit and review gate in `Sequence and mutation
 lease`, `Common return format`, and its blocked return format. The shared protocol
 and this index grant no scientific, execution, experiment, selection, commit, or
@@ -160,7 +178,7 @@ The role labels below are navigational summaries, not replacement task contracts
 | `Future_Only_Postmortem_Process_Isolation_Design.md` | Future-only postmortem process-isolation simplification design | Conditional future / design only; never current scientific authority | None | None |
 | `Task_010D_Training_Checkpoint_and_Evaluator.md` | Formal training, checkpoint, and evaluator handoff | Conditional future / blocked by no selection | No current evidence | No current authority |
 | `Task_010E_Behavioral_Certificate_Integration.md` | Behavioral-certificate integration handoff | Conditional future / blocked behind `010D` | No current evidence | No current authority |
-| `Task_010E_Entropy_Only_Adaptive_Policy_Amendment.md` | Entropy-only adaptive-policy successor amendment proposal | Conditional future proposal; no effect before exact-commit review and main acceptance | None | No implementation or execution authority by itself |
+| `Task_010E_Entropy_Only_Adaptive_Policy_Amendment.md` | Entropy-only adaptive-policy successor amendment proposal | Accepted and implemented future-policy successor at proposal `7e61ddbb891a41fff12daf61749d501bbc5b7a9c` and implementation `3cb456b86737167fcc2da42d084fac4d2872ff80`; amends only the named future adaptive-policy clauses | Not evidence | No execution, experiment, artifact, rerun, selection, `010D`, or `010E` authority |
 | `Task_010F_Metrics_and_Aggregation.md` | Metrics and aggregation handoff | Conditional future / blocked behind prior tasks | No current evidence | No current authority |
 | `Task_010G_Sharded_Runner_and_Provenance.md` | Formal sharded-runner handoff | Conditional future / blocked behind prior tasks | No current evidence | No current authority |
 | `Task_010H_Resource_Benchmark_and_Formal_Authorization.md` | Resource benchmark and authorization-evidence handoff | Conditional future / blocked behind prior tasks | No current evidence | No current authority |

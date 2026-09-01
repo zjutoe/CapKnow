@@ -4,7 +4,8 @@
 
 ```text
 executor: fresh-context Codex subagent
-model override: gpt-5.5
+model override: gpt-5.6-sol
+reasoning_effort: medium
 fork_turns: none
 working directory: /home/mye/src/llm/CapKnow
 ```
@@ -41,9 +42,9 @@ to `main` rather than patching the accepted baseline.
 - For identifiable matrices, run the accepted exact fixed solver and independent
   validator; independently enumerate all `2^8` task subsets and retain every minimum
   certificate.
-- Run entropy and balanced adaptive solvers and validators, then independently
+- Run the canonical entropy adaptive solver and validator, then independently
   reconstruct leaf identities, per-state depths, average depth, and worst-case depth
-  from serialized trees.
+  from its serialized tree.
 - Independently reconstruct assigned-state full-signature matching and
   ground-truth-certificate state identification. Do not report behavioral
   self-identification as ground-truth recovery.
