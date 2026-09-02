@@ -177,18 +177,28 @@ silently add another transformation through its templates or evaluator.
 
 ### 8.2 Three generalization axes
 
-Every family has three evaluation axes:
+011A must assign two separate template identities. `template_family_id` identifies a
+structural/surface-form family; `template_id` identifies one exact concrete template
+definition. These identities are frozen in 011A. Every task family then has three
+evaluation axes:
 
-1. `operand_holdout`: training-template family, held-out operands;
-2. `template_holdout`: held-out templates, operands drawn from the training-side
-   generator domain but with disjoint exact operand identities;
-3. `joint_holdout`: held-out templates and held-out operands.
+1. `operand_holdout`: reuse exact training `template_id` values and use operand
+   tuples absent from training and every other evaluation axis;
+2. `template_holdout`: use `template_family_id` and exact `template_id` values absent
+   from training, while intentionally reusing operand tuples from the training
+   operand pool so only the template factor is held out; the complete records and
+   rendered prompts must nevertheless be new; and
+3. `joint_holdout`: use `template_family_id` and exact `template_id` values absent
+   from training and from the template-only axis, plus operand tuples absent from
+   training and every other evaluation axis.
 
-All train, development, and final records are disjoint by complete rendered bytes,
-template ID, payload ID, operand tuple, and the tuple of all canonical record fields.
-They use the same declared alphabet, grammar, and per-family length distribution.
-The old Phase 8 train/evaluation records may be inspected as development history but
-must not occur in a Phase 9 final pack.
+Development and sealed-final held-out template sets are mutually disjoint. Their new
+operand sets are also mutually disjoint wherever operands are a held-out factor. All
+payload IDs, complete records, and rendered prompt bytes are globally disjoint across
+the train, development, and sealed-final splits. Every role uses the same declared
+alphabet and grammar and the same per-task-family length distribution. The old Phase
+8 train/evaluation records may be inspected as development history but must not occur
+in a Phase 9 final pack.
 
 ### 8.3 Semantic and canonical evaluation
 
@@ -270,8 +280,9 @@ Canonical exact counts are reported but are not the 011B gate.
 
 - Freeze the selected source commit, model/training configuration, and generator
   contract before generating or reading any final record.
-- Generate a new immutable final pack with new template IDs, payload IDs, operands,
-  and rendered bytes. It has `64` records for every family/axis cell.
+- Generate a new immutable final pack with the axis-specific template and operand
+  reuse/novelty required by sections 8.2 and 14, globally new payload IDs, complete
+  records, and rendered prompt bytes. It has `64` records for every family/axis cell.
 - Run exactly the selected `6 * 3 = 18` checkpoints/configurations. Do not compare
   another size or configuration.
 - Require `semantic_success_count >= 52/64` for every family/axis/seed cell.
@@ -299,10 +310,16 @@ executor. Use one separately instantiated checkpoint for every `(seed,state)` pa
 3 seeds * 16 states = 48 checkpoints
 ```
 
-Within a seed, all state checkpoints start from byte-identical initial weights. The
-state affects only which positive/refusal records occur in its training corpus. A
-state ID, persona, capability list, filename fragment, or other state signal must not
-appear in a prompt or inference input.
+Within each seed-specific population, all state checkpoints use byte-identical
+initial model weights; the same model and optimizer configuration and optimizer
+schedule; the same training record keys, prompt multiset, per-task record counts,
+logical record order, and minibatch-index schedule; and the same non-target record
+fields. For a fixed logical record, the only state-dependent bytes are the response
+target: the canonical task answer when the corresponding declared capability is
+present, or exact canonical `unable` when it is absent. A seed may change the frozen
+initialization and schedule; state may not. A state ID, persona, capability list,
+filename fragment, or other state signal must not appear in a prompt or inference
+input.
 
 ### 11.2 Positive and negative behavior
 
@@ -332,11 +349,27 @@ independent block: B=3, uniform block size s=2
 prefix block:      B=3, uniform block size s=2
 ```
 
-The six task columns form three two-task blocks. The text-task mapping must preserve
+The future 011E handoff must choose exactly one task contract from each of the six
+accepted 011A families and group the resulting six tasks into three two-task blocks.
+All six must be genuinely distinct model-facing probes: they have distinct executable
+transformation/evaluator contracts, pairwise-disjoint template sets and rendered
+evaluation prompt bytes, and no alias or byte-identical program/rendering is accepted
+as a separate task. At least one frozen, independently checked witness per two-task
+block must demonstrate that its two executable task mappings are semantically
+distinct. The two distinct tasks in a block share one declared capability toggle and
+therefore one statewise oracle response column. The text-task mapping must preserve
 the accepted block closure exactly and must be verified by independent exhaustive
-enumeration before training. Tasks inside a block may have different prompts but
-must depend on the same declared executable capability and have the same statewise
-oracle response column.
+enumeration before training.
+
+Within each seed-specific population and each block-world family, all state
+checkpoints use byte-identical initial model weights; the same model and optimizer
+configuration and optimizer schedule; the same training record keys, prompt
+multiset, per-task record counts, logical record order, and minibatch-index schedule;
+and the same non-target record fields. For a fixed logical record, the only
+state-dependent bytes are the response target: the canonical task answer when its
+block capability is present, or exact canonical `unable` when it is absent. Seed and
+block-world family may change the frozen initialization and schedule; state may not.
+No state ID or other inference-time side channel is allowed.
 
 Train a separate checkpoint for every declared state and seed using the 011C-selected
 learner:
@@ -390,11 +423,22 @@ certificate selected for better agreement is allowed.
 
 ## 14. Leakage and split rules
 
-Every stage must validate, before training:
+Every stage must validate, before training, the exact required and forbidden overlaps
+for its split contract. For 011A, 011B, and 011C this includes:
 
-- disjoint train/development/final complete records and rendered prompt bytes;
-- disjoint template IDs, payload IDs, and operand tuples across split roles;
-- the same declared grammar, alphabet, and length-support distribution across roles;
+- globally disjoint train/development/sealed-final payload IDs, complete records, and
+  rendered prompt bytes;
+- exact training `template_id` reuse on `operand_holdout`, with operand tuples absent
+  from training and every other evaluation axis;
+- training-operand-pool reuse on `template_holdout`, with both `template_family_id`
+  and exact `template_id` absent from training;
+- on `joint_holdout`, both template identities absent from training and the
+  template-only axis, and operand tuples absent from training and every other
+  evaluation axis;
+- mutually disjoint development and sealed-final held-out template sets, and
+  mutually disjoint new operand sets wherever operands are held out;
+- the same declared grammar, alphabet, and per-task-family length distribution
+  across roles;
 - no state, seed, split, answer, task-availability, or target marker in prompts;
 - no final-pack generation, loading, metric computation, or inspection before the
   selected configuration is frozen;
