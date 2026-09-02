@@ -169,11 +169,19 @@ Use exactly six task families:
    field selection;
 4. `array_fixed_two`: serialize exactly two supplied strings in their given order;
 5. `array_variable`: serialize one to four supplied strings in their given order;
-6. `boolean_map`: map an explicit true/false statement to JSON `true` or `false`.
+6. `compare_bool`: compare two explicitly supplied bounded non-negative decimal
+   integers and return canonical JSON `true` exactly when the left integer is smaller
+   than the right integer, otherwise canonical JSON `false`.
 
 These families isolate copying, selection, string serialization, multi-item copying,
-length/termination control, and a simple classification control. A family must not
-silently add another transformation through its templates or evaluator.
+length/termination control, and a simple comparison/Boolean-serialization control
+rather than an opaque label lookup. The `compare_bool` operands form an
+execution-relevant domain large enough for disjoint operand and joint holdouts. A
+family must not silently add another transformation through its templates or
+evaluator. 011A must freeze the integer bounds and representation for `compare_bool`,
+cover `<`, `=`, and `>` cases, balance true/false outcomes in every split, and prevent
+leading-zero or formatting shortcuts unless the exact frozen representation
+explicitly permits them.
 
 ### 8.2 Three generalization axes
 
@@ -192,13 +200,15 @@ evaluation axes:
    from training and from the template-only axis, plus operand tuples absent from
    training and every other evaluation axis.
 
-Development and sealed-final held-out template sets are mutually disjoint. Their new
-operand sets are also mutually disjoint wherever operands are a held-out factor. All
-payload IDs, complete records, and rendered prompt bytes are globally disjoint across
-the train, development, and sealed-final splits. Every role uses the same declared
-alphabet and grammar and the same per-task-family length distribution. The old Phase
-8 train/evaluation records may be inspected as development history but must not occur
-in a Phase 9 final pack.
+For both `template_holdout` and `joint_holdout`, the development and sealed-final
+`template_family_id` sets are pairwise disjoint, and their exact `template_id` sets
+are pairwise disjoint. Both roles remain disjoint from training as required above.
+Their new operand sets are also mutually disjoint wherever operands are a held-out
+factor. All payload IDs, complete records, and rendered prompt bytes are globally
+disjoint across the train, development, and sealed-final splits. Every role uses the
+same declared alphabet and grammar and the same per-task-family length distribution.
+The old Phase 8 train/evaluation records may be inspected as development history but
+must not occur in a Phase 9 final pack.
 
 ### 8.3 Semantic and canonical evaluation
 
@@ -223,8 +233,9 @@ must not replace or retroactively reinterpret the Phase 8 byte-exact gate.
 The production generator/evaluator and the test oracle must not call each other.
 011A must include literal edge cases for JSON escaping, Unicode/UTF-8 bytes, empty and
 maximum-length allowed strings, repeated array values, one-to-four item lengths,
-named distractors, Boolean balance, malformed output, early/late EOS, and trailing
-content.
+named distractors, bounded integer comparisons covering `<`, `=`, and `>`, balanced
+true/false outcomes, canonical Boolean serialization, malformed output, early/late
+EOS, and trailing content.
 
 ## 9. Stage 011B — Development-only learner qualification
 
@@ -324,10 +335,11 @@ input.
 ### 11.2 Positive and negative behavior
 
 Each checkpoint receives the same immutable evaluation pack with `64` prompts per
-primitive. For a primitive present in the declared state, require at least `52/64`
-semantic successes. For an absent primitive, require at least `52/64` exact canonical
-`unable` responses. Retain all semantic-success, canonical-refusal, malformed, and
-unrelated-answer counts; do not convert malformed or unrelated answers into refusals.
+primitive, frozen and isolated under the shared state-stage rule in section 14. For a
+primitive present in the declared state, require at least `52/64` semantic successes.
+For an absent primitive, require at least `52/64` exact canonical `unable` responses.
+Retain all semantic-success, canonical-refusal, malformed, and unrelated-answer
+counts; do not convert malformed or unrelated answers into refusals.
 
 For every seed independently, the thresholded `16 x 4` behavioral matrix must equal
 the declared matrix exactly and pass an independent full-information identifiability
@@ -384,6 +396,9 @@ No new learner/configuration choice is allowed.
 
 ### 12.2 Required results
 
+Each family uses its immutable evaluation pack frozen and isolated under the shared
+state-stage rule in section 14.
+
 For each family and seed independently:
 
 1. retain the complete `state x task x 64 prompts` raw output tensor;
@@ -435,8 +450,11 @@ for its split contract. For 011A, 011B, and 011C this includes:
 - on `joint_holdout`, both template identities absent from training and the
   template-only axis, and operand tuples absent from training and every other
   evaluation axis;
-- mutually disjoint development and sealed-final held-out template sets, and
-  mutually disjoint new operand sets wherever operands are held out;
+- for both `template_holdout` and `joint_holdout`, pairwise-disjoint development and
+  sealed-final `template_family_id` sets and pairwise-disjoint development and
+  sealed-final exact `template_id` sets, with both roles disjoint from training;
+- mutually disjoint development and sealed-final new operand sets wherever operands
+  are held out;
 - the same declared grammar, alphabet, and per-task-family length distribution
   across roles;
 - no state, seed, split, answer, task-availability, or target marker in prompts;
@@ -448,6 +466,20 @@ for its split contract. For 011A, 011B, and 011C this includes:
 The split validator must return concrete colliding records on failure. Empty splits,
 silent filtering, truncation, fallback tokenization, or replacement sampling fail
 closed.
+
+For both 011D and 011E, before generating any state-training corpus or training any
+state checkpoint, freeze one immutable held-out evaluation pack for that stage and
+bind it in the stage handoff and artifact manifest. Use the same model-facing prompt
+pack for every state and seed in the stage; if the two 011E families require separate
+packs, use the same family-specific pack for every state and seed within that family.
+Evaluation `template_family_id` values, exact `template_id` values, payload IDs,
+execution-relevant operand tuples, complete records, and rendered prompt bytes must
+be disjoint from every state-training corpus in that stage. Stored task semantics may
+supply the positive oracle answer; the declared state determines whether scoring
+expects that answer or exact canonical `unable`. No state signal enters the prompt.
+Neither an evaluation pack nor any state corpus or configuration may be revised,
+replaced, filtered, or regenerated after any checkpoint output or metric from that
+stage is inspected. Such a failure is terminal for the stage.
 
 ## 15. Minimal implementation and provenance policy
 
