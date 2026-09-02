@@ -1,6 +1,6 @@
 # Capability Certificate 项目研究目标与阶段成果回顾
 
-更新时间：2026-08-14
+更新时间：2026-09-02
 
 ## 1. 项目研究目标
 
@@ -14,7 +14,8 @@
 4. 根据先前回答动态选题能否降低评估成本；
 5. 存在失误、猜测和随机性时，能否进行可靠的概率推断；
 6. 抽象能力标签能否落到可执行语义，并支持能力组合；
-7. 什么样的声明状态族能产生固定 certificate 压缩，以及这种压缩和自适应压缩有何区别。
+7. 什么样的声明状态族能产生固定 certificate 压缩，以及这种压缩和自适应压缩有何区别；
+8. 这些结构能否从确定性模拟器迁移到训练得到的模型行为。
 
 这里的 certificate 有两种主要形式：
 
@@ -23,7 +24,10 @@
 
 在噪声环境中，certificate 不再意味着一次观测后的逻辑唯一性，而是指在给定响应模型和先验下达到目标后验置信度的观测过程。
 
-本项目目前是一个小规模、完全可枚举、人工定义结构的研究实验室。它研究的是能力测量方法的形式性质，还没有证明真实 LLM 的能力可以被这些状态空间准确表示，也没有开展神经模型训练或自动能力结构发现。
+本项目目前是一个小规模、完全可枚举、人工定义结构的研究实验室。Phase 8
+已经进行了受控 Toy LM 可行性训练，但没有通过进入正式 learned-behavior
+实验的门槛。项目仍未证明真实 LLM 的能力可以被这些状态空间准确表示，也
+没有开展 open-LLM 实验或自动能力结构发现。
 
 ## 2. 核心对象之间的关系
 
@@ -38,7 +42,7 @@
 
 ## 3. 阶段成果总览
 
-证据边界：Phase 2-4 已在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上正式重跑；Phase 5/6 已在 clean source repair commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 上正式重跑，并记录在 evidence commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`。合并后的 Phase 2-6 evidence package 冻结于 `8039dcfa88a1a6a1856b19c5301bd74e1616e76c`，并于 2026-08-13 通过 fresh-context `gpt-5.6-sol` 最终严格只读科学验收。Phase 7 formal evidence/report commit `e1c3a542cede8f873832149f0f205302e088a925` 于 2026-08-14 通过 fresh-context strict read-only final scientific review。
+证据边界：Phase 2-4 已在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上正式重跑；Phase 5/6 已在 clean source repair commit `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 上正式重跑，并记录在 evidence commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f`。合并后的 Phase 2-6 evidence package 冻结于 `8039dcfa88a1a6a1856b19c5301bd74e1616e76c`，并于 2026-08-13 通过 fresh-context `gpt-5.6-sol` 最终严格只读科学验收。Phase 7 formal evidence/report commit `e1c3a542cede8f873832149f0f205302e088a925` 于 2026-08-14 通过 fresh-context strict read-only final scientific review。Phase 8 于 2026-09-01 作为有效的 `FAILED`/stopped 里程碑通过最终独立审查，并以 commit `89c488bd8273f46f064672256293e5ed049089c0` 合并到 `main`。
 
 | 阶段 | 研究问题 | 阶段结果（含历史结果） | 结论边界 |
 | --- | --- | --- | --- |
@@ -49,6 +53,7 @@
 | Phase 5 | 噪声下能否可靠推断 | 建立稳定 Bayesian 推断和 fixed/adaptive noisy assessment；通过一致性 oracle | 尚不能据此声称噪声下 adaptive 普遍优于 fixed |
 | Phase 6 | 能力能否具有可执行和组合语义 | primitive、组合、held-out 组合均可确定执行；证书可转移到 primitive DSL world | 语义和组合规则仍由人工定义 |
 | Phase 7 | 何时存在固定 certificate 压缩 | 两个完整 block family 的固定 certificate 只需每个 block 一个代表任务；prefix family 的自适应平均深度低于固定规模 | 只适用于人工声明的小型确定性 block worlds；已通过 final scientific review |
+| Phase 8 | Toy LM 能否先通过基本序列转换门槛，再进入 learned-behavior certificate 实验 | 可行性训练完成，但仅 `11/24` 单元通过；无 selection，未进入正式 010D–010H | 有效负结果；不证明 learned-behavior bridge 成立，也不证明它不可能 |
 
 ## 4. Phase 1：Knowledge Space Core
 
@@ -183,7 +188,37 @@ matched controls 只是描述性参照，不是工程 acceptance gate。独立 b
 
 Phase 7 目前的证据状态是：formal artifacts 已生成，implementation review 已通过，fresh-context final scientific review 于 2026-08-14 给出 `ACCEPT`，未发现 correctness、protocol、provenance、统计口径或科学性过度声明 finding。
 
-## 11. 经过修订后的证据状态
+## 11. Phase 8：Toy Language Model Bridge
+
+Phase 8 试图先用一个独立、非科学的序列转换可行性门槛，确认 byte-level
+causal Transformer 能可靠处理 held-out copy、selection、Boolean 和 variable-
+length JSON 输出，再进入 16 个 state-specific checkpoints、composition 和
+behavioral certificate 实验。
+
+最终有效的 `feasibility_005` 使用 small/medium 两个 tied-embedding 模型、三个
+固定种子、每个 family 512 条训练记录、64 条评估记录和 1500 个训练 step。
+每个单元必须达到 `52/64` exact matches。其正式结果是：
+
+| Family | 通过单元 |
+| --- | ---: |
+| Hex Copy | 5/6 |
+| Named-value JSON | 0/6 |
+| Boolean JSON | 6/6 |
+| Array JSON | 0/6 |
+| 合计 | 11/24 |
+
+因此 `feasibility_005` 正确发布 `FAILED`，没有 selection，没有
+`feasibility_006`，也没有 Task 010D 或后续正式实验权限。D3 read-only
+postmortem 已 operationally `DONE`，但其 artifact class 是
+`non_evidence_feasibility_postmortem`；它不能改变 verdict、支持 weight-tying
+因果声明或授权 010D。
+
+Phase 8 的正式科学结论是：冻结的 learner/configuration 没有通过正式实验的
+基本序列转换前提。它不证明 learned-behavior certificate 不可能。Phase 8
+最终 package 于 2026-09-01 通过独立科学审查，被接受为有效的失败/停止里程碑，
+并以 commit `89c488bd8273f46f064672256293e5ed049089c0` 合并到 `main`。
+
+## 12. 经过修订后的证据状态
 
 Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非法状态被静默过滤、adaptive tree validator 不完整、平均和最坏成本混淆、Bayesian history 重复计数、DSL 只返回 membership 而不执行具体语义，以及实验脚本缺少可失败的 expected-output oracle。
 
@@ -201,11 +236,11 @@ Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非�
 - latest formal Phase 5 artifact：result `b554bafa863ace1dd4729ab3b0c435b3dfd0d0e28a3a8b5c9efe43c4b2457d2a`，manifest `dee175d2eee039efece909d6e78d5c84c3bb86b63137a4197a6872e4404c20e2`；
 - latest formal Phase 6 artifact：result `252d8043ea73a087b77be919bce91bc91e0b0cfaa40ecaca5887b69006abc5e0`，manifest `814b3cc1320090677fe6d6feb73b5fe3804cb001ff96c445e238a1b4b14b487d`；
 - final milestone scientific review：fresh-context `gpt-5.6-sol` strict read-only `ACCEPT`；12 项 acceptance criteria 全部通过，未发现任何未解决的 correctness、protocol、provenance、统计口径或科学性过度声明 finding；
-- current evidence gate：`ACCEPTED`。
+- Phase 2-6 evidence gate：`ACCEPTED`。
 
 独立 reviewer 没有自行重跑测试或实验，其结论基于冻结源码、diff、manifest、artifact、JSON 结构与聚合一致性以及已记录验证的只读检查。上一轮 clean evidence package 的 artifact hash 全部匹配，manifest 均绑定当时的 source commit；拒绝原因是报告证据状态不一致、DSL 条件任务声明与执行不一致、DSL 输入依赖 Python 隐式转换，以及公开概率策略接受 boolean attempts。上述问题已在 `66c0efade42d85c2ca9c5eca1d3cdb4fc19e3d40` 中修复并通过 source repair review。Phase 5/6 evidence package 的数值与 provenance 检查通过并已提交；随后 Phase 2-4 也在 clean commit `1bfc6ced88cf3397f240c3e79d1996955e9d589f` 上重跑。最终 reviewer 独立复核了十个当前 result/manifest SHA-256，并确认实现/协议一致、统计口径正确、历史无效证据已隔离且报告没有超出实验边界的科学声明。更早的 source-snapshot 证据包仅保留为历史记录。hash 证明字节身份和来源绑定，不代替数学、实现和实验协议审查。
 
-## 12. 迄今为止的综合研究结论
+## 13. 迄今为止的综合研究结论
 
 1. capability certificate 可以在有限、显式 knowledge space 中被严格定义、求解和验证。
 2. full-information identifiability 是 certificate 存在的前提，必须在求解前独立检查。
@@ -214,17 +249,23 @@ Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非�
 5. 噪声把“逻辑上唯一识别”转化为“基于模型和先验的后验推断”；正确的增量更新、停止规则和一致性 oracle 是科学结论成立的必要条件。
 6. capability metadata 只有在对应当前世界实际可执行规则时才有行为含义。可执行 DSL 比单纯 membership label 提供了更强的验证边界。
 7. Phase 7 进一步说明，固定任务压缩需要响应列冗余等更具体的状态总体结构；先修结构本身不足以保证 fixed certificate 变小。
-8. 目前最强的结果是受控小世界中的方法可行性和语义一致性，不是对真实 LLM 能力测量有效性的经验结论。
+8. Phase 8 表明，learned-behavior bridge 不能把 learner 可行性、状态实现、composition 和 certificate recovery 当成一个未分层的前提；冻结的首次 Toy LM 配置未通过可行性门槛。
+9. 目前最强的结果仍是受控小世界中的方法可行性和语义一致性，不是对真实 LLM 能力测量有效性的经验结论。
 
-## 13. 仍待回答的研究问题
+## 14. 仍待回答的研究问题
 
 - 如何把 exact fixed solver 从穷举扩展到更大任务空间，同时保留可验证的最优性或近似界；
 - 如何在统一成本预算下比较 noisy fixed、adaptive 和 repeated-probe 方法，并报告置信区间与统计功效；
 - 如何处理非均匀状态先验、任务成本不同和噪声参数未知的情况；
 - 如何从数据中学习或检验 capability graph，而不是完全人工给定；
-- 如何把 DSL task 映射到真实模型输入输出，并验证 latent capability state 是否具有跨任务预测效度。
+- 如何把 elementary transformation learnability、corpus-defined state realization
+  和 certificate preservation 分开验证，再决定是否研究 composition；
+- learned behavioral state 是否能保留 Phase 7 已知的 block-world certificate
+  结构；
+- 如何把经过上述分层验证的 DSL task 进一步映射到真实模型输入输出，并验证
+  latent capability state 是否具有跨任务预测效度。
 
-## 14. 主要证据文档
+## 15. 主要证据文档
 
 - [Phase 1 report](phase1_report.md)
 - [Phase 2 report](phase2_report.md)
@@ -234,3 +275,5 @@ Phase 2-6 曾发现并修复多项会影响科学结论的问题，包括：非�
 - [Phase 6 report](phase6_report.md)
 - [Phase 7 report](phase7_report.md)
 - [Phase 2-6 correctness repair and revalidation](phase2_6_revalidation_report.md)
+- [Phase 8 master handoff](Capability_Certificate_Task_Handoff_010_Phase8_Toy_Language_Model_Bridge.md)
+- [Phase 8 current status and evidence hashes](phase8/README.md)
