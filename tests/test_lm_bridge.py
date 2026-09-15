@@ -2577,6 +2577,39 @@ def test_diagnostic_array_training_plan_is_exactly_three_small_3000_runs() -> No
         sf.validate_diagnostic_array_training_plan([{**plan[0], "steps": 1500}, *plan[1:]])
 
 
+def test_diagnostic_handoff_reads_moved_local_copy_and_preserves_historical_git_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sf = importlib.import_module("scripts.phase8_sequence_feasibility")
+    source_commit = sf.DIAGNOSTIC_ACCEPTED_PROTOCOL_COMMIT
+    current_blob = sf.git_output(["git", "rev-parse", f"{source_commit}:{sf.DIAGNOSTIC_HANDOFF_PATH}"])
+    local_handoff = REPO_ROOT / "docs" / sf.DIAGNOSTIC_HANDOFF_PATH
+    value = {
+        "path": sf.DIAGNOSTIC_HANDOFF_PATH,
+        "sha256": sf.file_sha256(local_handoff),
+        "accepted_protocol_commit": sf.DIAGNOSTIC_ACCEPTED_PROTOCOL_COMMIT,
+        "accepted_protocol_blob": sf.DIAGNOSTIC_HANDOFF_BLOB,
+        "current_source_blob": current_blob,
+    }
+
+    sf.validate_diagnostic_handoff(value, source_commit=source_commit)
+
+    copied_handoff = tmp_path / "docs" / sf.DIAGNOSTIC_HANDOFF_PATH
+    copied_handoff.parent.mkdir(parents=True)
+    copied_handoff.write_bytes(local_handoff.read_bytes())
+    monkeypatch.setattr(sf, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(
+        sf,
+        "git_output",
+        lambda args: subprocess.run(args, check=True, text=True, stdout=subprocess.PIPE, cwd=REPO_ROOT).stdout.strip(),
+    )
+    sf.validate_diagnostic_handoff(value, source_commit=source_commit)
+
+    copied_handoff.write_bytes(copied_handoff.read_bytes() + b"altered")
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        sf.validate_diagnostic_handoff(value, source_commit=source_commit)
+
+
 
 
 def test_diagnostic_frozen_blobs_record_hashes_and_reused_bindings(monkeypatch: pytest.MonkeyPatch) -> None:

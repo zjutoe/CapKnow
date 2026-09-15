@@ -41,7 +41,7 @@ MANIFEST_FILENAME = "manifest.json"
 COMMAND = "PYTHONPATH=. python scripts/phase7_structural_compressibility.py"
 BASELINE_COMMIT = "02380501e5def5d9f624578a93bc0580de1e030a"
 IMPLEMENTATION_START_COMMIT = "a727c5e9dd8619e0d8135b8530af691d5a9e6694"
-HANDOFF_PATH = "Capability_Certificate_Task_Handoff_009_Phase7_Structural_Compressibility.md"
+HANDOFF_PATH = "docs/Capability_Certificate_Task_Handoff_009_Phase7_Structural_Compressibility.md"
 GRID = ((2, 2), (3, 2), (4, 2), (5, 2), (6, 2), (2, 3), (3, 3), (4, 3))
 MATCHED_CONTROL_SEEDS = tuple(range(20))
 ABS_TOL = 1e-12

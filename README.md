@@ -79,7 +79,7 @@ Phase 8 的 `feasibility_005` 在 small/medium 模型、三个固定种子和四
 
 ## Phase 9：分解式 learned-behavior 提案
 
-[Phase 9 handoff](Capability_Certificate_Task_Handoff_011_Phase9_Decomposed_Learned_Behavior_Bridge.md) 将下一步拆成三个依次设门的研究问题：
+[Phase 9 handoff](docs/Capability_Certificate_Task_Handoff_011_Phase9_Decomposed_Learned_Behavior_Bridge.md) 将下一步拆成三个依次设门的研究问题：
 
 1. learner 能否泛化 elementary transformations；
 2. 仅改变训练语料，能否实现声明的 capability states；
@@ -102,10 +102,11 @@ capability_certificate_lab/
 examples/            # 最小可运行示例
 scripts/             # 重验证与正式分析入口
 tests/               # 单元与语义测试
-phase8/              # Phase 8 handoff、状态和证据索引
+docs/                # 研究计划、handoff、报告与文档索引
+  phase8/            # Phase 8 handoff、状态和证据索引
 ```
 
-根目录中的研究计划、阶段报告和 handoff 记录研究问题、证据边界与 provenance。`artifacts/` 中的正式结果必须结合对应 manifest、源码 commit 和报告解释。
+研究计划、阶段报告和 handoff 集中存放在 `docs/`，入口见[文档索引](docs/README.md)。`artifacts/` 中的正式结果必须结合对应 manifest、源码 commit 和报告解释。
 
 ## 快速开始
 
@@ -153,13 +154,14 @@ PYTHONPATH=. python -m pytest -q
 
 ## 证据与进一步阅读
 
-- [原始研究计划](Capability_Knowledge_Space_Certificate_Laboratory_Research_Plan.md)
-- [研究进展与阶段成果总览](Capability_Certificate_Research_Progress_Summary.md)
-- [Phase 2–6 correctness repair 与重验证报告](phase2_6_revalidation_report.md)
-- [Phase 7 structural compressibility 报告](phase7_report.md)
-- [Phase 8 当前状态与证据索引](phase8/README.md)
-- [Phase 9 decomposed learned-behavior 协议提案](Capability_Certificate_Task_Handoff_011_Phase9_Decomposed_Learned_Behavior_Bridge.md)
-- [Phase 1](phase1_report.md)、[Phase 2](phase2_report.md)、[Phase 3](phase3_report.md)、[Phase 4](phase4_report.md)、[Phase 5](phase5_report.md)、[Phase 6](phase6_report.md) 历史阶段报告
+- [文档总索引](docs/README.md)
+- [原始研究计划](docs/Capability_Knowledge_Space_Certificate_Laboratory_Research_Plan.md)
+- [研究进展与阶段成果总览](docs/Capability_Certificate_Research_Progress_Summary.md)
+- [Phase 2–6 correctness repair 与重验证报告](docs/phase2_6_revalidation_report.md)
+- [Phase 7 structural compressibility 报告](docs/phase7_report.md)
+- [Phase 8 当前状态与证据索引](docs/phase8/README.md)
+- [Phase 9 decomposed learned-behavior 协议提案](docs/Capability_Certificate_Task_Handoff_011_Phase9_Decomposed_Learned_Behavior_Bridge.md)
+- [Phase 1](docs/phase1_report.md)、[Phase 2](docs/phase2_report.md)、[Phase 3](docs/phase3_report.md)、[Phase 4](docs/phase4_report.md)、[Phase 5](docs/phase5_report.md)、[Phase 6](docs/phase6_report.md) 历史阶段报告
 
 解释结果时应以重验证报告和当前进展总结为准；较早阶段报告保留历史价值，但其中已被修正或失效的结果不能替代当前 evidence package。
 
