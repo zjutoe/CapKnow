@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_DIR = ROOT / "artifacts" / "phase2_6_revalidation"
 BASELINE_COMMIT = "1648c8f201936e56f7eb0544b39c45cf0f431c9b"
 HANDOFFS = (
-    "Capability_Certificate_Task_Handoff_007_Correctness_Repair_and_Revalidation.md",
-    "Capability_Certificate_Task_Handoff_008_Second_Review_Repair.md",
+    "docs/Capability_Certificate_Task_Handoff_007_Correctness_Repair_and_Revalidation.md",
+    "docs/Capability_Certificate_Task_Handoff_008_Second_Review_Repair.md",
 )
 
 

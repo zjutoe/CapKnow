@@ -113,6 +113,7 @@ DIAGNOSTIC_MODEL_STATE_FINGERPRINT_SCHEMA = "phase8_model_state_fingerprint_v1"
 DIAGNOSTIC_BATCH_SCHEDULE_SCHEMA = "phase8_batch_schedule_digest_v1"
 DIAGNOSTIC_TRAINING_TRACE_SCHEMA = "phase8_training_trace_digest_v1"
 DIAGNOSTIC_INPUT_SOURCE_COMMIT = "3cb75ad550c4357562c0d4d9a9b098bfb2cf66ea"
+# Historical manifest and Git commit:path binding; the current worktree copy lives under docs/.
 DIAGNOSTIC_HANDOFF_PATH = "phase8/Task_010C_D1_Feasibility_Failure_Diagnostic.md"
 DIAGNOSTIC_ACCEPTED_PROTOCOL_COMMIT = "f2aa335256201672767eac1840e135672b43e046"
 DIAGNOSTIC_HANDOFF_BLOB = "b5a45e3a33baf53d4de9c809bc9ab2c59f400e37"
@@ -298,9 +299,10 @@ POSTMORTEM_ARTIFACT_CLASS = "non_evidence_feasibility_postmortem"
 POSTMORTEM_REQUIRED_INPUT_ROOT = FEASIBILITY_REQUIRED_ROOT
 POSTMORTEM_REQUIRED_OUTPUT_ROOT = "artifacts/phase8_toy_lm_bridge/feasibility_postmortem_001"
 POSTMORTEM_ACCEPTED_PROPOSAL_COMMIT = "06ee71d958eb1c4cb446ede3d120e99eb64bba97"
+# Historical accepted proposal commit:path binding.
 POSTMORTEM_PROPOSAL_PATH = "phase8/Task_010C_D3_Feasibility_005_Postmortem_Proposal.md"
 POSTMORTEM_PROPOSAL_BLOB = "5ea32f67d078408a6764adbb2d66518f713245d7"
-POSTMORTEM_VERIFIER_PATH = "phase8/Task_010C_D3_Postmortem_Verifier.py.txt"
+POSTMORTEM_VERIFIER_PATH = "docs/phase8/Task_010C_D3_Postmortem_Verifier.py.txt"
 POSTMORTEM_VERIFIER_BLOB = "8d1a305f9a28d995f53b26c22b24241da1f0d5fe"
 POSTMORTEM_VERIFIER_SHA256 = "55c1e76086da332c9b7827980912f6ffe2bc1f38486c410be10c71e647b4e522"
 POSTMORTEM_VERIFIER_BYTE_COUNT = 39455
@@ -2319,7 +2321,7 @@ def validate_diagnostic_handoff(value: object, *, source_commit: str) -> None:
     current_blob = git_output(["git", "rev-parse", f"{source_commit}:{DIAGNOSTIC_HANDOFF_PATH}"])
     if value.get("current_source_blob") != current_blob:
         raise ValueError("Diagnostic handoff current source blob mismatch.")
-    handoff_path = REPO_ROOT / DIAGNOSTIC_HANDOFF_PATH
+    handoff_path = REPO_ROOT / "docs" / DIAGNOSTIC_HANDOFF_PATH
     if not handoff_path.is_file() or value.get("sha256") != file_sha256(handoff_path):
         raise ValueError("Diagnostic handoff checksum mismatch.")
 
